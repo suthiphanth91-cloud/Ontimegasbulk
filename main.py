@@ -49,7 +49,8 @@ PLAN_CARNO   = 15  # P  เบอร์รถ         ← จับคู่ก�
 PLAN_PLATE   = 17  # R  ทะเบียน
 PLAN_GPS_ST  = 33  # AH สถานะ GPS
 
-# Sheet 3: ข้อมูลปลายทาง — พิกัดของแต่ละจุดส่ง
+# Sheet 3: ข้อมูลปลายทาง — พิกัดของแต่ละจุดส่ง (อยู่ในไฟล์เดียวกับแผนงาน)
+DEST_ID      = PLAN_ID
 DEST_TAB     = "ข้อมูลปลายทาง"
 DEST_NAME    = 0   # A  ชื่อปลายทาง (ตรงกับ PLAN_DEST)
 DEST_COORD   = 7   # H  พิกัด "lat,lng"  ← col H (แก้จาก G)
@@ -155,10 +156,15 @@ def _cell(row: list, idx: int) -> str:
     return str(row[idx]).strip() if idx < len(row) else ""
 
 
-def _extract_car_no(ptgl_license: str) -> str:
-    """'No.465(63-3530)' → '465'  ใช้จับคู่กับ เบอร์รถ ในแผนงาน"""
-    m = re.search(r"No\.?0*(\d+)", ptgl_license, re.IGNORECASE)
-    return m.group(1) if m else re.sub(r"\D", "", ptgl_license)
+def _extract_car_no(raw: str) -> str:
+    """
+    ดึงเลขรถชุดแรกออกมาเป็นคีย์จับคู่ ใช้ได้ทั้ง 2 ชีต
+      'No.465(63-3530)' → '465'
+      'PTL.403'         → '403'
+      '0465'            → '465'
+    """
+    m = re.search(r"\d+", raw or "")
+    return m.group(0).lstrip("0") or m.group(0) if m else ""
 
 
 def _parse_coords(raw: str) -> Optional[tuple[float, float]]:
@@ -173,11 +179,18 @@ def _parse_coords(raw: str) -> Optional[tuple[float, float]]:
 
 
 def _parse_date(raw: str) -> Optional[str]:
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+    """รองรับ 15/08/2026, 15-08-2026, 15.08.2026, 2026-08-15 และปี พ.ศ. (2569)"""
+    if not raw:
+        return None
+    token = raw.strip().split(" ")[0].replace(".", "/").replace("-", "/")
+    for fmt in ("%d/%m/%Y", "%Y/%m/%d", "%m/%d/%Y", "%d/%m/%y"):
         try:
-            return datetime.strptime(raw.strip().split(" ")[0], fmt.split(" ")[0]).strftime("%Y-%m-%d")
+            d = datetime.strptime(token, fmt)
         except ValueError:
             continue
+        if d.year > 2400:                       # ปี พ.ศ. → ค.ศ.
+            d = d.replace(year=d.year - 543)
+        return d.strftime("%Y-%m-%d")
     return None
 
 
@@ -287,7 +300,7 @@ def fetch_destinations() -> dict[str, tuple[float, float]]:
     คืน dict: ชื่อปลายทาง → (lat, lng)
     เช่น {"สถานีบางนา": (13.661, 100.609)}
     """
-    rows   = _fetch_sheet(PLAN_ID, DEST_TAB)
+    rows   = _fetch_sheet(DEST_ID, DEST_TAB)
     result: dict[str, tuple[float, float]] = {}
     for row in rows[1:]:
         name  = _cell(row, DEST_NAME)
@@ -305,10 +318,10 @@ def fetch_trips(target_date: str) -> list[dict]:
         if _parse_date(_cell(row, PLAN_DATE)) != target_date:
             continue
         car_no = _cell(row, PLAN_CARNO)
-        car_no = car_no.lstrip("0") or car_no   # ตัด 0 นำหน้า เช่น "0465" → "465"
         trips.append({
             "id":         i,
-            "car_no":     car_no,
+            "car_no":     car_no,                      # แสดงผลตามที่กรอกจริง
+            "car_key":    _extract_car_no(car_no),     # ใช้จับคู่กับ PTGL
             "plate":      _cell(row, PLAN_PLATE),
             "trip_no":    _cell(row, PLAN_TRIP),
             "drop":       _cell(row, PLAN_DROP),
@@ -343,7 +356,7 @@ def get_trips(
     results: list[TripOut] = []
     for t in trips:
         sched_mins  = _to_mins(t["sched_time"])
-        pos         = ptgl_map.get(t["car_no"])
+        pos         = ptgl_map.get(t["car_key"])
         dest_coord  = dest_map.get(t["customer"])
 
         travel_mins   = None
@@ -468,7 +481,7 @@ def debug():
     for label, sid, tab in (
         ("PTGL",   PTGL_ID, PTGL_TAB),
         ("PLAN",   PLAN_ID, PLAN_TAB),
-        ("DEST",   PLAN_ID, DEST_TAB),
+        ("DEST",   DEST_ID, DEST_TAB),
     ):
         try:
             gc = gspread.authorize(creds)
@@ -482,6 +495,55 @@ def debug():
             out[f"{label}_trace"] = traceback.format_exc().splitlines()[-12:]
 
     return out
+
+
+@app.get("/api/peek")
+def peek():
+    """ดูข้อมูลดิบ 5 แถวแรกของแผนงาน เพื่อเช็คว่าคอลัมน์/วันที่ตรงไหม"""
+    rows = _fetch_sheet(PLAN_ID, PLAN_TAB)
+    return {
+        "header": rows[0] if rows else [],
+        "sample": [
+            {
+                "row":        i,
+                "date_raw":   _cell(r, PLAN_DATE),
+                "date_parsed": _parse_date(_cell(r, PLAN_DATE)),
+                "sched":      _cell(r, PLAN_SCHED),
+                "customer":   _cell(r, PLAN_DEST),
+                "car_no":     _cell(r, PLAN_CARNO),
+            }
+            for i, r in enumerate(rows[1:6], start=2)
+        ],
+        "all_dates_found": sorted({
+            _parse_date(_cell(r, PLAN_DATE)) or _cell(r, PLAN_DATE)
+            for r in rows[1:] if _cell(r, PLAN_DATE)
+        })[:30],
+    }
+
+
+@app.get("/api/match")
+def match(date_str: str = Query(None, alias="date")):
+    """เช็คว่าเบอร์รถ / ชื่อปลายทาง จับคู่กันได้กี่รายการ"""
+    target   = date_str or _today_thai()
+    ptgl_map = fetch_ptgl()
+    dest_map = fetch_destinations()
+    trips    = fetch_trips(target)
+
+    car_hit  = [t["car_no"]   for t in trips if t["car_key"] in ptgl_map]
+    car_miss = [t["car_no"]   for t in trips if t["car_key"] not in ptgl_map]
+    dst_hit  = [t["customer"] for t in trips if t["customer"] in dest_map]
+    dst_miss = [t["customer"] for t in trips if t["customer"] not in dest_map]
+
+    return {
+        "date":            target,
+        "trips":           len(trips),
+        "car_matched":     len(car_hit),
+        "car_unmatched":   sorted(set(car_miss))[:20],
+        "dest_matched":    len(dst_hit),
+        "dest_unmatched":  sorted(set(dst_miss))[:20],
+        "ptgl_keys_sample":  sorted(ptgl_map.keys())[:20],
+        "dest_names_sample": sorted(dest_map.keys())[:20],
+    }
 
 
 # Vercel entry point
