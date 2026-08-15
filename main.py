@@ -35,7 +35,7 @@ PTGL_LNG   = 5   # F  Longitude
 PTGL_LOC   = 12  # M  LocalLocation (ที่อยู่ปัจจุบัน)
 
 # Sheet 2: แผนงาน Gasbulk — ตารางทริปประจำวัน
-PLAN_ID      = "1bwBmxGy1mlnAEIUm5ZNNV71tud3NCyPZlHesIwP4tUs"
+PLAN_ID      = "1Bl2n1FPPKDIa3FMFpPEyrlzuE296PB0rjPzZtfnJe_U"
 PLAN_TAB     = "แผนงาน Gasbulk"
 PLAN_DATE    = 2   # C  วันที่
 PLAN_SCHED   = 6   # G  เวลากำหนดส่ง (HH:MM)
