@@ -15,7 +15,6 @@ import hmac
 import json
 import os
 import re
-import secrets
 import traceback
 from datetime import datetime, timedelta
 from math import atan2, cos, radians, sin, sqrt
@@ -943,8 +942,6 @@ def login_page(error: str = ""):
 def do_login(password: str = Form("")):
     pw = _app_password()
     if not pw or not hmac.compare_digest(password, pw):
-        # หน่วงเล็กน้อยกันการเดารหัสรัวๆ
-        secrets.token_bytes(8)
         return RedirectResponse("/login?error=1", status_code=303)
 
     resp = RedirectResponse("/", status_code=303)
