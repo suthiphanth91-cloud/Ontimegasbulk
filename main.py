@@ -40,7 +40,8 @@ PTGL_LOC   = 12  # M  LocalLocation (ที่อยู่ปัจจุบั�
 PLAN_ID      = "1Bl2n1FPPKDIa3FMFpPEyrlzuE296PB0rjPzZtfnJe_U"
 PLAN_TAB     = "แผนงาน Gasbulk"
 PLAN_DATE    = 2   # C  วันที่
-PLAN_SCHED   = 6   # G  เวลากำหนดส่ง (HH:MM)
+PLAN_DUE     = 5   # F  วันที่ส่งมอบ  ← ใช้คู่กับ G เป็นกำหนดจริง (อาจข้ามวันจาก C)
+PLAN_SCHED   = 6   # G  เวลาส่งมอบ (HH:MM)
 PLAN_TRIP    = 4   # E  เที่ยววิ่ง
 PLAN_INVOICE = 7   # H  เลขที่ใบกำกับ
 PLAN_VOLUME  = 9   # J  ปริมาณ
@@ -49,7 +50,11 @@ PLAN_DEST    = 12  # M  ลูกค้าปลายทาง  ← จับ�
 PLAN_DROP    = 13  # N  Drop
 PLAN_VTYPE   = 16  # Q  ประเภทรถ (08 Tons / 10 Tons / Trailer)
 PLAN_CARNO   = 15  # P  เบอร์รถ         ← จับคู่กับ PTGL LicenseNO
-PLAN_PLATE   = 17  # R  ทะเบียน
+PLAN_PLATE   = 17  # R  ทะเบียนรถ
+PLAN_DRIVER  = 18  # S  พขร.1
+PLAN_DRIVER2 = 19  # T  พขร.2
+PLAN_PHONE   = 20  # U  เบอร์โทร.1  ← ใช้ทำปุ่มโทร
+PLAN_PHONE2  = 21  # V  เบอร์โทร.2
 # แผน (P) — เวลาที่ตั้งไว้ล่วงหน้า รูปแบบ "15/08/2026, 05:30"
 PLAN_P_OUT   = 23  # X  เวลาออกจากฟรีโอ (P)
 PLAN_P_LOAD  = 24  # Y  เวลาเข้าโหลด (P)
@@ -157,6 +162,8 @@ class TripOut(BaseModel):
     invoice_no:   str
     sched_time:   str           # เวลากำหนด HH:MM
     gps_status:   str           # สถานะจาก Sheet (คอลัมน์ AH)
+    driver:       str = ""      # S  ชื่อ พขร
+    phone:        str = ""      # U  เบอร์โทร พขร
     # เวลาจริงจากชีต (คอลัมน์ AB–AG) — ว่างแปลว่ายังไม่ถึงขั้นนั้น
     yard_time:    Optional[str]   = None   # AB เข้าลานจอด
     load_out:     Optional[str]   = None   # AD ออกจากโหลด
@@ -285,6 +292,30 @@ def _cell_time(raw: str) -> Optional[str]:
     """'15/8/2026, 6:00:44' → '06:00'   ว่าง/ไม่ใช่เวลา → None"""
     m = re.search(r"(\d{1,2}):(\d{2})", raw or "")
     return f"{int(m.group(1)):02d}:{m.group(2)}" if m else None
+
+
+def _cell_dt(raw: str) -> Optional[datetime]:
+    """'15/8/2026, 6:00:44' → datetime(2026,8,15,6,0)  (รองรับปี พ.ศ.)"""
+    m = re.search(r"(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{4})\D+(\d{1,2}):(\d{2})", raw or "")
+    if not m:
+        return None
+    d, mo, y, h, mi = (int(m.group(i)) for i in (1, 2, 3, 4, 5))
+    if y > 2400:
+        y -= 543
+    try:
+        return datetime(y, mo, d, h, mi)
+    except ValueError:
+        return None
+
+
+def _sched_dt(due_date: Optional[str], hhmm: str) -> Optional[datetime]:
+    """รวม 'วันที่ส่งมอบ' (F) กับ 'เวลาส่งมอบ' (G) เป็นกำหนดจริง"""
+    if not due_date or not hhmm:
+        return None
+    try:
+        return datetime.strptime(f"{due_date} {hhmm[:5]}", "%Y-%m-%d %H:%M")
+    except ValueError:
+        return None
 
 
 def _to_mins(t: str) -> Optional[int]:
@@ -478,6 +509,10 @@ def fetch_trips(target_date: str) -> list[dict]:
             "call_time":  _cell_time(_cell(row, PLAN_P_CALL)),     # Z  ถึงเวลาโทรตาม
             "load_plan":  _cell_time(_cell(row, PLAN_P_LOAD)),     # Y  เวลาเข้าโหลด (แผน)
             "vtype":      _cell(row, PLAN_VTYPE),                  # ประเภทรถ
+            "driver":     _cell(row, PLAN_DRIVER) or _cell(row, PLAN_DRIVER2),
+            "phone":      _cell(row, PLAN_PHONE)  or _cell(row, PLAN_PHONE2),
+            "due_date":   _parse_date(_cell(row, PLAN_DUE)) or target_date,   # F
+            "arrive_dt":  _cell_dt(_cell(row, PLAN_ARRIVE)),       # AF พร้อมวันที่
             "yard_time":  _cell_time(_cell(row, PLAN_YARD)),       # AB
             "load_out":   _cell_time(_cell(row, PLAN_LOAD_OUT)),   # AD
             "depart":     _cell_time(_cell(row, PLAN_DEPART)),     # AE ออกคลังจริง
@@ -522,9 +557,18 @@ def get_trips(
     api_budget = set(pending_ids[:MAX_ROUTE_CALLS])
 
     results: list[TripOut] = []
+    now_dt = _thai_now().replace(second=0, microsecond=0)
+
     for t in trips:
         use_api = t["id"] in api_budget
+        sched_dt    = _sched_dt(t["due_date"], t["sched_time"])
         sched_mins  = _to_mins(t["sched_time"])
+
+        def eta_of(mins: int) -> tuple[str, Optional[int]]:
+            """นาทีเดินทาง → (เวลาถึง 'HH:MM', ช้ากี่นาทีเทียบกำหนดจริง)"""
+            e = now_dt + timedelta(minutes=mins)
+            d = int((e - sched_dt).total_seconds() // 60) if sched_dt else None
+            return e.strftime("%H:%M"), d
         pos         = ptgl_map.get(t["car_key"])
         dest_coord  = dest_map.get(t["customer"])
 
@@ -553,9 +597,8 @@ def get_trips(
             # ─ มีเวลาเข้าปลายทางจริง → วัดช้า/เร็วจากของจริง ไม่ใช่ประมาณการ ─
             status     = "arrived"
             actual     = True
-            arr_mins   = _to_mins(t["arrive"])
-            if arr_mins is not None and sched_mins is not None:
-                diff_min = arr_mins - sched_mins
+            if t["arrive_dt"] is not None and sched_dt is not None:
+                diff_min = int((t["arrive_dt"] - sched_dt).total_seconds() // 60)
                 if diff_min > 15:
                     prediction = f"ถึง {t['arrive']} — ช้ากว่ากำหนด {diff_min} นาที"
                 elif diff_min < -10:
@@ -583,13 +626,11 @@ def get_trips(
             to_dest  = _get_travel_minutes(depot[0], depot[1],
                                            dest_coord[0], dest_coord[1], use_api)
 
-            if to_depot is not None and to_dest is not None and sched_mins is not None:
+            if to_depot is not None and to_dest is not None and sched_dt is not None:
                 yard_m, load_m = _depot_minutes(t["source"], _vehicle_type(t["vtype"]))
                 travel_mins  = to_depot + yard_m + load_m + to_dest
-                eta_total    = _now_mins() + travel_mins
-                eta_time_str = _mins_to_hhmm(eta_total)
-                diff_min     = eta_total - sched_mins
-                depot_eta    = _mins_to_hhmm(_now_mins() + to_depot)
+                eta_time_str, diff_min = eta_of(travel_mins)
+                depot_eta    = eta_of(to_depot)[0]
                 route        = (f"ถึงคลัง {t['source']} ~{depot_eta} "
                                 f"(ลานจอด {yard_m} + โหลด {load_m} น.) "
                                 f"แล้ววิ่งต่ออีก {to_dest} น.")
@@ -618,11 +659,9 @@ def get_trips(
                 yard_m, load_m = _depot_minutes(t["source"], _vehicle_type(t["vtype"]))
                 travel += load_m if t["yard_time"] else yard_m + load_m
 
-            if travel is not None and sched_mins is not None:
+            if travel is not None and sched_dt is not None:
                 travel_mins  = travel
-                eta_total    = _now_mins() + travel
-                eta_time_str = _mins_to_hhmm(eta_total)
-                diff_min     = eta_total - sched_mins
+                eta_time_str, diff_min = eta_of(travel)
 
                 if diff_min < -10:
                     status     = "early"
@@ -665,6 +704,8 @@ def get_trips(
             invoice_no   = t["invoice_no"],
             sched_time   = t["sched_time"],
             gps_status   = t["status_man"] or t["gps_status"],
+            driver       = t["driver"],
+            phone        = t["phone"],
             yard_time    = t["yard_time"],
             load_out     = t["load_out"],
             depart_time  = t["depart"],
@@ -784,6 +825,27 @@ def peekdest():
     }
 
 
+@app.get("/api/tab")
+def peek_tab(
+    sheet: str = Query("plan", description="plan | ptgl"),
+    tab:   str = Query(..., description="ชื่อแท็บ"),
+    rows:  int = Query(3, ge=1, le=10),
+):
+    """ส่องหัวตาราง+ตัวอย่างข้อมูลของแท็บใดก็ได้ (ใช้หาว่าคอลัมน์ไหนเก็บอะไร)"""
+    sid  = PTGL_ID if sheet == "ptgl" else PLAN_ID
+    data = _fetch_sheet(sid, tab)
+    def label(r):
+        out = {}
+        for i, v in enumerate(r[:26]):
+            col = chr(65 + i) if i < 26 else "A" + chr(65 + i - 26)
+            if str(v).strip():
+                out[col] = v
+        return out
+    return {"tab": tab, "total_rows": len(data),
+            "header": label(data[0]) if data else {},
+            "sample": [label(r) for r in data[1:1 + rows]]}
+
+
 @app.get("/api/match")
 def match(date_str: str = Query(None, alias="date")):
     """เช็คว่าเบอร์รถ / ชื่อปลายทาง จับคู่กันได้กี่รายการ"""
@@ -880,6 +942,13 @@ DASHBOARD_HTML = """<!doctype html>
   .note{color:var(--mut);font-size:13px;margin:10px 2px}
   .empty{padding:48px;text-align:center;color:var(--mut)}
   .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);margin-right:6px}
+  .call{display:inline-block;margin-top:3px;padding:5px 11px;border-radius:8px;
+        background:var(--ok-bg);color:var(--ok);font-weight:600;font-size:13px;
+        text-decoration:none;white-space:nowrap}
+  .call:hover{background:var(--ok);color:#fff}
+  .copy{padding:5px 8px;border-radius:8px;border:1px solid var(--line);
+        background:var(--card);cursor:pointer;font-size:13px;line-height:1}
+  .copy:hover{border-color:#2563eb}
 </style>
 </head>
 <body>
@@ -905,11 +974,11 @@ DASHBOARD_HTML = """<!doctype html>
   <div class="wrap">
     <table>
       <thead><tr>
-        <th>เบอร์รถ</th><th>ทะเบียน</th><th>เที่ยว</th><th>Drop</th>
-        <th>ลูกค้าปลายทาง</th><th>คลัง</th><th>ปริมาณ</th>
-        <th>กำหนด</th><th>เข้าลานจอด</th><th>ออกคลัง</th>
-        <th>ETA / ถึงจริง</th><th>ต่าง</th>
-        <th>สถานะ</th><th>ตำแหน่งปัจจุบัน</th>
+        <th>ประจำวันที่</th><th>คลังต้นทาง</th><th>เที่ยววิ่ง</th><th>Drop</th>
+        <th>ลูกค้าปลายทาง</th><th>เบอร์รถ</th><th>ทะเบียน</th><th>ปริมาณ</th>
+        <th>พขร. / โทร</th>
+        <th>เวลา</th><th>เลขที่ใบกำกับการขนส่ง</th><th>สถานะ GPS</th>
+        <th>ETA / ถึงจริง</th><th>ต่าง</th><th>สถานะ</th><th>ตำแหน่งปัจจุบัน</th>
       </tr></thead>
       <tbody id="rows"></tbody>
     </table>
@@ -942,6 +1011,28 @@ function dur(m){                      // 1447 → "24 ชม. 7 น."   45 → "
   const h = Math.floor(m/60), r = m % 60;
   return h + ' ชม.' + (r ? ' ' + r + ' น.' : '');
 }
+
+function tel(t){                      // ชื่อ พขร + ปุ่มโทร + ปุ่มคัดลอกเบอร์
+  const num = String(t.phone||'').replace(/[^0-9+]/g,'');
+  const nm  = t.driver ? '<div>'+esc(t.driver)+'</div>' : '';
+  if(!num) return nm || '<span class="mut">—</span>';
+  return nm
+    + '<div style="display:flex;gap:5px;align-items:center;margin-top:3px">'
+    + '<a class="call" href="tel:'+num+'">📞 '+esc(t.phone)+'</a>'
+    + '<button class="copy" data-num="'+num+'" title="คัดลอกเบอร์">📋</button>'
+    + '</div>';
+}
+
+// คัดลอกเบอร์ (ใช้บนคอมที่กดโทรไม่ได้) — ก๊อปไปวางใน LINE หรือมือถือได้
+document.addEventListener('click', e => {
+  const b = e.target.closest('.copy');
+  if(!b) return;
+  navigator.clipboard.writeText(b.dataset.num).then(() => {
+    const old = b.textContent;
+    b.textContent = '✓';
+    setTimeout(() => { b.textContent = old; }, 1200);
+  });
+});
 
 function eta(t){                      // ถึงจริงแล้วโชว์เวลาจริง ไม่งั้นโชว์ประมาณการ
   if(t.arrive_time) return '<b style="color:var(--ok)">'+esc(t.arrive_time)+'</b>';
@@ -999,18 +1090,18 @@ function render(){
           ? '<span style="color:var(--late)">+'+dur(t.diff_minutes)+'</span>'
           : '<span style="color:var(--ok)">-'+dur(-t.diff_minutes)+'</span>');
     return '<tr>'
-      + '<td><b>'+esc(t.car_no)+'</b></td>'
-      + '<td class="mut">'+esc(t.plate)+'</td>'
+      + '<td class="mono mut">'+esc(t.date)+'</td>'
+      + '<td>'+esc(t.source)+'</td>'
       + '<td>'+esc(t.trip_no)+'</td>'
       + '<td>'+esc(t.drop)+'</td>'
       + '<td class="wide">'+esc(t.customer)+'</td>'
-      + '<td>'+esc(t.source)+'</td>'
+      + '<td><b>'+esc(t.car_no)+'</b></td>'
+      + '<td class="mut">'+esc(t.plate)+'</td>'
       + '<td class="mono">'+esc(t.volume)+'</td>'
+      + '<td>'+tel(t)+'</td>'
       + '<td class="mono">'+esc(t.sched_time)+'</td>'
-      + '<td class="mono">'+(t.yard_time ? esc(t.yard_time)
-                                         : '<span class="mut">ยังไม่ถึง</span>')+'</td>'
-      + '<td class="mono">'+(t.depart_time ? esc(t.depart_time)
-                                           : '<span class="mut">ยังไม่ออก</span>')+'</td>'
+      + '<td class="mut">'+esc(t.invoice_no)+'</td>'
+      + '<td class="mut">'+esc(t.gps_status)+'</td>'
       + '<td class="mono">'+eta(t)+'</td>'
       + '<td class="mono">'+diff+'</td>'
       + '<td><span class="badge s-'+esc(t.status)+'">'+(LABEL[t.status]||esc(t.status))+'</span>'
@@ -1018,7 +1109,7 @@ function render(){
         + '</td>'
       + '<td class="wide mut">'+loc(t)+'</td>'
       + '</tr>';
-  }).join('') : '<tr><td colspan="14" class="empty">ไม่พบข้อมูล</td></tr>';
+  }).join('') : '<tr><td colspan="16" class="empty">ไม่พบข้อมูล</td></tr>';
 
   document.getElementById('foot').textContent =
     'แสดง ' + list.length + ' ทริป (จากทั้งวัน ' + ALL.length + ' ทริป)';
@@ -1027,7 +1118,7 @@ function render(){
 async function load(){
   const d  = document.getElementById('date').value || todayISO();
   const el = document.getElementById('rows');
-  el.innerHTML = '<tr><td colspan="14" class="empty">กำลังโหลด…</td></tr>';
+  el.innerHTML = '<tr><td colspan="16" class="empty">กำลังโหลด…</td></tr>';
   try{
     const r = await fetch('/api/trips?date=' + d);
     if(!r.ok) throw new Error((await r.json()).detail || r.statusText);
@@ -1044,7 +1135,7 @@ async function load(){
       '<span class="dot"></span>อัปเดต ' + String(j.fetched_at).slice(11,16) + ' น.';
     render();
   }catch(e){
-    el.innerHTML = '<tr><td colspan="14" class="empty">เกิดข้อผิดพลาด: ' + esc(e.message) + '</td></tr>';
+    el.innerHTML = '<tr><td colspan="16" class="empty">เกิดข้อผิดพลาด: ' + esc(e.message) + '</td></tr>';
   }
 }
 
