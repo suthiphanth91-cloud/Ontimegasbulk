@@ -337,7 +337,7 @@ def get_trips(
         dest_map = fetch_destinations()
         trips    = fetch_trips(target)
     except Exception as e:
-        raise HTTPException(502, f"ดึงข้อมูล Google Sheet ไม่ได้: {e}")
+        raise HTTPException(502, f"ดึงข้อมูล Google Sheet ไม่ได้: {type(e).__name__}: {e}")
 
     results: list[TripOut] = []
     for t in trips:
@@ -443,6 +443,43 @@ def health():
         "sheet_cache_keys": list(_sheet_cache.keys()),
         "eta_cache_size":   len(_eta_cache),
     }
+
+
+@app.get("/api/debug")
+def debug():
+    """ตรวจทีละขั้น ว่าติดตรงไหน"""
+    out: dict = {}
+
+    # 1. env var
+    env = os.environ.get("GOOGLE_CREDENTIALS")
+    out["has_GOOGLE_CREDENTIALS"] = bool(env)
+    out["has_GOOGLE_ROUTES_KEY"]  = bool(os.environ.get("GOOGLE_ROUTES_KEY"))
+
+    # 2. credentials parse
+    try:
+        creds = _build_creds()
+        out["service_account_email"] = getattr(creds, "service_account_email", "?")
+    except Exception as e:
+        out["creds_error"] = f"{type(e).__name__}: {e}"
+        return out
+
+    # 3. เปิดแต่ละ Sheet / แต่ละแท็บ
+    for label, sid, tab in (
+        ("PTGL",   PTGL_ID, PTGL_TAB),
+        ("PLAN",   PLAN_ID, PLAN_TAB),
+        ("DEST",   PLAN_ID, DEST_TAB),
+    ):
+        try:
+            gc = gspread.authorize(creds)
+            sh = gc.open_by_key(sid)
+            out[f"{label}_title"] = sh.title
+            out[f"{label}_tabs"]  = [w.title for w in sh.worksheets()]
+            rows = sh.worksheet(tab).get_all_values()
+            out[f"{label}_rows"]  = len(rows)
+        except Exception as e:
+            out[f"{label}_error"] = f"{type(e).__name__}: {e}"
+
+    return out
 
 
 # Vercel entry point
