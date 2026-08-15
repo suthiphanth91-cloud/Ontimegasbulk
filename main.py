@@ -14,6 +14,7 @@ import os
 import re
 import traceback
 from datetime import datetime, timedelta
+from math import atan2, cos, radians, sin, sqrt
 from time import time
 from typing import Optional
 
@@ -53,7 +54,7 @@ PLAN_GPS_ST  = 33  # AH สถานะ GPS
 DEST_ID      = PLAN_ID
 DEST_TAB     = "ข้อมูลปลายทาง"
 DEST_NAME    = 0   # A  ชื่อปลายทาง (ตรงกับ PLAN_DEST)
-DEST_COORD   = 7   # H  พิกัด "lat,lng"  ← col H (แก้จาก G)
+DEST_COORD   = 6   # G  พิกัด "lat,lng"  เช่น "13.802396,102.091462"
 
 # ─── พิกัดคลังต้นทาง — ใส่ตรงนี้เลยครับ ──────────────────────────────────────
 # ค้นหาพิกัดจาก Google Maps → คลิกขวาที่คลัง → copy ตัวเลข 2 ตัว
@@ -67,9 +68,13 @@ DEPOTS: dict[str, tuple[float, float]] = {
     # เพิ่มคลังใหม่: "ชื่อคลัง": (lat, lng),
 }
 
+# ค่าประมาณเวลาเดินทางแบบไม่ใช้ API (ปรับได้ตามหน้างานจริง)
+ROAD_FACTOR   = 1.35  # ถนนจริงอ้อมกว่าเส้นตรงประมาณ 35%
+AVG_SPEED_KMH = 45    # ความเร็วเฉลี่ยรถบรรทุกแก๊ส รวมติดไฟแดง/จราจร
+
 TZ_OFFSET     = 7    # UTC+7
 CACHE_TTL     = 300  # cache Sheet 5 นาที
-ETA_CACHE_TTL = 600  # cache Routes API 10 นาที (ลดค่าใช้จ่าย)
+ETA_CACHE_TTL = 1800  # cache ETA 30 นาที (พอดีกับรอบรีเฟรชและโควตา ORS)
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets.readonly",
@@ -221,7 +226,45 @@ def _mins_to_hhmm(total_mins: int) -> str:
     h, m = divmod(total_mins % 1440, 60)
     return f"{h:02d}:{m:02d}"
 
-# ─── GOOGLE ROUTES API ───────────────────────────────────────────────────────
+# ─── ETA PROVIDERS ───────────────────────────────────────────────────────────
+
+def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """ระยะทางเส้นตรงบนผิวโลก (กิโลเมตร)"""
+    r    = 6371.0
+    p1, p2 = radians(lat1), radians(lat2)
+    dp   = radians(lat2 - lat1)
+    dl   = radians(lng2 - lng1)
+    a    = sin(dp / 2) ** 2 + cos(p1) * cos(p2) * sin(dl / 2) ** 2
+    return r * 2 * atan2(sqrt(a), sqrt(1 - a))
+
+
+def _estimate_minutes(orig_lat, orig_lng, dest_lat, dest_lng) -> int:
+    """
+    ประมาณเวลาเดินทางแบบไม่ง้อ API
+    ระยะเส้นตรง × ROAD_FACTOR (ถนนจริงอ้อมกว่าเส้นตรง) ÷ ความเร็วเฉลี่ย
+    """
+    km = _haversine_km(orig_lat, orig_lng, dest_lat, dest_lng) * ROAD_FACTOR
+    return max(1, int(km / AVG_SPEED_KMH * 60))
+
+
+def _ors_minutes(orig_lat, orig_lng, dest_lat, dest_lng) -> Optional[int]:
+    """OpenRouteService — ฟรี 2,000 ครั้ง/วัน ไม่ต้องผูกบัตร (ไม่มี traffic)"""
+    api_key = os.environ.get("ORS_KEY")
+    if not api_key:
+        return None
+    try:
+        resp = httpx.post(
+            "https://api.openrouteservice.org/v2/directions/driving-hgv",
+            json={"coordinates": [[orig_lng, orig_lat], [dest_lng, dest_lat]]},
+            headers={"Authorization": api_key, "Content-Type": "application/json"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        secs = resp.json()["routes"][0]["summary"]["duration"]
+        return max(1, int(secs) // 60)
+    except Exception:
+        return None
+
 
 def _get_travel_minutes(
     orig_lat: float, orig_lng: float,
@@ -240,7 +283,10 @@ def _get_travel_minutes(
 
     api_key = os.environ.get("GOOGLE_ROUTES_KEY")
     if not api_key:
-        return None  # ถ้าไม่มี key ข้าม Routes API
+        mins = _ors_minutes(orig_lat, orig_lng, dest_lat, dest_lng) \
+               or _estimate_minutes(orig_lat, orig_lng, dest_lat, dest_lng)
+        _eta_cache[key] = (time(), mins)
+        return mins
 
     try:
         resp = httpx.post(
@@ -265,7 +311,11 @@ def _get_travel_minutes(
         _eta_cache[key] = (time(), travel_mins)
         return travel_mins
     except Exception:
-        return None
+        # Google ใช้ไม่ได้ (key ผิด / ยังไม่เปิดบิล) → ถอยไปใช้ตัวสำรอง
+        mins = _ors_minutes(orig_lat, orig_lng, dest_lat, dest_lng) \
+               or _estimate_minutes(orig_lat, orig_lng, dest_lat, dest_lng)
+        _eta_cache[key] = (time(), mins)
+        return mins
 
 # ─── DATA FETCHERS ───────────────────────────────────────────────────────────
 
@@ -371,8 +421,16 @@ def get_trips(
             if t["source"] in DEPOTS else None
         )
 
-        if origin and dest_coord:
-            # ─ มีตำแหน่ง (GPS หรือคลัง) + พิกัดปลายทาง → เรียก Routes API ─
+        gps_txt = t["gps_status"].lower()
+        done    = any(k in gps_txt for k in ["ถึง", "เสร็จ", "จัดส่งแล้ว", "delivered"])
+
+        if done:
+            # ─ ส่งเสร็จแล้ว ไม่ต้องเรียก ETA (ประหยัดโควตา API) ─
+            status     = "arrived"
+            prediction = "จัดส่งเสร็จแล้ว"
+
+        elif origin and dest_coord:
+            # ─ มีตำแหน่ง (GPS หรือคลัง) + พิกัดปลายทาง → คำนวณ ETA ─
             travel = _get_travel_minutes(
                 origin["lat"], origin["lng"],
                 dest_coord[0], dest_coord[1],
@@ -397,12 +455,8 @@ def get_trips(
                 prediction = f"กำลังเดินทาง (ยังไม่มี ETA)"
 
         else:
-            # ─ ไม่พบทั้ง PTGL และ DEPOTS → ดูจาก GPS status ใน Sheet ─
-            g = t["gps_status"].lower()
-            if any(k in g for k in ["ถึง", "เสร็จ", "จัดส่งแล้ว", "delivered"]):
-                status     = "arrived"
-                prediction = "จัดส่งเสร็จแล้ว"
-            elif sched_mins and _now_mins() > sched_mins + 20:
+            # ─ ไม่พบทั้ง PTGL และ DEPOTS → ดูจากเวลากำหนด ─
+            if sched_mins and _now_mins() > sched_mins + 20:
                 status     = "late"
                 prediction = "⚠ เกินเวลากำหนดแล้ว (ไม่พบสัญญาณ GPS)"
             else:
