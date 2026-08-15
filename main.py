@@ -81,7 +81,7 @@ DONE_KEYWORDS = [
 
 TZ_OFFSET     = 7    # UTC+7
 CACHE_TTL     = 300  # cache Sheet 5 นาที
-ETA_CACHE_TTL = 1800  # cache ETA 30 นาที (พอดีกับรอบรีเฟรชและโควตา ORS)
+ETA_CACHE_TTL = 3600  # cache ETA 1 ชม. (ตรงกับรอบไล่รถ + ประหยัดโควตา ORS)
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets.readonly",
@@ -691,6 +691,11 @@ DASHBOARD_HTML = """<!doctype html>
   .s-pending{background:var(--pd-bg);color:var(--pd)}
   .mut{color:var(--mut)}
   .mono{font-variant-numeric:tabular-nums}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}
+  .chip{padding:7px 15px;border-radius:999px;border:1px solid var(--line);background:var(--card);
+        color:var(--mut);cursor:pointer;font-size:13.5px;font-weight:600}
+  .chip:hover{border-color:#2563eb;color:#2563eb}
+  .chip.on{background:#2563eb;border-color:#2563eb;color:#fff}
   .note{color:var(--mut);font-size:13px;margin:10px 2px}
   .empty{padding:48px;text-align:center;color:var(--mut)}
   .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);margin-right:6px}
@@ -710,6 +715,12 @@ DASHBOARD_HTML = """<!doctype html>
 
 <main>
   <div class="cards" id="cards"></div>
+  <div class="chips">
+    <button class="chip on" data-f="hour">⏰ ต้องไล่ชั่วโมงนี้</button>
+    <button class="chip" data-f="late">🔴 ช้า</button>
+    <button class="chip" data-f="active">🚚 ยังไม่ถึง</button>
+    <button class="chip" data-f="all">ทั้งหมด</button>
+  </div>
   <div class="wrap">
     <table>
       <thead><tr>
@@ -725,7 +736,7 @@ DASHBOARD_HTML = """<!doctype html>
 
 <script>
 const LABEL = {late:'ช้า', arrived:'ส่งแล้ว', transit:'กำลังไป', early:'เร็วกว่ากำหนด', pending:'รอออกรถ'};
-let DATA = [];
+let ALL = [], DATA = [], FILTER = 'hour';
 
 function todayISO(){
   const d = new Date(Date.now() + (7*60 + new Date().getTimezoneOffset())*60000);
@@ -741,6 +752,13 @@ function esc(s){
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 }
 
+function dur(m){                      // 1447 → "24 ชม. 7 น."   45 → "45 น."
+  m = Math.abs(Math.round(m));
+  if(m < 60) return m + ' น.';
+  const h = Math.floor(m/60), r = m % 60;
+  return h + ' ชม.' + (r ? ' ' + r + ' น.' : '');
+}
+
 function loc(t){
   if(t.current_lat == null || t.current_lng == null) return '—';
   const url  = 'https://www.google.com/maps?q=' + t.current_lat + ',' + t.current_lng;
@@ -748,8 +766,30 @@ function loc(t){
   return '<a href="'+url+'" target="_blank" rel="noopener" style="color:var(--tr)">📍 '+esc(text)+'</a>';
 }
 
+function mins(hhmm){                  // "14:30" → 870
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm||''));
+  return m ? (+m[1])*60 + (+m[2]) : null;
+}
+
+function nowMins(){
+  const d = new Date(Date.now() + (7*60 + new Date().getTimezoneOffset())*60000);
+  return d.getHours()*60 + d.getMinutes();
+}
+
+function keep(t){                     // กรองตามชิปที่เลือก
+  if(FILTER === 'all')    return true;
+  if(FILTER === 'late')   return t.status === 'late';
+  if(FILTER === 'active') return t.status !== 'arrived';
+  // 'hour' = ต้องจัดการในชั่วโมงนี้: ช้าอยู่แล้ว หรือ ครบกำหนดภายใน 60 นาที
+  if(t.status === 'arrived') return false;
+  if(t.status === 'late')    return true;
+  const s = mins(t.sched_time);
+  return s != null && s - nowMins() <= 60;
+}
+
 function render(){
   const q = document.getElementById('q').value.trim().toLowerCase();
+  DATA = ALL.filter(keep);
   const list = (!q ? DATA : DATA.filter(t =>
     [t.car_no, t.plate, t.customer, t.source, t.invoice_no]
       .some(v => String(v||'').toLowerCase().includes(q))))
@@ -763,8 +803,9 @@ function render(){
 
   document.getElementById('rows').innerHTML = list.length ? list.map(t => {
     const diff = t.diff_minutes == null ? '<span class="mut">—</span>'
-      : (t.diff_minutes > 0 ? '<span style="color:var(--late)">+'+t.diff_minutes+'</span>'
-                            : '<span style="color:var(--ok)">'+t.diff_minutes+'</span>');
+      : (t.diff_minutes > 0
+          ? '<span style="color:var(--late)">+'+dur(t.diff_minutes)+'</span>'
+          : '<span style="color:var(--ok)">-'+dur(-t.diff_minutes)+'</span>');
     return '<tr>'
       + '<td><b>'+esc(t.car_no)+'</b></td>'
       + '<td class="mut">'+esc(t.plate)+'</td>'
@@ -782,7 +823,7 @@ function render(){
   }).join('') : '<tr><td colspan="12" class="empty">ไม่พบข้อมูล</td></tr>';
 
   document.getElementById('foot').textContent =
-    'แสดง ' + list.length + ' จากทั้งหมด ' + DATA.length + ' ทริป';
+    'แสดง ' + list.length + ' ทริป (จากทั้งวัน ' + ALL.length + ' ทริป)';
 }
 
 async function load(){
@@ -793,7 +834,7 @@ async function load(){
     const r = await fetch('/api/trips?date=' + d);
     if(!r.ok) throw new Error((await r.json()).detail || r.statusText);
     const j = await r.json();
-    DATA = j.trips || [];
+    ALL = j.trips || [];
     document.getElementById('cards').innerHTML =
         card(j.total,'ทริปทั้งหมด','')
       + card(j.arrived,'ส่งเสร็จแล้ว','ok')
@@ -812,8 +853,17 @@ document.getElementById('date').value = todayISO();
 document.getElementById('go').onclick    = load;
 document.getElementById('date').onchange = load;
 document.getElementById('q').oninput     = render;
+
+document.querySelectorAll('.chip').forEach(b => {
+  b.onclick = () => {
+    FILTER = b.dataset.f;
+    document.querySelectorAll('.chip').forEach(x => x.classList.toggle('on', x === b));
+    render();
+  };
+});
+
 load();
-setInterval(load, 30 * 60 * 1000);   // รีเฟรชอัตโนมัติทุก 30 นาที
+setInterval(load, 60 * 60 * 1000);   // ดึงข้อมูลใหม่ทุก 1 ชั่วโมง (ตรงกับรอบไล่รถ)
 </script>
 </body>
 </html>
