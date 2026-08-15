@@ -521,6 +521,19 @@ def peek():
     }
 
 
+@app.get("/api/peekdest")
+def peekdest():
+    """ดูข้อมูลดิบแท็บ ข้อมูลปลายทาง เพื่อหาว่าคอลัมน์ไหนคือชื่อ/พิกัด"""
+    rows = _fetch_sheet(DEST_ID, DEST_TAB)
+    def label(r):
+        return {f"col_{chr(65+i)}": v for i, v in enumerate(r[:14])}
+    return {
+        "total_rows": len(rows),
+        "header":     label(rows[0]) if rows else {},
+        "sample":     [label(r) for r in rows[1:6]],
+    }
+
+
 @app.get("/api/match")
 def match(date_str: str = Query(None, alias="date")):
     """เช็คว่าเบอร์รถ / ชื่อปลายทาง จับคู่กันได้กี่รายการ"""
