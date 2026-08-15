@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import traceback
 from datetime import datetime, timedelta
 from time import time
 from typing import Optional
@@ -477,7 +478,8 @@ def debug():
             rows = sh.worksheet(tab).get_all_values()
             out[f"{label}_rows"]  = len(rows)
         except Exception as e:
-            out[f"{label}_error"] = f"{type(e).__name__}: {e}"
+            out[f"{label}_error"] = f"{type(e).__name__}: {e!r}"
+            out[f"{label}_trace"] = traceback.format_exc().splitlines()[-12:]
 
     return out
 
