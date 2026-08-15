@@ -9,9 +9,13 @@ Sources:
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import traceback
 from datetime import datetime, timedelta
 from math import atan2, cos, radians, sin, sqrt
@@ -20,9 +24,9 @@ from typing import Optional
 
 import httpx
 import gspread
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from google.oauth2.service_account import Credentials
 from pydantic import BaseModel
 
@@ -136,6 +140,39 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
+# ─── ล็อกอิน ─────────────────────────────────────────────────────────────────
+# ตั้งรหัสผ่านที่ Vercel → Settings → Environment Variables → APP_PASSWORD
+# ถ้ายังไม่ตั้ง เว็บจะเปิดให้เข้าได้เหมือนเดิม แต่ขึ้นแถบเตือนสีแดง
+COOKIE_NAME    = "gb_session"
+SESSION_HOURS  = 12          # ล็อกอินครั้งเดียวใช้ได้ 1 กะ
+
+
+def _app_password() -> str:
+    return os.environ.get("APP_PASSWORD", "")
+
+
+def _secret() -> bytes:
+    """คีย์สำหรับเซ็น token — ตั้ง SESSION_SECRET เองได้ ไม่ตั้งก็ใช้รหัสผ่านแทน"""
+    return (os.environ.get("SESSION_SECRET") or _app_password() or "dev").encode()
+
+
+def _make_token() -> str:
+    exp  = str(int(time()) + SESSION_HOURS * 3600)
+    sig  = hmac.new(_secret(), exp.encode(), hashlib.sha256).digest()
+    return exp + "." + base64.urlsafe_b64encode(sig).decode().rstrip("=")
+
+
+def _token_ok(token: str) -> bool:
+    try:
+        exp, sig = (token or "").split(".", 1)
+        if int(exp) < int(time()):
+            return False
+        want = hmac.new(_secret(), exp.encode(), hashlib.sha256).digest()
+        want = base64.urlsafe_b64encode(want).decode().rstrip("=")
+        return hmac.compare_digest(sig, want)
+    except (ValueError, AttributeError):
+        return False
+
 # ─── APP ─────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
@@ -146,6 +183,23 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], allow_headers=["*"]
 )
+
+OPEN_PATHS = {"/login", "/api/login", "/favicon.ico"}
+
+
+@app.middleware("http")
+async def require_login(request: Request, call_next):
+    """กันไม่ให้คนที่ไม่ได้ล็อกอินเข้าถึงข้อมูล"""
+    path = request.url.path
+    if not _app_password() or path in OPEN_PATHS:
+        return await call_next(request)          # ยังไม่ตั้งรหัส → เปิดตามเดิม
+
+    if _token_ok(request.cookies.get(COOKIE_NAME, "")):
+        return await call_next(request)
+
+    if path.startswith("/api/"):
+        return JSONResponse({"detail": "ต้องล็อกอินก่อน"}, status_code=401)
+    return RedirectResponse("/login", status_code=303)
 
 # ─── MODELS ──────────────────────────────────────────────────────────────────
 
@@ -873,7 +927,170 @@ def match(date_str: str = Query(None, alias="date")):
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def dashboard():
-    return DASHBOARD_HTML
+    warn = "" if _app_password() else "1"
+    return DASHBOARD_HTML.replace("__NOPASS__", warn)
+
+
+@app.get("/login", response_class=HTMLResponse, include_in_schema=False)
+def login_page(error: str = ""):
+    if not _app_password():
+        return RedirectResponse("/", status_code=303)
+    msg = ('<p class="err">รหัสผ่านไม่ถูกต้อง</p>' if error else "")
+    return LOGIN_HTML.replace("__ERR__", msg)
+
+
+@app.post("/api/login", include_in_schema=False)
+def do_login(password: str = Form("")):
+    pw = _app_password()
+    if not pw or not hmac.compare_digest(password, pw):
+        # หน่วงเล็กน้อยกันการเดารหัสรัวๆ
+        secrets.token_bytes(8)
+        return RedirectResponse("/login?error=1", status_code=303)
+
+    resp = RedirectResponse("/", status_code=303)
+    resp.set_cookie(
+        COOKIE_NAME, _make_token(),
+        max_age=SESSION_HOURS * 3600,
+        httponly=True, secure=True, samesite="lax", path="/",
+    )
+    return resp
+
+
+@app.get("/logout", include_in_schema=False)
+def logout():
+    resp = RedirectResponse("/login", status_code=303)
+    resp.delete_cookie(COOKIE_NAME, path="/")
+    return resp
+
+
+@app.get("/settings", response_class=HTMLResponse, include_in_schema=False)
+def settings_page():
+    return SETTINGS_HTML.replace("__PWSET__", "ตั้งแล้ว ✓" if _app_password() else "ยังไม่ได้ตั้ง")
+
+
+LOGIN_HTML = """<!doctype html>
+<html lang="th"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>เข้าสู่ระบบ — Gasbulk Track</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{--bg:#f1f5f9;--card:#fff;--line:#e2e8f0;--ink:#0f172a;--mut:#64748b}
+  @media (prefers-color-scheme:dark){
+    :root{--bg:#0b1220;--card:#131c2e;--line:#243044;--ink:#e8eef8;--mut:#93a3b8}}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+       background:var(--bg);color:var(--ink);padding:20px;
+       font-family:'Noto Sans Thai',system-ui,sans-serif}
+  form{background:var(--card);border:1px solid var(--line);border-radius:16px;
+       padding:30px 26px;width:100%;max-width:360px}
+  h1{font-size:21px;margin:0 0 6px}
+  p.sub{color:var(--mut);font-size:14px;margin:0 0 22px}
+  label{display:block;font-size:13.5px;font-weight:600;margin-bottom:7px}
+  input{width:100%;padding:12px 14px;font-size:16px;font-family:inherit;
+        border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink)}
+  button{width:100%;margin-top:16px;padding:12px;font-size:15px;font-weight:700;
+         font-family:inherit;border:0;border-radius:10px;background:#2563eb;color:#fff;cursor:pointer}
+  button:hover{background:#1d4ed8}
+  .err{color:#dc2626;font-size:13.5px;margin:0 0 14px;font-weight:600}
+</style></head>
+<body>
+  <form method="post" action="/api/login">
+    <h1>🚛 Gasbulk Track</h1>
+    <p class="sub">ระบบติดตามรถขนส่ง — กรุณาเข้าสู่ระบบ</p>
+    __ERR__
+    <label for="pw">รหัสผ่าน</label>
+    <input id="pw" name="password" type="password" autofocus required
+           autocomplete="current-password" placeholder="ใส่รหัสผ่าน">
+    <button type="submit">เข้าสู่ระบบ</button>
+  </form>
+</body></html>
+"""
+
+
+SETTINGS_HTML = """<!doctype html>
+<html lang="th"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ตั้งค่า — Gasbulk Track</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{--bg:#f1f5f9;--card:#fff;--line:#e2e8f0;--ink:#0f172a;--mut:#64748b}
+  @media (prefers-color-scheme:dark){
+    :root{--bg:#0b1220;--card:#131c2e;--line:#243044;--ink:#e8eef8;--mut:#93a3b8}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);padding:20px;
+       font-family:'Noto Sans Thai',system-ui,sans-serif;font-size:15px}
+  .box{max-width:640px;margin:0 auto}
+  h1{font-size:20px;margin:0 0 18px}
+  section{background:var(--card);border:1px solid var(--line);border-radius:14px;
+          padding:18px 20px;margin-bottom:16px}
+  h2{font-size:15px;margin:0 0 14px}
+  label{display:block;font-size:13.5px;color:var(--mut);margin:12px 0 6px;font-weight:500}
+  select,input{width:100%;padding:10px 12px;font-size:15px;font-family:inherit;
+        border:1px solid var(--line);border-radius:9px;background:var(--bg);color:var(--ink)}
+  button{padding:10px 18px;font-size:14px;font-weight:700;font-family:inherit;
+         border:0;border-radius:9px;background:#2563eb;color:#fff;cursor:pointer;margin-top:16px}
+  a.back{color:#2563eb;text-decoration:none;font-weight:600}
+  a.out{color:#dc2626;text-decoration:none;font-weight:600}
+  .row{display:flex;justify-content:space-between;padding:9px 0;
+       border-bottom:1px solid var(--line);font-size:14px}
+  .row:last-child{border:0}
+  .row span{color:var(--mut)}
+  .ok{color:#16a34a;font-weight:600}
+</style></head>
+<body><div class="box">
+  <p><a class="back" href="/">&larr; กลับหน้าตาราง</a></p>
+  <h1>⚙️ ตั้งค่า</h1>
+
+  <section>
+    <h2>การแสดงผล</h2>
+    <label for="iv">รีเฟรชข้อมูลอัตโนมัติทุก</label>
+    <select id="iv">
+      <option value="30">30 นาที</option>
+      <option value="60">1 ชั่วโมง</option>
+      <option value="120">2 ชั่วโมง</option>
+      <option value="0">ไม่รีเฟรชอัตโนมัติ</option>
+    </select>
+    <label for="ft">มุมมองเริ่มต้นเมื่อเปิดหน้า</label>
+    <select id="ft">
+      <option value="hour">⏰ ต้องไล่ชั่วโมงนี้</option>
+      <option value="late">🔴 ช้า</option>
+      <option value="active">🚚 ยังไม่ถึง</option>
+      <option value="all">ทั้งหมด</option>
+    </select>
+    <button id="save">บันทึก</button>
+    <span id="done" class="ok" style="margin-left:10px"></span>
+  </section>
+
+  <section>
+    <h2>ระบบ</h2>
+    <div class="row"><span>รหัสผ่านเข้าระบบ</span><b>__PWSET__</b></div>
+    <div class="row"><span>แหล่งข้อมูล ETA</span><b>OpenRouteService</b></div>
+    <div class="row"><span>เวลาโหลดที่คลัง</span><b>ตามตารางมาตรฐาน</b></div>
+    <div class="row"><span>อายุการล็อกอิน</span><b>12 ชั่วโมง</b></div>
+    <p style="color:var(--mut);font-size:13px;margin:14px 0 0">
+      ค่าเหล่านี้แก้ที่ Vercel → Settings → Environment Variables
+      (APP_PASSWORD, ORS_KEY) หรือในไฟล์ main.py
+    </p>
+  </section>
+
+  <section>
+    <h2>บัญชี</h2>
+    <p style="margin:0"><a class="out" href="/logout">ออกจากระบบ</a></p>
+  </section>
+</div>
+<script>
+  const iv = document.getElementById('iv'), ft = document.getElementById('ft');
+  iv.value = localStorage.getItem('gb_interval') || '60';
+  ft.value = localStorage.getItem('gb_filter')   || 'hour';
+  document.getElementById('save').onclick = () => {
+    localStorage.setItem('gb_interval', iv.value);
+    localStorage.setItem('gb_filter',   ft.value);
+    document.getElementById('done').textContent = 'บันทึกแล้ว ✓';
+    setTimeout(() => document.getElementById('done').textContent = '', 2000);
+  };
+</script>
+</body></html>
+"""
 
 
 # ─── DASHBOARD ───────────────────────────────────────────────────────────────
@@ -944,6 +1161,11 @@ DASHBOARD_HTML = """<!doctype html>
   .empty{padding:48px;text-align:center;color:var(--mut)}
   .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);margin-right:6px}
   .callnow{display:inline-block;margin-left:6px;font-size:12px;color:var(--late);font-weight:600}
+  .gear{text-decoration:none;font-size:19px;padding:6px 9px;border-radius:9px;
+        border:1px solid var(--line);line-height:1}
+  .gear:hover{border-color:#2563eb}
+  .warn{background:#fef2f2;color:#b91c1c;border-bottom:1px solid #fecaca;
+        padding:10px 18px;font-size:13.5px}
 
   /* ── มือถือ: เปลี่ยนตารางเป็นการ์ด อ่านง่ายไม่ต้องเลื่อนซ้ายขวา ── */
   @media (max-width:820px){
@@ -997,8 +1219,14 @@ DASHBOARD_HTML = """<!doctype html>
     <input type="date" id="date">
     <input type="search" id="q" placeholder="ค้นหา รถ / ลูกค้า / ทะเบียน">
     <button class="primary" id="go">รีเฟรช</button>
+    <a class="gear" href="/settings" title="ตั้งค่า">⚙️</a>
   </div>
 </header>
+
+<div id="nopass" class="warn" hidden>
+  ⚠️ ยังไม่ได้ตั้งรหัสผ่าน — ใครมีลิงก์ก็เปิดดูข้อมูลลูกค้าและเบอร์ พขร ได้
+  ตั้งที่ Vercel → Settings → Environment Variables → เพิ่ม <b>APP_PASSWORD</b>
+</div>
 
 <main>
   <div class="cards" id="cards"></div>
@@ -1026,7 +1254,8 @@ DASHBOARD_HTML = """<!doctype html>
 <script>
 const LABEL = {late:'ช้า', arrived:'ส่งแล้ว', transit:'กำลังไป',
                early:'เร็วกว่ากำหนด', pending:'รอออกรถ', cancelled:'ยกเลิก'};
-let ALL = [], DATA = [], FILTER = 'hour';
+let ALL = [], DATA = [], FILTER = localStorage.getItem('gb_filter') || 'hour';
+if(('__NOPASS__') === '1') document.getElementById('nopass').hidden = false;
 
 function todayISO(){
   const d = new Date(Date.now() + (7*60 + new Date().getTimezoneOffset())*60000);
@@ -1183,6 +1412,7 @@ document.getElementById('date').onchange = load;
 document.getElementById('q').oninput     = render;
 
 document.querySelectorAll('.chip').forEach(b => {
+  b.classList.toggle('on', b.dataset.f === FILTER);
   b.onclick = () => {
     FILTER = b.dataset.f;
     document.querySelectorAll('.chip').forEach(x => x.classList.toggle('on', x === b));
@@ -1191,7 +1421,10 @@ document.querySelectorAll('.chip').forEach(b => {
 });
 
 load();
-setInterval(load, 60 * 60 * 1000);   // ดึงข้อมูลใหม่ทุก 1 ชั่วโมง (ตรงกับรอบไล่รถ)
+
+// รอบรีเฟรชอัตโนมัติ ตั้งได้ที่หน้า ⚙️ ตั้งค่า (ค่าเริ่มต้น 1 ชั่วโมง)
+const IV = parseInt(localStorage.getItem('gb_interval') || '60', 10);
+if(IV > 0) setInterval(load, IV * 60 * 1000);
 </script>
 </body>
 </html>
