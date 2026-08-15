@@ -903,7 +903,7 @@ DASHBOARD_HTML = """<!doctype html>
        font-family:'Noto Sans Thai',system-ui,-apple-system,sans-serif;font-size:15px}
   header{background:var(--card);border-bottom:1px solid var(--line);padding:14px 18px;
          position:sticky;top:0;z-index:10}
-  .bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;max-width:1400px;margin:0 auto}
+  .bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;width:100%}
   h1{font-size:19px;margin:0;font-weight:700;letter-spacing:-.2px}
   .grow{flex:1}
   input,button{font-family:inherit;font-size:14px;padding:8px 12px;border-radius:9px;
@@ -912,19 +912,20 @@ DASHBOARD_HTML = """<!doctype html>
   button{cursor:pointer;font-weight:600}
   button.primary{background:#2563eb;border-color:#2563eb;color:#fff}
   button.primary:hover{background:#1d4ed8}
-  main{max-width:1400px;margin:0 auto;padding:18px}
+  main{width:100%;padding:16px}
   .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:18px}
   .c{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:14px 16px}
   .c b{display:block;font-size:27px;font-weight:700;line-height:1.15}
   .c span{color:var(--mut);font-size:13px;font-weight:500}
   .c.late b{color:var(--late)} .c.ok b{color:var(--ok)} .c.tr b{color:var(--tr)}
   .wrap{background:var(--card);border:1px solid var(--line);border-radius:13px;overflow-x:auto}
-  table{border-collapse:collapse;width:100%;min-width:1080px}
-  th,td{padding:11px 13px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+  table{border-collapse:collapse;width:100%;min-width:1180px}
+  th,td{padding:10px 11px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
   th{font-size:12.5px;color:var(--mut);font-weight:600;text-transform:uppercase;
      letter-spacing:.4px;position:sticky;top:0;background:var(--card)}
   tbody tr:hover{background:var(--pd-bg)}
-  td.wide{white-space:normal;max-width:270px}
+  td.wide{white-space:normal;min-width:190px;max-width:340px}
+  td.cust{min-width:230px}
   .badge{display:inline-block;padding:3px 11px;border-radius:999px;font-size:12.5px;font-weight:600}
   .s-late{background:var(--late-bg);color:var(--late)}
   .s-arrived{background:var(--ok-bg);color:var(--ok)}
@@ -942,6 +943,42 @@ DASHBOARD_HTML = """<!doctype html>
   .note{color:var(--mut);font-size:13px;margin:10px 2px}
   .empty{padding:48px;text-align:center;color:var(--mut)}
   .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);margin-right:6px}
+  .callnow{display:inline-block;margin-left:6px;font-size:12px;color:var(--late);font-weight:600}
+
+  /* ── มือถือ: เปลี่ยนตารางเป็นการ์ด อ่านง่ายไม่ต้องเลื่อนซ้ายขวา ── */
+  @media (max-width:820px){
+    body{font-size:15px}
+    header{padding:11px 12px}
+    h1{font-size:17px}
+    main{padding:12px}
+    input[type=search],input[type=date]{flex:1 1 130px;min-width:0}
+    .cards{grid-template-columns:repeat(3,1fr);gap:8px}
+    .c{padding:10px}
+    .c b{font-size:21px}
+    .c span{font-size:11.5px}
+    .chips{overflow-x:auto;flex-wrap:nowrap;padding-bottom:4px}
+    .chip{flex:0 0 auto}
+
+    .wrap{background:none;border:0;overflow:visible}
+    table,thead,tbody,tr,td{display:block;width:auto}
+    table{min-width:0}
+    thead{display:none}
+    tr{background:var(--card);border:1px solid var(--line);border-radius:13px;
+       padding:12px 14px;margin-bottom:11px}
+    tbody tr:hover{background:var(--card)}
+    td{border:0;padding:3px 0;white-space:normal;display:flex;gap:10px;
+       align-items:flex-start;justify-content:space-between}
+    td::before{content:attr(data-l);color:var(--mut);font-size:12.5px;
+               flex:0 0 40%;font-weight:500}
+    td.wide,td.cust{max-width:none;min-width:0}
+    /* เบอร์รถ + ลูกค้า + สถานะ = ข้อมูลหลัก ทำให้เด่น */
+    td.carno{font-size:20px;padding-bottom:2px}
+    td.carno::before{align-self:center}
+    td.cust{font-weight:600}
+    td.st{padding-top:7px}
+    .call{padding:9px 15px;font-size:15px}
+    .copy{padding:9px 11px}
+  }
   .call{display:inline-block;margin-top:3px;padding:5px 11px;border-radius:8px;
         background:var(--ok-bg);color:var(--ok);font-weight:600;font-size:13px;
         text-decoration:none;white-space:nowrap}
@@ -1089,25 +1126,26 @@ function render(){
       : (t.diff_minutes > 0
           ? '<span style="color:var(--late)">+'+dur(t.diff_minutes)+'</span>'
           : '<span style="color:var(--ok)">-'+dur(-t.diff_minutes)+'</span>');
+    const badge = '<span class="badge s-'+esc(t.status)+'">'
+                + (LABEL[t.status]||esc(t.status))+'</span>'
+                + (call ? '<span class="callnow">📞 ถึงเวลาโทร</span>' : '');
     return '<tr>'
-      + '<td class="mono mut">'+esc(t.date)+'</td>'
-      + '<td>'+esc(t.source)+'</td>'
-      + '<td>'+esc(t.trip_no)+'</td>'
-      + '<td>'+esc(t.drop)+'</td>'
-      + '<td class="wide">'+esc(t.customer)+'</td>'
-      + '<td><b>'+esc(t.car_no)+'</b></td>'
-      + '<td class="mut">'+esc(t.plate)+'</td>'
-      + '<td class="mono">'+esc(t.volume)+'</td>'
-      + '<td>'+tel(t)+'</td>'
-      + '<td class="mono">'+esc(t.sched_time)+'</td>'
-      + '<td class="mut">'+esc(t.invoice_no)+'</td>'
-      + '<td class="mut">'+esc(t.gps_status)+'</td>'
-      + '<td class="mono">'+eta(t)+'</td>'
-      + '<td class="mono">'+diff+'</td>'
-      + '<td><span class="badge s-'+esc(t.status)+'">'+(LABEL[t.status]||esc(t.status))+'</span>'
-        + (call ? '<div style="margin-top:4px;font-size:12px;color:var(--late)">📞 ถึงเวลาโทร</div>' : '')
-        + '</td>'
-      + '<td class="wide mut">'+loc(t)+'</td>'
+      + '<td data-l="ประจำวันที่" class="mono mut">'+esc(t.date)+'</td>'
+      + '<td data-l="คลังต้นทาง">'+esc(t.source)+'</td>'
+      + '<td data-l="เที่ยววิ่ง">'+esc(t.trip_no)+'</td>'
+      + '<td data-l="Drop">'+esc(t.drop)+'</td>'
+      + '<td data-l="ลูกค้าปลายทาง" class="wide cust">'+esc(t.customer)+'</td>'
+      + '<td data-l="เบอร์รถ" class="carno"><b>'+esc(t.car_no)+'</b></td>'
+      + '<td data-l="ทะเบียน" class="mut">'+esc(t.plate)+'</td>'
+      + '<td data-l="ปริมาณ" class="mono">'+esc(t.volume)+'</td>'
+      + '<td data-l="พขร. / โทร">'+tel(t)+'</td>'
+      + '<td data-l="เวลาส่งมอบ" class="mono">'+esc(t.sched_time)+'</td>'
+      + '<td data-l="เลขที่ใบกำกับ" class="mut">'+esc(t.invoice_no)+'</td>'
+      + '<td data-l="สถานะ GPS" class="mut">'+esc(t.gps_status)+'</td>'
+      + '<td data-l="ETA / ถึงจริง" class="mono">'+eta(t)+'</td>'
+      + '<td data-l="ต่าง" class="mono">'+diff+'</td>'
+      + '<td data-l="สถานะ" class="st">'+badge+'</td>'
+      + '<td data-l="ตำแหน่งปัจจุบัน" class="wide mut">'+loc(t)+'</td>'
       + '</tr>';
   }).join('') : '<tr><td colspan="16" class="empty">ไม่พบข้อมูล</td></tr>';
 
