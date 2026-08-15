@@ -22,6 +22,7 @@ import httpx
 import gspread
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from google.oauth2.service_account import Credentials
 from pydantic import BaseModel
 
@@ -71,6 +72,12 @@ DEPOTS: dict[str, tuple[float, float]] = {
 # ค่าประมาณเวลาเดินทางแบบไม่ใช้ API (ปรับได้ตามหน้างานจริง)
 ROAD_FACTOR   = 1.35  # ถนนจริงอ้อมกว่าเส้นตรงประมาณ 35%
 AVG_SPEED_KMH = 45    # ความเร็วเฉลี่ยรถบรรทุกแก๊ส รวมติดไฟแดง/จราจร
+
+# คำในคอลัมน์สถานะ GPS ที่แปลว่า "ส่งเสร็จแล้ว" (เพิ่มคำใหม่ได้ที่นี่)
+DONE_KEYWORDS = [
+    "สำเร็จ", "เสร็จ", "จัดส่งแล้ว", "ส่งแล้ว",
+    "ถึงปลายทาง", "ถึงลูกค้า", "delivered", "complete",
+]
 
 TZ_OFFSET     = 7    # UTC+7
 CACHE_TTL     = 300  # cache Sheet 5 นาที
@@ -403,6 +410,10 @@ def get_trips(
     except Exception as e:
         raise HTTPException(502, f"ดึงข้อมูล Google Sheet ไม่ได้: {type(e).__name__}: {e}")
 
+    # ETA มีความหมายเฉพาะทริปของ "วันนี้" เท่านั้น
+    # (พิกัดรถใน PTGL เป็นตำแหน่งปัจจุบัน เอาไปเทียบวันอื่นไม่ได้)
+    is_today = target == _today_thai()
+
     results: list[TripOut] = []
     for t in trips:
         sched_mins  = _to_mins(t["sched_time"])
@@ -422,12 +433,17 @@ def get_trips(
         )
 
         gps_txt = t["gps_status"].lower()
-        done    = any(k in gps_txt for k in ["ถึง", "เสร็จ", "จัดส่งแล้ว", "delivered"])
+        done    = any(k in gps_txt for k in DONE_KEYWORDS)
 
         if done:
             # ─ ส่งเสร็จแล้ว ไม่ต้องเรียก ETA (ประหยัดโควตา API) ─
             status     = "arrived"
             prediction = "จัดส่งเสร็จแล้ว"
+
+        elif not is_today:
+            # ─ ทริปวันอื่น: ดูสถานะจากชีตอย่างเดียว ไม่คำนวณ ETA ─
+            status     = "pending"
+            prediction = t["gps_status"] or "ไม่มีข้อมูลสถานะ"
 
         elif origin and dest_coord:
             # ─ มีตำแหน่ง (GPS หรือคลัง) + พิกัดปลายทาง → คำนวณ ETA ─
@@ -456,7 +472,7 @@ def get_trips(
 
         else:
             # ─ ไม่พบทั้ง PTGL และ DEPOTS → ดูจากเวลากำหนด ─
-            if sched_mins and _now_mins() > sched_mins + 20:
+            if sched_mins and _now_mins() > sched_mins + 20:  # noqa: SIM102
                 status     = "late"
                 prediction = "⚠ เกินเวลากำหนดแล้ว (ไม่พบสัญญาณ GPS)"
             else:
@@ -612,6 +628,196 @@ def match(date_str: str = Query(None, alias="date")):
         "dest_names_sample": sorted(dest_map.keys())[:20],
     }
 
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def dashboard():
+    return DASHBOARD_HTML
+
+
+# ─── DASHBOARD ───────────────────────────────────────────────────────────────
+
+DASHBOARD_HTML = """<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gasbulk Track — ติดตามรถขนส่ง</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#f1f5f9; --card:#fff; --line:#e2e8f0; --ink:#0f172a; --mut:#64748b;
+    --late:#dc2626; --late-bg:#fef2f2; --ok:#16a34a; --ok-bg:#f0fdf4;
+    --tr:#2563eb;  --tr-bg:#eff6ff;  --pd:#64748b; --pd-bg:#f8fafc;
+    --early:#0891b2; --early-bg:#ecfeff;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{ --bg:#0b1220; --card:#131c2e; --line:#243044; --ink:#e8eef8; --mut:#93a3b8;
+           --late-bg:#3b1418; --ok-bg:#0e2a19; --tr-bg:#0f2340; --pd-bg:#1a2434; --early-bg:#0c2b31; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:'Noto Sans Thai',system-ui,-apple-system,sans-serif;font-size:15px}
+  header{background:var(--card);border-bottom:1px solid var(--line);padding:14px 18px;
+         position:sticky;top:0;z-index:10}
+  .bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;max-width:1400px;margin:0 auto}
+  h1{font-size:19px;margin:0;font-weight:700;letter-spacing:-.2px}
+  .grow{flex:1}
+  input,button{font-family:inherit;font-size:14px;padding:8px 12px;border-radius:9px;
+               border:1px solid var(--line);background:var(--card);color:var(--ink)}
+  input[type=search]{min-width:190px}
+  button{cursor:pointer;font-weight:600}
+  button.primary{background:#2563eb;border-color:#2563eb;color:#fff}
+  button.primary:hover{background:#1d4ed8}
+  main{max-width:1400px;margin:0 auto;padding:18px}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:18px}
+  .c{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:14px 16px}
+  .c b{display:block;font-size:27px;font-weight:700;line-height:1.15}
+  .c span{color:var(--mut);font-size:13px;font-weight:500}
+  .c.late b{color:var(--late)} .c.ok b{color:var(--ok)} .c.tr b{color:var(--tr)}
+  .wrap{background:var(--card);border:1px solid var(--line);border-radius:13px;overflow-x:auto}
+  table{border-collapse:collapse;width:100%;min-width:1080px}
+  th,td{padding:11px 13px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+  th{font-size:12.5px;color:var(--mut);font-weight:600;text-transform:uppercase;
+     letter-spacing:.4px;position:sticky;top:0;background:var(--card)}
+  tbody tr:hover{background:var(--pd-bg)}
+  td.wide{white-space:normal;max-width:270px}
+  .badge{display:inline-block;padding:3px 11px;border-radius:999px;font-size:12.5px;font-weight:600}
+  .s-late{background:var(--late-bg);color:var(--late)}
+  .s-arrived{background:var(--ok-bg);color:var(--ok)}
+  .s-transit{background:var(--tr-bg);color:var(--tr)}
+  .s-early{background:var(--early-bg);color:#0891b2}
+  .s-pending{background:var(--pd-bg);color:var(--pd)}
+  .mut{color:var(--mut)}
+  .mono{font-variant-numeric:tabular-nums}
+  .note{color:var(--mut);font-size:13px;margin:10px 2px}
+  .empty{padding:48px;text-align:center;color:var(--mut)}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);margin-right:6px}
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <h1>🚛 Gasbulk Track</h1>
+    <span class="mut" id="stamp"></span>
+    <span class="grow"></span>
+    <input type="date" id="date">
+    <input type="search" id="q" placeholder="ค้นหา รถ / ลูกค้า / ทะเบียน">
+    <button class="primary" id="go">รีเฟรช</button>
+  </div>
+</header>
+
+<main>
+  <div class="cards" id="cards"></div>
+  <div class="wrap">
+    <table>
+      <thead><tr>
+        <th>เบอร์รถ</th><th>ทะเบียน</th><th>เที่ยว</th><th>Drop</th>
+        <th>ลูกค้าปลายทาง</th><th>คลัง</th><th>ปริมาณ</th>
+        <th>กำหนด</th><th>ETA</th><th>ต่าง</th><th>สถานะ</th><th>ตำแหน่งปัจจุบัน</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  <p class="note" id="foot"></p>
+</main>
+
+<script>
+const LABEL = {late:'ช้า', arrived:'ส่งแล้ว', transit:'กำลังไป', early:'เร็วกว่ากำหนด', pending:'รอออกรถ'};
+let DATA = [];
+
+function todayISO(){
+  const d = new Date(Date.now() + (7*60 + new Date().getTimezoneOffset())*60000);
+  return d.toISOString().slice(0,10);
+}
+
+function card(n, label, cls){
+  return '<div class="c '+(cls||'')+'"><b>'+n+'</b><span>'+label+'</span></div>';
+}
+
+function esc(s){
+  return String(s == null ? '' : s).replace(/[&<>"]/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+function loc(t){
+  if(t.current_lat == null || t.current_lng == null) return '—';
+  const url  = 'https://www.google.com/maps?q=' + t.current_lat + ',' + t.current_lng;
+  const text = t.current_loc || (t.current_lat.toFixed(5) + ', ' + t.current_lng.toFixed(5));
+  return '<a href="'+url+'" target="_blank" rel="noopener" style="color:var(--tr)">📍 '+esc(text)+'</a>';
+}
+
+function render(){
+  const q = document.getElementById('q').value.trim().toLowerCase();
+  const list = (!q ? DATA : DATA.filter(t =>
+    [t.car_no, t.plate, t.customer, t.source, t.invoice_no]
+      .some(v => String(v||'').toLowerCase().includes(q))))
+    .slice()
+    .sort((a,b) => {           // ช้าที่สุดขึ้นก่อน แล้วค่อยเรียงตามเวลากำหนด
+      const rank = s => ({late:0, transit:1, early:2, pending:3, arrived:4}[s] ?? 5);
+      if (rank(a.status) !== rank(b.status)) return rank(a.status) - rank(b.status);
+      if (a.status === 'late') return (b.diff_minutes||0) - (a.diff_minutes||0);
+      return String(a.sched_time||'').localeCompare(String(b.sched_time||''));
+    });
+
+  document.getElementById('rows').innerHTML = list.length ? list.map(t => {
+    const diff = t.diff_minutes == null ? '<span class="mut">—</span>'
+      : (t.diff_minutes > 0 ? '<span style="color:var(--late)">+'+t.diff_minutes+'</span>'
+                            : '<span style="color:var(--ok)">'+t.diff_minutes+'</span>');
+    return '<tr>'
+      + '<td><b>'+esc(t.car_no)+'</b></td>'
+      + '<td class="mut">'+esc(t.plate)+'</td>'
+      + '<td>'+esc(t.trip_no)+'</td>'
+      + '<td>'+esc(t.drop)+'</td>'
+      + '<td class="wide">'+esc(t.customer)+'</td>'
+      + '<td>'+esc(t.source)+'</td>'
+      + '<td class="mono">'+esc(t.volume)+'</td>'
+      + '<td class="mono">'+esc(t.sched_time)+'</td>'
+      + '<td class="mono">'+(t.eta_time ? esc(t.eta_time) : '<span class="mut">—</span>')+'</td>'
+      + '<td class="mono">'+diff+'</td>'
+      + '<td><span class="badge s-'+esc(t.status)+'">'+(LABEL[t.status]||esc(t.status))+'</span></td>'
+      + '<td class="wide mut">'+loc(t)+'</td>'
+      + '</tr>';
+  }).join('') : '<tr><td colspan="12" class="empty">ไม่พบข้อมูล</td></tr>';
+
+  document.getElementById('foot').textContent =
+    'แสดง ' + list.length + ' จากทั้งหมด ' + DATA.length + ' ทริป';
+}
+
+async function load(){
+  const d  = document.getElementById('date').value || todayISO();
+  const el = document.getElementById('rows');
+  el.innerHTML = '<tr><td colspan="12" class="empty">กำลังโหลด…</td></tr>';
+  try{
+    const r = await fetch('/api/trips?date=' + d);
+    if(!r.ok) throw new Error((await r.json()).detail || r.statusText);
+    const j = await r.json();
+    DATA = j.trips || [];
+    document.getElementById('cards').innerHTML =
+        card(j.total,'ทริปทั้งหมด','')
+      + card(j.arrived,'ส่งเสร็จแล้ว','ok')
+      + card(j.in_transit,'กำลังเดินทาง','tr')
+      + card(j.late,'คาดว่าจะช้า','late')
+      + card(j.pending,'รอออกรถ','');
+    document.getElementById('stamp').innerHTML =
+      '<span class="dot"></span>อัปเดต ' + String(j.fetched_at).slice(11,16) + ' น.';
+    render();
+  }catch(e){
+    el.innerHTML = '<tr><td colspan="12" class="empty">เกิดข้อผิดพลาด: ' + esc(e.message) + '</td></tr>';
+  }
+}
+
+document.getElementById('date').value = todayISO();
+document.getElementById('go').onclick    = load;
+document.getElementById('date').onchange = load;
+document.getElementById('q').oninput     = render;
+load();
+setInterval(load, 30 * 60 * 1000);   // รีเฟรชอัตโนมัติทุก 30 นาที
+</script>
+</body>
+</html>
+"""
 
 # Vercel entry point
 handler = app
