@@ -1254,9 +1254,12 @@ const LABEL = {late:'ช้า', arrived:'ส่งแล้ว', transit:'ก�
 let ALL = [], DATA = [], FILTER = localStorage.getItem('gb_filter') || 'hour';
 if(('__NOPASS__') === '1') document.getElementById('nopass').hidden = false;
 
+function thaiNow(){                    // เวลาไทย (UTC+7) — อ่านค่าด้วย getUTC* เท่านั้น
+  return new Date(Date.now() + 7*3600*1000);
+}
+
 function todayISO(){
-  const d = new Date(Date.now() + (7*60 + new Date().getTimezoneOffset())*60000);
-  return d.toISOString().slice(0,10);
+  return thaiNow().toISOString().slice(0,10);
 }
 
 function card(n, label, cls){
@@ -1316,8 +1319,8 @@ function mins(hhmm){                  // "14:30" → 870
 }
 
 function nowMins(){
-  const d = new Date(Date.now() + (7*60 + new Date().getTimezoneOffset())*60000);
-  return d.getHours()*60 + d.getMinutes();
+  const d = thaiNow();
+  return d.getUTCHours()*60 + d.getUTCMinutes();
 }
 
 function keep(t){                     // กรองตามชิปที่เลือก
@@ -1373,7 +1376,12 @@ function render(){
       + '<td data-l="สถานะ" class="st">'+badge+'</td>'
       + '<td data-l="ตำแหน่งปัจจุบัน" class="wide mut">'+loc(t)+'</td>'
       + '</tr>';
-  }).join('') : '<tr><td colspan="16" class="empty">ไม่พบข้อมูล</td></tr>';
+  }).join('') : '<tr><td colspan="16" class="empty">'
+      + (ALL.length
+          ? 'ไม่มีทริปที่ตรงกับมุมมองนี้ (วันนี้มี ' + ALL.length + ' ทริป)<br>'
+            + '<span style="font-size:13px">ลองกดชิป <b>ทั้งหมด</b> ด้านบน หรือเปลี่ยนวันที่</span>'
+          : 'ไม่มีทริปในวันที่เลือก')
+      + '</td></tr>';
 
   document.getElementById('foot').textContent =
     'แสดง ' + list.length + ' ทริป (จากทั้งวัน ' + ALL.length + ' ทริป)';
