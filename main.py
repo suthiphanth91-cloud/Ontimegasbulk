@@ -71,6 +71,8 @@ PLAN_DEPART  = 30  # AE เวลาออกจากคลัง/สาขา
 PLAN_ARRIVE  = 31  # AF เวลาเข้าปลายทาง  ← เวลาถึงจริง
 PLAN_LEAVE   = 32  # AG เวลาออกปลายทาง
 PLAN_GPS_ST  = 33  # AH สถานะจัดส่ง GPS
+PLAN_ONTIME  = 47  # AV On Time  (PASS / Delay) — ผลตัดสินจากชีตเอง
+PLAN_ONTIME_M= 48  # AW On Time(m) จำนวนนาทีที่ช้า
 
 # Sheet 3: ข้อมูลปลายทาง — พิกัดของแต่ละจุดส่ง (อยู่ในไฟล์เดียวกับแผนงาน)
 DEST_ID      = PLAN_ID
@@ -94,6 +96,7 @@ DEPOTS: dict[str, tuple[float, float]] = {
 ROAD_FACTOR   = 1.35  # ถนนจริงอ้อมกว่าเส้นตรงประมาณ 35%
 AVG_SPEED_KMH = 45    # ความเร็วเฉลี่ยรถบรรทุกแก๊ส รวมติดไฟแดง/จราจร
 LOAD_MINS     = 45    # เวลาโหลดสำรอง ใช้เมื่อไม่พบในตาราง DEPOT_TIMES
+UNLOAD_MINS   = 45    # เวลาลงของที่ลูกค้า ใช้ต่อ ETA ระหว่าง Drop
 
 # จำนวนครั้งสูงสุดที่ยอมเรียก ORS ต่อ 1 request
 # กันทั้ง timeout ของ Vercel (~10 วิ) และ rate limit ของ ORS (40 ครั้ง/นาที)
@@ -215,6 +218,8 @@ class TripOut(BaseModel):
     invoice_no:   str
     sched_time:   str           # เวลากำหนด HH:MM
     gps_status:   str           # สถานะจาก Sheet (คอลัมน์ AH)
+    ontime:       str = ""      # AV ผลตัดสิน On Time จากชีต (PASS / Delay)
+    ontime_min:   str = ""      # AW ช้ากี่นาที (ตามชีต)
     driver:       str = ""      # S  ชื่อ พขร
     phone:        str = ""      # U  เบอร์โทร พขร
     # เวลาจริงจากชีต (คอลัมน์ AB–AG) — ว่างแปลว่ายังไม่ถึงขั้นนั้น
@@ -558,8 +563,11 @@ def fetch_trips(target_date: str) -> list[dict]:
             "invoice_no": _cell(row, PLAN_INVOICE),
             "sched_time": _cell(row, PLAN_SCHED),
             "gps_status": _cell(row, PLAN_GPS_ST),
+            "ontime":     _cell(row, PLAN_ONTIME),                 # AV PASS / Delay
+            "ontime_min": _cell(row, PLAN_ONTIME_M),               # AW นาทีที่ช้า
             "status_man": _cell(row, PLAN_STATUS),                 # AA กรอกมือ
             "call_time":  _cell_time(_cell(row, PLAN_P_CALL)),     # Z  ถึงเวลาโทรตาม
+            "call_dt":    _cell_dt(_cell(row, PLAN_P_CALL)),       # Z  พร้อมวันที่ (อาจเป็นเมื่อวาน)
             "load_plan":  _cell_time(_cell(row, PLAN_P_LOAD)),     # Y  เวลาเข้าโหลด (แผน)
             "vtype":      _cell(row, PLAN_VTYPE),                  # ประเภทรถ
             "driver":     _cell(row, PLAN_DRIVER) or _cell(row, PLAN_DRIVER2),
@@ -739,10 +747,13 @@ def get_trips(
                 prediction = "รอออกรถ"
 
         # ─ ยังไม่ออกจากคลัง และเลยเวลาโทรตาม พขร แล้ว → เตือนให้โทร ─
-        call_mins = _to_mins(t["call_time"] or "")
+        # เทียบวันที่ด้วย เพราะเวลานัดโทรอาจเป็นของเมื่อวาน เช่น "19/08/2026, 22:00"
         if (status not in ("arrived", "cancelled") and not t["depart"]
-                and is_today and call_mins is not None and _now_mins() >= call_mins):
-            prediction = f"📞 ถึงเวลาโทรตาม พขร (นัดไว้ {t['call_time']}) — " + prediction
+                and t["call_dt"] is not None and now_dt >= t["call_dt"]):
+            late_call = int((now_dt - t["call_dt"]).total_seconds() // 60)
+            prediction = (f"📞 ถึงเวลาโทรตาม พขร (นัดไว้ {t['call_time']}"
+                          + (f", เลยมา {late_call // 60} ชม." if late_call >= 60 else "")
+                          + ") — ") + prediction
 
         results.append(TripOut(
             id           = t["id"],
@@ -757,6 +768,8 @@ def get_trips(
             invoice_no   = t["invoice_no"],
             sched_time   = t["sched_time"],
             gps_status   = t["status_man"] or t["gps_status"],
+            ontime       = t["ontime"],
+            ontime_min   = t["ontime_min"],
             driver       = t["driver"],
             phone        = t["phone"],
             yard_time    = t["yard_time"],
@@ -773,6 +786,49 @@ def get_trips(
             actual       = actual,
             prediction   = prediction,
         ))
+
+    # ─── ทริปหลาย Drop ของรถคันเดียวกัน ───────────────────────────────────
+    # Drop 2 ต้องเริ่มนับหลังส่ง Drop 1 เสร็จ ไม่ใช่คิดจากตำแหน่งปัจจุบันซ้ำ
+    LIVE = ("late", "transit", "early", "pending")
+    by_car: dict[str, list[int]] = {}
+    for i, r in enumerate(results):
+        if r.status in LIVE and trips[i]["car_key"]:
+            by_car.setdefault(trips[i]["car_key"], []).append(i)
+
+    for idxs in by_car.values():
+        if len(idxs) < 2:
+            continue
+        idxs.sort(key=lambda i: (int(_extract_car_no(trips[i]["drop"]) or 0),
+                                 _to_mins(trips[i]["sched_time"]) or 0))
+        for prev_i, cur_i in zip(idxs, idxs[1:]):
+            prev, cur = results[prev_i], results[cur_i]
+            a = dest_map.get(trips[prev_i]["customer"])
+            b = dest_map.get(trips[cur_i]["customer"])
+            if prev.travel_mins is None or not a or not b:
+                continue
+            leg = _get_travel_minutes(a[0], a[1], b[0], b[1], False)
+            if leg is None:
+                continue
+            total = prev.travel_mins + UNLOAD_MINS + leg
+            sd    = _sched_dt(trips[cur_i]["due_date"], trips[cur_i]["sched_time"])
+            e     = now_dt + timedelta(minutes=total)
+            cur.travel_mins = total
+            cur.eta_time    = e.strftime("%H:%M")
+            note = (f"ต่อจาก Drop {trips[prev_i]['drop']} "
+                    f"(ถึง ~{prev.eta_time} + ลงของ {UNLOAD_MINS} น. + วิ่ง {leg} น.)")
+            if sd is None:
+                cur.prediction = note
+                continue
+            cur.diff_minutes = int((e - sd).total_seconds() // 60)
+            if cur.diff_minutes > 15:
+                cur.status     = "late"
+                cur.prediction = f"⚠ คาดว่าจะช้า {cur.diff_minutes} นาที — {note}"
+            elif cur.diff_minutes < -10:
+                cur.status     = "early"
+                cur.prediction = f"จะถึงเร็วกว่ากำหนด {abs(cur.diff_minutes)} นาที ✓ — {note}"
+            else:
+                cur.status     = "transit"
+                cur.prediction = f"น่าจะถึงตรงเวลา — {note}"
 
     arrived    = sum(1 for r in results if r.status == "arrived")
     in_transit = sum(1 for r in results if r.status in ("transit", "early"))
@@ -1240,7 +1296,7 @@ DASHBOARD_HTML = """<!doctype html>
         <th>ลูกค้าปลายทาง</th><th>เบอร์รถ</th><th>ทะเบียน</th><th>ปริมาณ</th>
         <th>พขร. / โทร</th>
         <th>เวลา</th><th>เลขที่ใบกำกับการขนส่ง</th><th>สถานะ GPS</th>
-        <th>ETA / ถึงจริง</th><th>ต่าง</th><th>สถานะ</th><th>ตำแหน่งปัจจุบัน</th>
+        <th>ETA / ถึงจริง</th><th>ต่าง</th><th>On Time</th><th>สถานะ</th><th>ตำแหน่งปัจจุบัน</th>
       </tr></thead>
       <tbody id="rows"></tbody>
     </table>
@@ -1299,6 +1355,15 @@ document.addEventListener('click', e => {
     setTimeout(() => { b.textContent = old; }, 1200);
   });
 });
+
+function ot(t){                       // ผลตัดสิน On Time ที่ชีตคำนวณไว้เอง
+  const v = String(t.ontime||'').trim();
+  if(!v) return '<span class="mut">—</span>';
+  const pass = /pass|ontime|on time|ตรงเวลา/i.test(v);
+  const m    = String(t.ontime_min||'').trim();
+  return '<span class="badge '+(pass?'s-arrived':'s-late')+'">'+esc(v)+'</span>'
+       + (m && !pass ? '<div style="font-size:12px;color:var(--mut);margin-top:3px">'+esc(m)+' น.</div>' : '');
+}
 
 function eta(t){                      // ถึงจริงแล้วโชว์เวลาจริง ไม่งั้นโชว์ประมาณการ
   if(t.arrive_time) return '<b style="color:var(--ok)">'+esc(t.arrive_time)+'</b>';
@@ -1373,10 +1438,11 @@ function render(){
       + '<td data-l="สถานะ GPS" class="mut">'+esc(t.gps_status)+'</td>'
       + '<td data-l="ETA / ถึงจริง" class="mono">'+eta(t)+'</td>'
       + '<td data-l="ต่าง" class="mono">'+diff+'</td>'
+      + '<td data-l="On Time (ชีต)">'+ot(t)+'</td>'
       + '<td data-l="สถานะ" class="st">'+badge+'</td>'
       + '<td data-l="ตำแหน่งปัจจุบัน" class="wide mut">'+loc(t)+'</td>'
       + '</tr>';
-  }).join('') : '<tr><td colspan="16" class="empty">'
+  }).join('') : '<tr><td colspan="17" class="empty">'
       + (ALL.length
           ? 'ไม่มีทริปที่ตรงกับมุมมองนี้ (วันนี้มี ' + ALL.length + ' ทริป)<br>'
             + '<span style="font-size:13px">ลองกดชิป <b>ทั้งหมด</b> ด้านบน หรือเปลี่ยนวันที่</span>'
@@ -1390,7 +1456,7 @@ function render(){
 async function load(){
   const d  = document.getElementById('date').value || todayISO();
   const el = document.getElementById('rows');
-  el.innerHTML = '<tr><td colspan="16" class="empty">กำลังโหลด…</td></tr>';
+  el.innerHTML = '<tr><td colspan="17" class="empty">กำลังโหลด…</td></tr>';
   try{
     const r = await fetch('/api/trips?date=' + d);
     if(!r.ok) throw new Error((await r.json()).detail || r.statusText);
@@ -1407,7 +1473,7 @@ async function load(){
       '<span class="dot"></span>อัปเดต ' + String(j.fetched_at).slice(11,16) + ' น.';
     render();
   }catch(e){
-    el.innerHTML = '<tr><td colspan="16" class="empty">เกิดข้อผิดพลาด: ' + esc(e.message) + '</td></tr>';
+    el.innerHTML = '<tr><td colspan="17" class="empty">เกิดข้อผิดพลาด: ' + esc(e.message) + '</td></tr>';
   }
 }
 
