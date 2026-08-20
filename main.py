@@ -904,7 +904,7 @@ def debug():
 # เก็บในแท็บแยกชื่อ ChaseLog ของไฟล์แผนงาน ไม่แตะคอลัมน์เดิม
 # โครงสร้าง: A=key  B=วันที่  C=เบอร์รถ  D=ปลายทาง  E=ไล่เมื่อ  F=โดย
 
-CHASE_HEADER = ["key", "date", "car_no", "customer", "chased_at", "by"]
+CHASE_HEADER = ["key", "date", "car_no", "customer", "chased_at", "status"]
 
 
 def _chase_ws():
@@ -929,7 +929,7 @@ def chase_list(date_str: str = Query(None, alias="date")):
     out = {}
     for r in rows[1:]:
         if _cell(r, 1) == target and _cell(r, 0):
-            out[_cell(r, 0)] = {"at": _cell(r, 4), "by": _cell(r, 5)}
+            out[_cell(r, 0)] = {"at": _cell(r, 4), "status": _cell(r, 5)}
     return out
 
 
@@ -939,7 +939,7 @@ def chase_set(
     date_str: str = Form(..., alias="date"),
     car_no:   str = Form(""),
     customer: str = Form(""),
-    by:       str = Form(""),
+    status:   str = Form(""),
     clear:    str = Form(""),
 ):
     """ติ๊ก = บันทึกเวลาไล่  /  เอาติ๊กออก = ลบแถวนั้น"""
@@ -955,7 +955,7 @@ def chase_set(
             return {"ok": True, "cleared": True}
 
         at = _thai_now().strftime("%H:%M")
-        row = [key, date_str, car_no, customer, at, by]
+        row = [key, date_str, car_no, customer, at, status]
         if hit:
             ws.update(f"A{hit}:F{hit}", [row])
         else:
@@ -1262,8 +1262,13 @@ DASHBOARD_HTML = """<!doctype html>
   th{font-size:12.5px;color:var(--mut);font-weight:600;text-transform:uppercase;
      letter-spacing:.4px;position:sticky;top:0;background:var(--card)}
   tbody tr:hover{background:var(--pd-bg)}
-  td.wide{white-space:normal;min-width:190px;max-width:340px}
-  td.cust{min-width:230px}
+  /* บีบให้ทุกแถวสูงบรรทัดเดียว อ่านง่ายขึ้นมาก */
+  td.wide{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px}
+  td.cust{max-width:260px;font-weight:500}
+  tbody tr:nth-child(even){background:var(--pd-bg)}
+  tbody tr:nth-child(even):hover,tbody tr:hover{background:var(--tr-bg)}
+  /* ซ่อนคอลัมน์ On Time ถ้าทั้งวันยังไม่มีข้อมูล */
+  table.hide-ot th:nth-child(15),table.hide-ot td:nth-child(15){display:none}
   .badge{display:inline-block;padding:3px 11px;border-radius:999px;font-size:12.5px;font-weight:600}
   .s-late{background:var(--late-bg);color:var(--late)}
   .s-arrived{background:var(--ok-bg);color:var(--ok)}
@@ -1281,9 +1286,11 @@ DASHBOARD_HTML = """<!doctype html>
   .note{color:var(--mut);font-size:13px;margin:10px 2px}
   .empty{padding:48px;text-align:center;color:var(--mut)}
   .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);margin-right:6px}
-  .chk label{display:flex;align-items:center;gap:7px;cursor:pointer}
-  .chk input{width:19px;height:19px;accent-color:#16a34a;cursor:pointer}
-  .at{font-size:12.5px;white-space:nowrap}
+  .chk select{padding:6px 9px;border-radius:8px;border:1px solid var(--line);
+              background:var(--card);color:var(--ink);font-family:inherit;font-size:13px;
+              min-width:150px;cursor:pointer}
+  .chk select:hover{border-color:#2563eb}
+  .at{font-size:12px;color:var(--mut);margin-top:3px;white-space:nowrap}
   tr.done{opacity:.55}
   tr.done .at{color:var(--ok);font-weight:600}
   .callnow{display:inline-block;margin-left:6px;font-size:12px;color:var(--late);font-weight:600}
@@ -1363,13 +1370,13 @@ DASHBOARD_HTML = """<!doctype html>
     <button class="chip" data-f="all">ทั้งหมด</button>
   </div>
   <div class="wrap">
-    <table>
+    <table id="tbl">
       <thead><tr>
         <th>ประจำวันที่</th><th>คลังต้นทาง</th><th>เที่ยววิ่ง</th><th>Drop</th>
         <th>ลูกค้าปลายทาง</th><th>เบอร์รถ</th><th>ทะเบียน</th><th>ปริมาณ</th>
         <th>พขร. / โทร</th>
         <th>เวลา</th><th>เลขที่ใบกำกับการขนส่ง</th><th>สถานะ GPS</th>
-        <th>ETA / ถึงจริง</th><th>ต่าง</th><th>On Time</th><th>สถานะ</th><th>ตำแหน่งปัจจุบัน</th><th>ไล่แล้ว</th>
+        <th>ETA / ถึงจริง</th><th>ต่าง</th><th>On Time</th><th>สถานะ</th><th>ตำแหน่งปัจจุบัน</th><th>อัปเดตสถานะ</th>
       </tr></thead>
       <tbody id="rows"></tbody>
     </table>
@@ -1405,6 +1412,23 @@ function dur(m){                      // 1447 → "24 ชม. 7 น."   45 → "
   if(m < 60) return m + ' น.';
   const h = Math.floor(m/60), r = m % 60;
   return h + ' ชม.' + (r ? ' ' + r + ' น.' : '');
+}
+
+// รายการสถานะให้เลือก — ตรงกับที่ใช้ในชีต
+const STATUS_LIST = [
+  'จอดที่ฟรีต', 'รอรถเที่ยว 1', 'กำลังไปโหลดแก๊ส', 'กำลังโหลด',
+  'กำลังเดินทาง', 'ถึงปลายทาง', 'จัดส่งรอบ 1', 'จัดส่งรอบ 2',
+  'โหลดเก็บ', 'จบงาน', 'ยกเลิกออเดอร์',
+];
+
+function pick(t, k){                  // ดรอปดาวน์เลือกสถานะ + เวลาที่บันทึก
+  const cur = CHASED[k] || {};
+  const opts = ['<option value="">— เลือกสถานะ —</option>'].concat(
+    STATUS_LIST.map(s => '<option value="'+esc(s)+'"'
+                       + (cur.status === s ? ' selected' : '') + '>'+esc(s)+'</option>')
+  ).join('');
+  return '<select class="pickst" data-k="'+esc(k)+'">'+opts+'</select>'
+       + (cur.at ? '<div class="at">🕐 '+esc(cur.at)+'</div>' : '');
 }
 
 function tel(t){                      // ชื่อ พขร + ปุ่มโทร + ปุ่มคัดลอกเบอร์
@@ -1466,37 +1490,36 @@ async function loadChased(){
     const r = await fetch('/api/chase?date=' + curDate());
     if(!r.ok) throw new Error('load failed');
     const j = await r.json();
-    CHASED = {};
-    for(const k in j) CHASED[k] = j[k].at || '✓';
+    CHASED = j;
   }catch(e){
     try{ CHASED = JSON.parse(localStorage.getItem('gb_chased_'+curDate()) || '{}'); }
     catch(e2){ CHASED = {}; }
   }
 }
 
-async function toggleChase(k, on, t){
-  const body = new URLSearchParams({ key:k, date:curDate(),
+async function saveStatus(k, status, t){
+  const body = new URLSearchParams({ key:k, date:curDate(), status:status,
                                      car_no:t.car_no||'', customer:t.customer||'' });
-  if(!on) body.set('clear','1');
+  if(!status) body.set('clear','1');
   const r = await fetch('/api/chase', {method:'POST', body});
   if(!r.ok) throw new Error((await r.json().catch(()=>({}))).detail || 'save failed');
   return (await r.json()).at;
 }
 
 document.addEventListener('change', async e => {
-  const b = e.target.closest('.tick');
+  const b = e.target.closest('.pickst');
   if(!b) return;
   const k = b.dataset.k;
   const t = ALL.find(x => key(x) === k) || {};
   const d = thaiNow();
   const now = String(d.getUTCHours()).padStart(2,'0')+':'+String(d.getUTCMinutes()).padStart(2,'0');
 
-  if(b.checked) CHASED[k] = now; else delete CHASED[k];   // อัปเดตจอทันที ไม่ต้องรอเน็ต
+  if(b.value) CHASED[k] = {at: now, status: b.value}; else delete CHASED[k];
   render();
 
   try{
-    const at = await toggleChase(k, b.checked, t);
-    if(b.checked && at){ CHASED[k] = at; render(); }
+    const at = await saveStatus(k, b.value, t);
+    if(b.value && at){ CHASED[k] = {at: at, status: b.value}; render(); }
     localStorage.setItem('gb_chased_'+curDate(), JSON.stringify(CHASED));
   }catch(err){
     localStorage.setItem('gb_chased_'+curDate(), JSON.stringify(CHASED));
@@ -1538,7 +1561,7 @@ function render(){
       .some(v => String(v||'').toLowerCase().includes(q))))
     .slice()
     .sort((a,b) => {           // ช้าที่สุดขึ้นก่อน แล้วค่อยเรียงตามเวลากำหนด
-      const ck = x => CHASED[key(x)] ? 1 : 0;          // ที่ไล่แล้วลงไปอยู่ล่าง
+      const ck = x => (CHASED[key(x)]&&CHASED[key(x)].status) ? 1 : 0;          // ที่ไล่แล้วลงไปอยู่ล่าง
       if (ck(a) !== ck(b)) return ck(a) - ck(b);
       const rank = s => ({late:0, transit:1, early:2, pending:3, arrived:4, cancelled:5}[s] ?? 6);
       if (rank(a.status) !== rank(b.status)) return rank(a.status) - rank(b.status);
@@ -1556,7 +1579,7 @@ function render(){
     const badge = '<span class="badge s-'+esc(t.status)+'">'
                 + (LABEL[t.status]||esc(t.status))+'</span>'
                 + (call ? '<span class="callnow">📞 ถึงเวลาโทร</span>' : '');
-    return '<tr class="'+(CHASED[k]?'done':'')+'">'
+    return '<tr class="'+((CHASED[k]&&CHASED[k].status)?'done':'')+'">'
       + '<td data-l="ประจำวันที่" class="mono mut">'+esc(t.date)+'</td>'
       + '<td data-l="คลังต้นทาง">'+esc(t.source)+'</td>'
       + '<td data-l="เที่ยววิ่ง">'+esc(t.trip_no)+'</td>'
@@ -1574,10 +1597,7 @@ function render(){
       + '<td data-l="On Time (ชีต)">'+ot(t)+'</td>'
       + '<td data-l="สถานะ" class="st">'+badge+'</td>'
       + '<td data-l="ตำแหน่งปัจจุบัน" class="wide mut">'+loc(t)+'</td>'
-      + '<td data-l="ไล่แล้ว" class="chk">'
-        + '<label><input type="checkbox" class="tick" data-k="'+k+'"'+(CHASED[k]?' checked':'')+'>'
-        + (CHASED[k] ? '<span class="at">ไล่ '+esc(CHASED[k])+'</span>' : '<span class="at mut">ยังไม่ไล่</span>')
-        + '</label></td>'
+      + '<td data-l="อัปเดตสถานะ" class="chk">'+pick(t, k)+'</td>'
       + '</tr>';
   }).join('') : '<tr><td colspan="18" class="empty">'
       + (ALL.length
@@ -1585,6 +1605,9 @@ function render(){
             + '<span style="font-size:13px">ลองกดชิป <b>ทั้งหมด</b> ด้านบน หรือเปลี่ยนวันที่</span>'
           : 'ไม่มีทริปในวันที่เลือก')
       + '</td></tr>';
+
+  document.getElementById('tbl').classList.toggle('hide-ot',
+    !ALL.some(t => String(t.ontime||'').trim()));   // ไม่มีข้อมูล On Time ก็ซ่อนคอลัมน์ไป
 
   document.getElementById('foot').textContent =
     'แสดง ' + list.length + ' ทริป (จากทั้งวัน ' + ALL.length + ' ทริป)';
