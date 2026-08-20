@@ -126,7 +126,7 @@ DEPOT_TIMES: dict[tuple[str, str], tuple[int, int]] = {
 
 # คำในคอลัมน์สถานะ GPS ที่แปลว่า "ส่งเสร็จแล้ว" (เพิ่มคำใหม่ได้ที่นี่)
 DONE_KEYWORDS = [
-    "สำเร็จ", "เสร็จ", "จัดส่งแล้ว", "ส่งแล้ว",
+    "สำเร็จ", "เสร็จ", "จัดส่งแล้ว", "ส่งแล้ว", "จบงาน",
     "ถึงปลายทาง", "ถึงลูกค้า", "delivered", "complete",
 ]
 
@@ -137,10 +137,13 @@ TZ_OFFSET     = 7    # UTC+7
 CACHE_TTL     = 300  # cache Sheet 5 นาที
 ETA_CACHE_TTL = 3600  # cache ETA 1 ชม. (ตรงกับรอบไล่รถ + ประหยัดโควตา ORS)
 
+# ต้องใช้สิทธิ์เขียน เพราะบันทึก "ไล่แล้ว" ลงแท็บ ChaseLog
+# (แตะเฉพาะแท็บ ChaseLog เท่านั้น ไม่ยุ่งกับแผนงาน Gasbulk)
 SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets.readonly",
+    "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.readonly",
 ]
+CHASE_TAB = "ChaseLog"
 
 # ─── ล็อกอิน ─────────────────────────────────────────────────────────────────
 # ตั้งรหัสผ่านที่ Vercel → Settings → Environment Variables → APP_PASSWORD
@@ -897,6 +900,71 @@ def debug():
     return out
 
 
+# ─── ChaseLog — บันทึกว่าไล่รถคันไหนไปแล้ว ────────────────────────────────
+# เก็บในแท็บแยกชื่อ ChaseLog ของไฟล์แผนงาน ไม่แตะคอลัมน์เดิม
+# โครงสร้าง: A=key  B=วันที่  C=เบอร์รถ  D=ปลายทาง  E=ไล่เมื่อ  F=โดย
+
+CHASE_HEADER = ["key", "date", "car_no", "customer", "chased_at", "by"]
+
+
+def _chase_ws():
+    """เปิดแท็บ ChaseLog ถ้ายังไม่มีก็สร้างให้"""
+    sh = gspread.authorize(_build_creds()).open_by_key(PLAN_ID)
+    try:
+        return sh.worksheet(CHASE_TAB)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=CHASE_TAB, rows=2000, cols=6)
+        ws.update("A1:F1", [CHASE_HEADER])
+        return ws
+
+
+@app.get("/api/chase", include_in_schema=False)
+def chase_list(date_str: str = Query(None, alias="date")):
+    """คืนรายการที่ไล่แล้วของวันนั้น {key: {"at": "17:54", "by": "..."}}"""
+    target = date_str or _today_thai()
+    try:
+        rows = _chase_ws().get_all_values()
+    except Exception as e:
+        raise HTTPException(502, f"อ่าน ChaseLog ไม่ได้: {type(e).__name__}: {e}")
+    out = {}
+    for r in rows[1:]:
+        if _cell(r, 1) == target and _cell(r, 0):
+            out[_cell(r, 0)] = {"at": _cell(r, 4), "by": _cell(r, 5)}
+    return out
+
+
+@app.post("/api/chase", include_in_schema=False)
+def chase_set(
+    key:      str = Form(...),
+    date_str: str = Form(..., alias="date"),
+    car_no:   str = Form(""),
+    customer: str = Form(""),
+    by:       str = Form(""),
+    clear:    str = Form(""),
+):
+    """ติ๊ก = บันทึกเวลาไล่  /  เอาติ๊กออก = ลบแถวนั้น"""
+    try:
+        ws   = _chase_ws()
+        rows = ws.get_all_values()
+        hit  = next((i for i, r in enumerate(rows[1:], start=2)
+                     if _cell(r, 0) == key), None)
+
+        if clear:
+            if hit:
+                ws.delete_rows(hit)
+            return {"ok": True, "cleared": True}
+
+        at = _thai_now().strftime("%H:%M")
+        row = [key, date_str, car_no, customer, at, by]
+        if hit:
+            ws.update(f"A{hit}:F{hit}", [row])
+        else:
+            ws.append_row(row, value_input_option="USER_ENTERED")
+        return {"ok": True, "at": at}
+    except Exception as e:
+        raise HTTPException(502, f"บันทึก ChaseLog ไม่ได้: {type(e).__name__}: {e}")
+
+
 @app.get("/api/peek")
 def peek():
     """ดูข้อมูลดิบ 5 แถวแรกของแผนงาน เพื่อเช็คว่าคอลัมน์/วันที่ตรงไหม"""
@@ -1213,6 +1281,11 @@ DASHBOARD_HTML = """<!doctype html>
   .note{color:var(--mut);font-size:13px;margin:10px 2px}
   .empty{padding:48px;text-align:center;color:var(--mut)}
   .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);margin-right:6px}
+  .chk label{display:flex;align-items:center;gap:7px;cursor:pointer}
+  .chk input{width:19px;height:19px;accent-color:#16a34a;cursor:pointer}
+  .at{font-size:12.5px;white-space:nowrap}
+  tr.done{opacity:.55}
+  tr.done .at{color:var(--ok);font-weight:600}
   .callnow{display:inline-block;margin-left:6px;font-size:12px;color:var(--late);font-weight:600}
   .gear{text-decoration:none;font-size:19px;padding:6px 9px;border-radius:9px;
         border:1px solid var(--line);line-height:1}
@@ -1296,7 +1369,7 @@ DASHBOARD_HTML = """<!doctype html>
         <th>ลูกค้าปลายทาง</th><th>เบอร์รถ</th><th>ทะเบียน</th><th>ปริมาณ</th>
         <th>พขร. / โทร</th>
         <th>เวลา</th><th>เลขที่ใบกำกับการขนส่ง</th><th>สถานะ GPS</th>
-        <th>ETA / ถึงจริง</th><th>ต่าง</th><th>On Time</th><th>สถานะ</th><th>ตำแหน่งปัจจุบัน</th>
+        <th>ETA / ถึงจริง</th><th>ต่าง</th><th>On Time</th><th>สถานะ</th><th>ตำแหน่งปัจจุบัน</th><th>ไล่แล้ว</th>
       </tr></thead>
       <tbody id="rows"></tbody>
     </table>
@@ -1378,6 +1451,63 @@ function loc(t){
   return '<a href="'+url+'" target="_blank" rel="noopener" style="color:var(--tr)">📍 '+esc(text)+'</a>';
 }
 
+// ── บันทึกว่าไล่รถคันไหนไปแล้ว → เก็บลงแท็บ ChaseLog ใน Google Sheet ──────
+// ทุกคนที่เปิดเว็บเห็นตรงกัน  ถ้าเขียนไม่ได้จะเก็บในเครื่องไว้ก่อนและแจ้งเตือน
+let CHASED = {};
+
+function key(t){                      // คีย์ประจำทริป ใช้ข้ามการรีเฟรชได้
+  return [t.date, t.car_no, t.trip_no, t.drop, t.invoice_no].join('|');
+}
+
+function curDate(){ return document.getElementById('date').value || todayISO(); }
+
+async function loadChased(){
+  try{
+    const r = await fetch('/api/chase?date=' + curDate());
+    if(!r.ok) throw new Error('load failed');
+    const j = await r.json();
+    CHASED = {};
+    for(const k in j) CHASED[k] = j[k].at || '✓';
+  }catch(e){
+    try{ CHASED = JSON.parse(localStorage.getItem('gb_chased_'+curDate()) || '{}'); }
+    catch(e2){ CHASED = {}; }
+  }
+}
+
+async function toggleChase(k, on, t){
+  const body = new URLSearchParams({ key:k, date:curDate(),
+                                     car_no:t.car_no||'', customer:t.customer||'' });
+  if(!on) body.set('clear','1');
+  const r = await fetch('/api/chase', {method:'POST', body});
+  if(!r.ok) throw new Error((await r.json().catch(()=>({}))).detail || 'save failed');
+  return (await r.json()).at;
+}
+
+document.addEventListener('change', async e => {
+  const b = e.target.closest('.tick');
+  if(!b) return;
+  const k = b.dataset.k;
+  const t = ALL.find(x => key(x) === k) || {};
+  const d = thaiNow();
+  const now = String(d.getUTCHours()).padStart(2,'0')+':'+String(d.getUTCMinutes()).padStart(2,'0');
+
+  if(b.checked) CHASED[k] = now; else delete CHASED[k];   // อัปเดตจอทันที ไม่ต้องรอเน็ต
+  render();
+
+  try{
+    const at = await toggleChase(k, b.checked, t);
+    if(b.checked && at){ CHASED[k] = at; render(); }
+    localStorage.setItem('gb_chased_'+curDate(), JSON.stringify(CHASED));
+  }catch(err){
+    localStorage.setItem('gb_chased_'+curDate(), JSON.stringify(CHASED));
+    const w = document.getElementById('nopass');
+    w.hidden = false;
+    w.innerHTML = '⚠️ บันทึกลง Google Sheet ไม่ได้ (' + esc(err.message) + ')<br>'
+      + 'เก็บไว้ในเครื่องนี้ก่อน — ต้องแชร์ไฟล์แผนงานให้ '
+      + '<b>tms-249@tms-bult.iam.gserviceaccount.com</b> เป็น <b>ผู้แก้ไข</b>';
+  }
+});
+
 function mins(hhmm){                  // "14:30" → 870
   const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm||''));
   return m ? (+m[1])*60 + (+m[2]) : null;
@@ -1408,6 +1538,8 @@ function render(){
       .some(v => String(v||'').toLowerCase().includes(q))))
     .slice()
     .sort((a,b) => {           // ช้าที่สุดขึ้นก่อน แล้วค่อยเรียงตามเวลากำหนด
+      const ck = x => CHASED[key(x)] ? 1 : 0;          // ที่ไล่แล้วลงไปอยู่ล่าง
+      if (ck(a) !== ck(b)) return ck(a) - ck(b);
       const rank = s => ({late:0, transit:1, early:2, pending:3, arrived:4, cancelled:5}[s] ?? 6);
       if (rank(a.status) !== rank(b.status)) return rank(a.status) - rank(b.status);
       if (a.status === 'late') return (b.diff_minutes||0) - (a.diff_minutes||0);
@@ -1415,6 +1547,7 @@ function render(){
     });
 
   document.getElementById('rows').innerHTML = list.length ? list.map(t => {
+    const k    = key(t);
     const call = String(t.prediction||'').startsWith('📞');
     const diff = t.diff_minutes == null ? '<span class="mut">—</span>'
       : (t.diff_minutes > 0
@@ -1423,7 +1556,7 @@ function render(){
     const badge = '<span class="badge s-'+esc(t.status)+'">'
                 + (LABEL[t.status]||esc(t.status))+'</span>'
                 + (call ? '<span class="callnow">📞 ถึงเวลาโทร</span>' : '');
-    return '<tr>'
+    return '<tr class="'+(CHASED[k]?'done':'')+'">'
       + '<td data-l="ประจำวันที่" class="mono mut">'+esc(t.date)+'</td>'
       + '<td data-l="คลังต้นทาง">'+esc(t.source)+'</td>'
       + '<td data-l="เที่ยววิ่ง">'+esc(t.trip_no)+'</td>'
@@ -1441,8 +1574,12 @@ function render(){
       + '<td data-l="On Time (ชีต)">'+ot(t)+'</td>'
       + '<td data-l="สถานะ" class="st">'+badge+'</td>'
       + '<td data-l="ตำแหน่งปัจจุบัน" class="wide mut">'+loc(t)+'</td>'
+      + '<td data-l="ไล่แล้ว" class="chk">'
+        + '<label><input type="checkbox" class="tick" data-k="'+k+'"'+(CHASED[k]?' checked':'')+'>'
+        + (CHASED[k] ? '<span class="at">ไล่ '+esc(CHASED[k])+'</span>' : '<span class="at mut">ยังไม่ไล่</span>')
+        + '</label></td>'
       + '</tr>';
-  }).join('') : '<tr><td colspan="17" class="empty">'
+  }).join('') : '<tr><td colspan="18" class="empty">'
       + (ALL.length
           ? 'ไม่มีทริปที่ตรงกับมุมมองนี้ (วันนี้มี ' + ALL.length + ' ทริป)<br>'
             + '<span style="font-size:13px">ลองกดชิป <b>ทั้งหมด</b> ด้านบน หรือเปลี่ยนวันที่</span>'
@@ -1456,12 +1593,13 @@ function render(){
 async function load(){
   const d  = document.getElementById('date').value || todayISO();
   const el = document.getElementById('rows');
-  el.innerHTML = '<tr><td colspan="17" class="empty">กำลังโหลด…</td></tr>';
+  el.innerHTML = '<tr><td colspan="18" class="empty">กำลังโหลด…</td></tr>';
   try{
     const r = await fetch('/api/trips?date=' + d);
     if(!r.ok) throw new Error((await r.json()).detail || r.statusText);
     const j = await r.json();
     ALL = j.trips || [];
+    await loadChased();
     document.getElementById('cards').innerHTML =
         card(j.total,'ทริปทั้งหมด','')
       + card(j.arrived,'ส่งเสร็จแล้ว','ok')
@@ -1473,7 +1611,7 @@ async function load(){
       '<span class="dot"></span>อัปเดต ' + String(j.fetched_at).slice(11,16) + ' น.';
     render();
   }catch(e){
-    el.innerHTML = '<tr><td colspan="17" class="empty">เกิดข้อผิดพลาด: ' + esc(e.message) + '</td></tr>';
+    el.innerHTML = '<tr><td colspan="18" class="empty">เกิดข้อผิดพลาด: ' + esc(e.message) + '</td></tr>';
   }
 }
 
