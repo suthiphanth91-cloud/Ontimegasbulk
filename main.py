@@ -1622,7 +1622,12 @@ async function saveStatus(k, status, t){
   return (await r.json()).at;
 }
 
-document.addEventListener('change', async e => {
+// ไม่ยิงบันทึกลง Sheet ทันทีทุกครั้งที่เลือก — พักไว้ในเครื่องก่อน แล้วค่อยส่งรวมทุก 20 นาที
+// (กันยิง API ถี่เกินไป) หน้าจอผู้ใช้เองยังอัปเดตทันทีเสมอ
+const PENDING_SAVE_MS = 20 * 60 * 1000;
+let pendingSaves = {};   // {k: {status, t}}
+
+document.addEventListener('change', e => {
   const b = e.target.closest('.pickst');
   if(!b) return;
   const k = b.dataset.k;
@@ -1632,20 +1637,35 @@ document.addEventListener('change', async e => {
 
   if(b.value) CHASED[k] = {at: now, status: b.value}; else delete CHASED[k];
   render();
+  localStorage.setItem('gb_chased_'+curDate(), JSON.stringify(CHASED));
 
-  try{
-    const at = await saveStatus(k, b.value, t);
-    if(b.value && at){ CHASED[k] = {at: at, status: b.value}; render(); }
-    localStorage.setItem('gb_chased_'+curDate(), JSON.stringify(CHASED));
-  }catch(err){
-    localStorage.setItem('gb_chased_'+curDate(), JSON.stringify(CHASED));
-    const w = document.getElementById('nopass');
-    w.hidden = false;
-    w.innerHTML = '⚠️ บันทึกลง Google Sheet ไม่ได้ (' + esc(err.message) + ')<br>'
-      + 'เก็บไว้ในเครื่องนี้ก่อน — ต้องแชร์ไฟล์แผนงานให้ '
-      + '<b>tms-249@tms-bult.iam.gserviceaccount.com</b> เป็น <b>ผู้แก้ไข</b>';
-  }
+  pendingSaves[k] = {status: b.value, t: t};   // ทับของเดิมถ้าเลือกซ้ำก่อนถึงรอบบันทึก
 });
+
+async function flushPendingSaves(){
+  const keys = Object.keys(pendingSaves);
+  if(!keys.length) return;
+  const batch = pendingSaves;
+  pendingSaves = {};
+  for(const k of keys){
+    const {status, t} = batch[k];
+    try{
+      const at = await saveStatus(k, status, t);
+      if(status && at){ CHASED[k] = {at: at, status: status}; }
+      localStorage.setItem('gb_chased_'+curDate(), JSON.stringify(CHASED));
+    }catch(err){
+      pendingSaves[k] = batch[k];   // ล้มเหลว เก็บไว้ลองรอบหน้าใหม่
+      const w = document.getElementById('nopass');
+      w.hidden = false;
+      w.innerHTML = '⚠️ บันทึกลง Google Sheet ไม่ได้ (' + esc(err.message) + ')<br>'
+        + 'เก็บไว้ในเครื่องนี้ก่อน — ต้องแชร์ไฟล์แผนงานให้ '
+        + '<b>tms-249@tms-bult.iam.gserviceaccount.com</b> เป็น <b>ผู้แก้ไข</b>';
+    }
+  }
+  render();
+}
+setInterval(flushPendingSaves, PENDING_SAVE_MS);
+window.addEventListener('beforeunload', () => { if(Object.keys(pendingSaves).length) flushPendingSaves(); });
 
 function mins(hhmm){                  // "14:30" → 870
   const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm||''));
