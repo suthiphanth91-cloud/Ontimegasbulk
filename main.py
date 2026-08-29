@@ -1322,7 +1322,7 @@ DASHBOARD_HTML = """<!doctype html>
   .wrap{background:var(--card);border:1px solid var(--line);border-radius:13px;
         overflow:auto;max-height:calc(100vh - 280px)}
   table{border-collapse:collapse;width:100%;min-width:1180px}
-  th,td{padding:10px 11px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+  th,td{padding:6px 10px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap;font-size:13.5px}
   th{font-size:12.5px;color:var(--mut);font-weight:600;text-transform:uppercase;
      letter-spacing:.4px;background:var(--card);position:sticky;top:0;z-index:1}
   tbody tr:hover{background:var(--pd-bg)}
