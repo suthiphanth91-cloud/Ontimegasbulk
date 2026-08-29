@@ -1323,7 +1323,7 @@ DASHBOARD_HTML = """<!doctype html>
   table{border-collapse:collapse;width:100%;min-width:1180px}
   th,td{padding:10px 11px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
   th{font-size:12.5px;color:var(--mut);font-weight:600;text-transform:uppercase;
-     letter-spacing:.4px;position:sticky;top:var(--hp,140px);background:var(--card);z-index:8}
+     letter-spacing:.4px;background:var(--card)}
   tbody tr:hover{background:var(--pd-bg)}
   /* บีบให้ทุกแถวสูงบรรทัดเดียว อ่านง่ายขึ้นมาก */
   td.wide{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px}
@@ -1801,12 +1801,9 @@ document.querySelectorAll('.chip').forEach(b => {
 
 load();
 
-// ล็อค header + การ์ด/ปุ่มกรอง + หัวตาราง ไว้ให้เห็นตลอดตอนเลื่อนดูรายการยาวๆ
+// ล็อค header + การ์ด/ปุ่มกรอง ไว้ให้เห็นตลอดตอนเลื่อนดูรายการยาวๆ
 function syncStickyOffset(){
-  const hh  = document.querySelector('header').offsetHeight;
-  const pin = document.querySelector('.pin');
-  document.documentElement.style.setProperty('--hh', hh + 'px');
-  document.documentElement.style.setProperty('--hp', (hh + (pin ? pin.offsetHeight : 0)) + 'px');
+  document.documentElement.style.setProperty('--hh', document.querySelector('header').offsetHeight + 'px');
 }
 window.addEventListener('resize', syncStickyOffset);
 syncStickyOffset();
