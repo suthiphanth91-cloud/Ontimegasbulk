@@ -1391,6 +1391,8 @@ DASHBOARD_HTML = """<!doctype html>
     td.carno{font-size:20px;padding-bottom:2px}
     td.carno::before{align-self:center}
     td.cust{font-weight:600}
+    /* ชื่อลูกค้า/ปลายทางยาวเกิน ตัดให้อยู่บรรทัดเดียวด้วย ... แทนที่จะล้นออกนอกการ์ด */
+    td.cust .v{flex:1 1 0%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}
     td.st{padding-top:7px}
     .call{padding:9px 15px;font-size:15px}
     .copy{padding:9px 11px}
@@ -1677,7 +1679,7 @@ function render(){
       + '<td data-l="คลังต้นทาง">'+esc(t.source)+'</td>'
       + '<td data-l="เที่ยววิ่ง">'+esc(t.trip_no)+'</td>'
       + '<td data-l="Drop">'+esc(t.drop)+'</td>'
-      + '<td data-l="ลูกค้าปลายทาง" class="wide cust">'+esc(t.customer)+'</td>'
+      + '<td data-l="ลูกค้าปลายทาง" class="wide cust"><span class="v">'+esc(t.customer)+'</span></td>'
       + '<td data-l="เบอร์รถ" class="carno" data-carno="'+esc(t.car_no)+'" title="คลิกดูตำแหน่งย้อนหลังรายชั่วโมง"><b>'+esc(t.car_no)+'</b></td>'
       + '<td data-l="ทะเบียน" class="mut">'+esc(t.plate)+'</td>'
       + '<td data-l="ปริมาณ" class="mono">'+esc(t.volume)+'</td>'
