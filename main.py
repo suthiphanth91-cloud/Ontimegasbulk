@@ -1218,6 +1218,11 @@ SETTINGS_HTML = """<!doctype html>
   .row:last-child{border:0}
   .row span{color:var(--mut)}
   .ok{color:#16a34a;font-weight:600}
+  .btns{display:flex;flex-wrap:wrap;gap:8px}
+  .pbtn{padding:8px 14px;border-radius:999px;border:1px solid var(--line);background:var(--bg);
+        color:var(--ink);cursor:pointer;font-size:13.5px;font-weight:600;font-family:inherit;margin:0}
+  .pbtn:hover{border-color:#2563eb;color:#2563eb}
+  .pbtn.on{background:#2563eb;border-color:#2563eb;color:#fff}
 </style></head>
 <body><div class="box">
   <p><a class="back" href="/">&larr; กลับหน้าตาราง</a></p>
@@ -1225,13 +1230,16 @@ SETTINGS_HTML = """<!doctype html>
 
   <section>
     <h2>การแสดงผล</h2>
-    <label for="iv">รีเฟรชข้อมูลอัตโนมัติทุก</label>
-    <select id="iv">
-      <option value="30">30 นาที</option>
-      <option value="60">1 ชั่วโมง</option>
-      <option value="120">2 ชั่วโมง</option>
-      <option value="0">ไม่รีเฟรชอัตโนมัติ</option>
-    </select>
+    <label>รีเฟรชข้อมูลอัตโนมัติทุก</label>
+    <div class="btns" id="ivBtns">
+      <button type="button" class="pbtn" data-v="5">5 นาที</button>
+      <button type="button" class="pbtn" data-v="10">10 นาที</button>
+      <button type="button" class="pbtn" data-v="15">15 นาที</button>
+      <button type="button" class="pbtn" data-v="30">30 นาที</button>
+      <button type="button" class="pbtn" data-v="60">1 ชั่วโมง</button>
+      <button type="button" class="pbtn" data-v="120">2 ชั่วโมง</button>
+      <button type="button" class="pbtn" data-v="0">ไม่รีเฟรชอัตโนมัติ</button>
+    </div>
     <label for="ft">มุมมองเริ่มต้นเมื่อเปิดหน้า</label>
     <select id="ft">
       <option value="hour">⏰ ต้องไล่ชั่วโมงนี้</option>
@@ -1261,11 +1269,19 @@ SETTINGS_HTML = """<!doctype html>
   </section>
 </div>
 <script>
-  const iv = document.getElementById('iv'), ft = document.getElementById('ft');
-  iv.value = localStorage.getItem('gb_interval') || '60';
-  ft.value = localStorage.getItem('gb_filter')   || 'hour';
+  const ft = document.getElementById('ft');
+  let ivValue = localStorage.getItem('gb_interval') || '60';
+  ft.value = localStorage.getItem('gb_filter') || 'hour';
+
+  const ivBtns = document.querySelectorAll('#ivBtns .pbtn');
+  function paintIvBtns(){
+    ivBtns.forEach(b => b.classList.toggle('on', b.dataset.v === ivValue));
+  }
+  paintIvBtns();
+  ivBtns.forEach(b => b.onclick = () => { ivValue = b.dataset.v; paintIvBtns(); });
+
   document.getElementById('save').onclick = () => {
-    localStorage.setItem('gb_interval', iv.value);
+    localStorage.setItem('gb_interval', ivValue);
     localStorage.setItem('gb_filter',   ft.value);
     document.getElementById('done').textContent = 'บันทึกแล้ว ✓';
     setTimeout(() => document.getElementById('done').textContent = '', 2000);
