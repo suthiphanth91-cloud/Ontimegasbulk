@@ -1321,19 +1321,19 @@ DASHBOARD_HTML = """<!doctype html>
   .c.late b{color:var(--late)} .c.ok b{color:var(--ok)} .c.tr b{color:var(--tr)}
   .wrap{background:var(--card);border:1px solid var(--line);border-radius:13px;
         overflow:auto;max-height:calc(100vh - 280px)}
-  table{border-collapse:collapse;width:100%;min-width:1180px}
-  th,td{padding:6px 10px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap;font-size:13.5px}
+  table{border-collapse:collapse;width:100%;min-width:1010px}
+  th,td{padding:5px 7px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap;font-size:13px}
   th{font-size:12.5px;color:var(--mut);font-weight:600;text-transform:uppercase;
      letter-spacing:.4px;background:var(--card);position:sticky;top:0;z-index:1}
   tbody tr:hover{background:var(--pd-bg)}
   /* บีบให้ทุกแถวสูงบรรทัดเดียว อ่านง่ายขึ้นมาก */
-  td.wide{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px}
-  td.cust{max-width:260px;font-weight:500}
+  td.wide{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px}
+  td.cust{max-width:190px;font-weight:500}
   tbody tr:nth-child(even){background:var(--pd-bg)}
   tbody tr:nth-child(even):hover,tbody tr:hover{background:var(--tr-bg)}
   /* ซ่อนคอลัมน์ On Time ถ้าทั้งวันยังไม่มีข้อมูล */
   table.hide-ot th:nth-child(15),table.hide-ot td:nth-child(15){display:none}
-  .badge{display:inline-block;padding:3px 11px;border-radius:999px;font-size:12.5px;font-weight:600}
+  .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:600}
   .s-late{background:var(--late-bg);color:var(--late)}
   .s-arrived{background:var(--ok-bg);color:var(--ok)}
   .s-transit{background:var(--tr-bg);color:var(--tr)}
@@ -1350,9 +1350,9 @@ DASHBOARD_HTML = """<!doctype html>
   .note{color:var(--mut);font-size:13px;margin:10px 2px}
   .empty{padding:48px;text-align:center;color:var(--mut)}
   .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);margin-right:6px}
-  .chk select{padding:6px 9px;border-radius:8px;border:1px solid var(--line);
-              background:var(--card);color:var(--ink);font-family:inherit;font-size:13px;
-              min-width:150px;cursor:pointer}
+  .chk select{padding:4px 6px;border-radius:8px;border:1px solid var(--line);
+              background:var(--card);color:var(--ink);font-family:inherit;font-size:12.5px;
+              min-width:118px;cursor:pointer}
   .chk select:hover{border-color:#2563eb}
   .at{font-size:12px;color:var(--mut);margin-top:3px;white-space:nowrap}
   tr.done{opacity:.55}
@@ -1401,12 +1401,12 @@ DASHBOARD_HTML = """<!doctype html>
     .call{padding:9px 15px;font-size:15px}
     .copy{padding:9px 11px}
   }
-  .call{display:inline-block;margin-top:3px;padding:5px 11px;border-radius:8px;
-        background:var(--ok-bg);color:var(--ok);font-weight:600;font-size:13px;
+  .call{display:inline-block;margin-top:2px;padding:3px 8px;border-radius:8px;
+        background:var(--ok-bg);color:var(--ok);font-weight:600;font-size:12px;
         text-decoration:none;white-space:nowrap}
   .call:hover{background:var(--ok);color:#fff}
-  .copy{padding:5px 8px;border-radius:8px;border:1px solid var(--line);
-        background:var(--card);cursor:pointer;font-size:13px;line-height:1}
+  .copy{padding:3px 6px;border-radius:8px;border:1px solid var(--line);
+        background:var(--card);cursor:pointer;font-size:12px;line-height:1}
   .copy:hover{border-color:#2563eb}
 
   /* ── Timeline modal (คลิกเบอร์รถ → ตำแหน่งย้อนหลังรายชั่วโมง) ── */
