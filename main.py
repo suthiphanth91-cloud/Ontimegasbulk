@@ -1322,14 +1322,14 @@ DASHBOARD_HTML = """<!doctype html>
   .wrap{background:var(--card);border:1px solid var(--line);border-radius:13px;
         overflow:auto;height:calc(100vh - 280px)}
   table{border-collapse:separate;border-spacing:0;width:100%;min-width:1010px}
-  th,td{padding:5px 7px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap;font-size:13px}
+  th,td{padding:3px 6px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap;font-size:12.5px}
   th{font-size:12.5px;color:var(--mut);font-weight:600;text-transform:uppercase;
      letter-spacing:.4px;background:var(--card);position:sticky;top:0;z-index:2}
   tbody tr:hover{background:var(--pd-bg)}
   /* บีบให้ทุกแถวสูงบรรทัดเดียว อ่านง่ายขึ้นมาก */
   td.wide{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px}
-  td.cust{max-width:220px;font-weight:500;white-space:normal;overflow:visible;text-overflow:clip;
-          word-break:break-word;line-height:1.3}
+  td.cust{max-width:200px;font-weight:500;white-space:normal;overflow:visible;text-overflow:clip;
+          word-break:break-word;line-height:1.2}
   tbody tr:nth-child(even){background:var(--pd-bg)}
   tbody tr:nth-child(even):hover,tbody tr:hover{background:var(--tr-bg)}
   /* ซ่อนคอลัมน์ On Time ถ้าทั้งวันยังไม่มีข้อมูล */
