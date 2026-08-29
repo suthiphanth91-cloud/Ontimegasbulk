@@ -1298,12 +1298,10 @@ DASHBOARD_HTML = """<!doctype html>
            --late-bg:#3b1418; --ok-bg:#0e2a19; --tr-bg:#0f2340; --pd-bg:#1a2434; --early-bg:#0c2b31; }
   }
   *{box-sizing:border-box}
-  html,body{height:100%}
   body{margin:0;background:var(--bg);color:var(--ink);
-       font-family:'Noto Sans Thai',system-ui,-apple-system,sans-serif;font-size:15px;
-       display:flex;flex-direction:column;overflow:hidden}
+       font-family:'Noto Sans Thai',system-ui,-apple-system,sans-serif;font-size:15px}
   header{background:var(--card);border-bottom:1px solid var(--line);padding:14px 18px;
-         position:sticky;top:0;z-index:10;flex:0 0 auto}
+         position:sticky;top:0;z-index:10}
   .bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;width:100%}
   h1{font-size:19px;margin:0;font-weight:700;letter-spacing:-.2px}
   .grow{flex:1}
@@ -1313,16 +1311,16 @@ DASHBOARD_HTML = """<!doctype html>
   button{cursor:pointer;font-weight:600}
   button.primary{background:#2563eb;border-color:#2563eb;color:#fff}
   button.primary:hover{background:#1d4ed8}
-  main{width:100%;padding:16px;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+  main{width:100%;padding:16px}
   .pin{position:sticky;top:var(--hh,60px);z-index:9;background:var(--bg);padding-top:2px;margin:0 -16px;
-       padding-left:16px;padding-right:16px;flex:0 0 auto}
+       padding-left:16px;padding-right:16px}
   .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:18px}
   .c{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:14px 16px}
   .c b{display:block;font-size:27px;font-weight:700;line-height:1.15}
   .c span{color:var(--mut);font-size:13px;font-weight:500}
   .c.late b{color:var(--late)} .c.ok b{color:var(--ok)} .c.tr b{color:var(--tr)}
   .wrap{background:var(--card);border:1px solid var(--line);border-radius:13px;
-        overflow:auto;flex:1 1 auto;min-height:0}
+        overflow:auto;height:calc(100vh - 280px)}
   table{border-collapse:separate;border-spacing:0;width:100%;min-width:1010px}
   th,td{padding:5px 7px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap;font-size:13px}
   th{font-size:12.5px;color:var(--mut);font-weight:600;text-transform:uppercase;
@@ -1349,7 +1347,7 @@ DASHBOARD_HTML = """<!doctype html>
         color:var(--mut);cursor:pointer;font-size:13.5px;font-weight:600}
   .chip:hover{border-color:#2563eb;color:#2563eb}
   .chip.on{background:#2563eb;border-color:#2563eb;color:#fff}
-  .note{color:var(--mut);font-size:13px;margin:10px 2px;flex:0 0 auto}
+  .note{color:var(--mut);font-size:13px;margin:10px 2px}
   .empty{padding:48px;text-align:center;color:var(--mut)}
   .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);margin-right:6px}
   .chk select{padding:4px 6px;border-radius:8px;border:1px solid var(--line);
@@ -1368,11 +1366,10 @@ DASHBOARD_HTML = """<!doctype html>
 
   /* ── มือถือ: เปลี่ยนตารางเป็นการ์ด อ่านง่ายไม่ต้องเลื่อนซ้ายขวา ── */
   @media (max-width:820px){
-    html,body{height:auto}
-    body{font-size:15px;overflow:visible}
+    body{font-size:15px}
     header{padding:11px 12px}
     h1{font-size:17px}
-    main{padding:12px;display:block;overflow:visible;min-height:0}
+    main{padding:12px}
     .pin{margin:0 -12px;padding-left:12px;padding-right:12px}
     input[type=search],input[type=date]{flex:1 1 130px;min-width:0}
     .cards{grid-template-columns:repeat(3,1fr);gap:8px}
@@ -1382,7 +1379,7 @@ DASHBOARD_HTML = """<!doctype html>
     .chips{overflow-x:auto;flex-wrap:nowrap;padding-bottom:4px}
     .chip{flex:0 0 auto}
 
-    .wrap{background:none;border:0;overflow:visible;flex:0 0 auto}
+    .wrap{background:none;border:0;overflow:visible;height:auto}
     table,thead,tbody,tr,td{display:block;width:auto}
     table{min-width:0}
     thead{display:none}
