@@ -1312,6 +1312,8 @@ DASHBOARD_HTML = """<!doctype html>
   button.primary{background:#2563eb;border-color:#2563eb;color:#fff}
   button.primary:hover{background:#1d4ed8}
   main{width:100%;padding:16px}
+  .pin{position:sticky;top:var(--hh,60px);z-index:9;background:var(--bg);padding-top:2px;margin:0 -16px;
+       padding-left:16px;padding-right:16px}
   .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:18px}
   .c{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:14px 16px}
   .c b{display:block;font-size:27px;font-weight:700;line-height:1.15}
@@ -1367,6 +1369,7 @@ DASHBOARD_HTML = """<!doctype html>
     header{padding:11px 12px}
     h1{font-size:17px}
     main{padding:12px}
+    .pin{margin:0 -12px;padding-left:12px;padding-right:12px}
     input[type=search],input[type=date]{flex:1 1 130px;min-width:0}
     .cards{grid-template-columns:repeat(3,1fr);gap:8px}
     .c{padding:10px}
@@ -1446,12 +1449,14 @@ DASHBOARD_HTML = """<!doctype html>
 </div>
 
 <main>
-  <div class="cards" id="cards"></div>
-  <div class="chips">
-    <button class="chip on" data-f="hour">⏰ ต้องไล่ชั่วโมงนี้</button>
-    <button class="chip" data-f="late">🔴 ช้า</button>
-    <button class="chip" data-f="active">🚚 ยังไม่ถึง</button>
-    <button class="chip" data-f="all">ทั้งหมด</button>
+  <div class="pin">
+    <div class="cards" id="cards"></div>
+    <div class="chips">
+      <button class="chip on" data-f="hour">⏰ ต้องไล่ชั่วโมงนี้</button>
+      <button class="chip" data-f="late">🔴 ช้า</button>
+      <button class="chip" data-f="active">🚚 ยังไม่ถึง</button>
+      <button class="chip" data-f="all">ทั้งหมด</button>
+    </div>
   </div>
   <div class="wrap">
     <table id="tbl">
@@ -1794,6 +1799,13 @@ document.querySelectorAll('.chip').forEach(b => {
 });
 
 load();
+
+// ล็อค header ไว้ให้เห็นตลอดตอนเลื่อนดูรายการยาวๆ
+function syncStickyOffset(){
+  document.documentElement.style.setProperty('--hh', document.querySelector('header').offsetHeight + 'px');
+}
+window.addEventListener('resize', syncStickyOffset);
+syncStickyOffset();
 
 // รอบรีเฟรชอัตโนมัติ ตั้งได้ที่หน้า ⚙️ ตั้งค่า (ค่าเริ่มต้น 1 ชั่วโมง)
 const IV = parseInt(localStorage.getItem('gb_interval') || '60', 10);
