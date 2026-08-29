@@ -1023,6 +1023,67 @@ def peek_tab(
             "sample": [label(r) for r in data[1:1 + rows]]}
 
 
+# ตำแหน่งย้อนหลังรายชั่วโมงต่อคัน -- Gasbulk Track เองไม่มีที่เก็บประวัติ
+# (PTGL เป็น "ตำแหน่งปัจจุบัน" อย่างเดียว บันทึกซ้ำก็ยังเป็นค่าล่าสุดเสมอ)
+# แต่สเปรดชีตเดียวกับ PLAN_ID มีแท็บรายวัน (ชื่อแท็บ = dd.MM.yyyy เช่น
+# "29.08.2026") ที่ Apps Script อีกตัว (Test Report Ontime PTGLG) คอย
+# บันทึกตำแหน่งทุกชั่วโมงลงไว้อยู่แล้ว เลยอ่านจากตรงนั้นแทนการสร้างระบบ
+# เก็บประวัติของตัวเอง
+TIMELINE_CARNO_COL = 5  # F "เบอร์รถ" ในแท็บรายวัน (0-based)
+
+
+@app.get("/api/timeline")
+def timeline(
+    car_no:   str = Query(..., description="เบอร์รถ เช่น PTL.403 หรือ NO.418"),
+    date_str: str = Query(None, alias="date", description="yyyy-MM-dd (default=วันนี้)", example="2026-08-29"),
+):
+    """ตำแหน่งรายชั่วโมงของรถคันเดียวในวันที่ระบุ จากแท็บรายวันในสเปรดชีต PLAN"""
+    if date_str:
+        try:
+            d = datetime.strptime(date_str, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(400, "date ต้องเป็นรูปแบบ yyyy-MM-dd")
+    else:
+        d = datetime.strptime(_today_thai(), "%Y-%m-%d")
+    tab_name = d.strftime("%d.%m.%Y")
+
+    try:
+        rows = _fetch_sheet(PLAN_ID, tab_name)
+    except Exception as e:
+        return {"tab": tab_name, "car_no": car_no, "found": False,
+                "error": f"ไม่พบแท็บ {tab_name} (ยังไม่มีข้อมูลของวันนี้ หรือยังไม่ได้รันบันทึกตำแหน่ง): {type(e).__name__}",
+                "timeline": []}
+
+    if not rows:
+        return {"tab": tab_name, "car_no": car_no, "found": False, "timeline": []}
+
+    header = rows[0]
+    hour_cols: list[tuple[int, str]] = []
+    for i, h in enumerate(header):
+        m = re.match(r"^(\d{1,2}):00\s*น\.?", str(h).strip())
+        if m:
+            hour_cols.append((i, str(h).strip()))
+
+    car_key = _extract_car_no(car_no)
+    match_row = None
+    if car_key:
+        for r in rows[1:]:
+            if _extract_car_no(_cell(r, TIMELINE_CARNO_COL)) == car_key:
+                match_row = r
+                break
+
+    if match_row is None:
+        return {"tab": tab_name, "car_no": car_no, "found": False, "timeline": []}
+
+    entries = []
+    for idx, label in hour_cols:
+        val = _cell(match_row, idx)
+        if val:
+            entries.append({"hour": label, "raw": val})
+
+    return {"tab": tab_name, "car_no": car_no, "found": True, "timeline": entries}
+
+
 @app.get("/api/match")
 def match(date_str: str = Query(None, alias="date")):
     """เช็คว่าเบอร์รถ / ชื่อปลายทาง จับคู่กันได้กี่รายการ"""
@@ -1341,6 +1402,27 @@ DASHBOARD_HTML = """<!doctype html>
   .copy{padding:5px 8px;border-radius:8px;border:1px solid var(--line);
         background:var(--card);cursor:pointer;font-size:13px;line-height:1}
   .copy:hover{border-color:#2563eb}
+
+  /* ── Timeline modal (คลิกเบอร์รถ → ตำแหน่งย้อนหลังรายชั่วโมง) ── */
+  td.carno{cursor:pointer}
+  td.carno b{text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:3px}
+  td.carno:hover b{text-decoration-color:#2563eb;color:#2563eb}
+  .tl-backdrop{position:fixed;inset:0;background:rgba(15,23,42,.5);z-index:50;
+               display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto}
+  .tl-backdrop.hidden{display:none}
+  .tl-modal{background:var(--card);border:1px solid var(--line);border-radius:14px;
+            width:100%;max-width:520px;padding:18px 20px;max-height:calc(100vh - 80px);
+            display:flex;flex-direction:column}
+  .tl-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
+  .tl-head h2{font-size:17px;margin:0;font-weight:700}
+  .tl-head button{border:none;background:none;font-size:20px;cursor:pointer;color:var(--mut);padding:2px 6px}
+  .tl-sub{color:var(--mut);font-size:13px;margin-bottom:12px}
+  .tl-list{overflow-y:auto;padding-right:2px}
+  .tl-row{display:flex;gap:12px;padding:9px 0;border-bottom:1px solid var(--line)}
+  .tl-row:last-child{border-bottom:0}
+  .tl-hr{flex:0 0 60px;font-weight:700;color:#2563eb;font-size:14px}
+  .tl-val{flex:1;font-size:13.5px;line-height:1.5;color:var(--ink)}
+  .tl-empty{color:var(--mut);font-size:14px;padding:20px 0;text-align:center}
 </style>
 </head>
 <body>
@@ -1383,6 +1465,17 @@ DASHBOARD_HTML = """<!doctype html>
   </div>
   <p class="note" id="foot"></p>
 </main>
+
+<div class="tl-backdrop hidden" id="tlBackdrop" onclick="if(event.target===this)closeTimeline()">
+  <div class="tl-modal">
+    <div class="tl-head">
+      <h2 id="tlTitle">ตำแหน่งย้อนหลัง</h2>
+      <button onclick="closeTimeline()">✕</button>
+    </div>
+    <div class="tl-sub" id="tlSub"></div>
+    <div class="tl-list" id="tlList"></div>
+  </div>
+</div>
 
 <script>
 const LABEL = {late:'ช้า', arrived:'ส่งแล้ว', transit:'กำลังไป',
@@ -1585,7 +1678,7 @@ function render(){
       + '<td data-l="เที่ยววิ่ง">'+esc(t.trip_no)+'</td>'
       + '<td data-l="Drop">'+esc(t.drop)+'</td>'
       + '<td data-l="ลูกค้าปลายทาง" class="wide cust">'+esc(t.customer)+'</td>'
-      + '<td data-l="เบอร์รถ" class="carno"><b>'+esc(t.car_no)+'</b></td>'
+      + '<td data-l="เบอร์รถ" class="carno" data-carno="'+esc(t.car_no)+'" title="คลิกดูตำแหน่งย้อนหลังรายชั่วโมง"><b>'+esc(t.car_no)+'</b></td>'
       + '<td data-l="ทะเบียน" class="mut">'+esc(t.plate)+'</td>'
       + '<td data-l="ปริมาณ" class="mono">'+esc(t.volume)+'</td>'
       + '<td data-l="พขร. / โทร">'+tel(t)+'</td>'
@@ -1637,6 +1730,52 @@ async function load(){
     el.innerHTML = '<tr><td colspan="18" class="empty">เกิดข้อผิดพลาด: ' + esc(e.message) + '</td></tr>';
   }
 }
+
+// ── ตำแหน่งย้อนหลังรายชั่วโมง (คลิกที่เบอร์รถ) ──────────────────────────
+// อ่านจากแท็บรายวันของสเปรดชีตเดียวกัน (ชื่อแท็บ = dd.MM.yyyy) ที่ Apps
+// Script อีกตัวคอยบันทึกตำแหน่งทุกชั่วโมงไว้ให้อยู่แล้ว -- Gasbulk Track
+// เองไม่มีที่เก็บประวัติของตัวเอง (ดู /api/timeline ฝั่ง main.py)
+async function openTimeline(carNo){
+  const d  = document.getElementById('date').value || todayISO();
+  const backdrop = document.getElementById('tlBackdrop');
+  const list = document.getElementById('tlList');
+  document.getElementById('tlTitle').textContent = '🚛 ' + carNo;
+  document.getElementById('tlSub').textContent = 'กำลังโหลด...';
+  list.innerHTML = '';
+  backdrop.classList.remove('hidden');
+
+  try{
+    const r = await fetch('/api/timeline?car_no=' + encodeURIComponent(carNo) + '&date=' + d);
+    const j = await r.json();
+    if(!r.ok) throw new Error(j.detail || 'โหลดไม่สำเร็จ');
+
+    document.getElementById('tlSub').textContent = 'วันที่ ' + d
+      + (j.found ? '' : ' — ยังไม่พบข้อมูลตำแหน่งของคันนี้ในวันนี้');
+
+    if(!j.timeline || j.timeline.length === 0){
+      list.innerHTML = '<div class="tl-empty">ยังไม่มีข้อมูลตำแหน่งบันทึกไว้'
+        + (j.error ? '<br><span style="font-size:12px">'+esc(j.error)+'</span>' : '') + '</div>';
+      return;
+    }
+    list.innerHTML = j.timeline.map(function(e){
+      return '<div class="tl-row"><div class="tl-hr">'+esc(e.hour)+'</div>'
+           + '<div class="tl-val">'+esc(e.raw)+'</div></div>';
+    }).join('');
+  }catch(err){
+    document.getElementById('tlSub').textContent = '';
+    list.innerHTML = '<div class="tl-empty">โหลดไม่สำเร็จ: ' + esc(err.message) + '</div>';
+  }
+}
+function closeTimeline(){
+  document.getElementById('tlBackdrop').classList.add('hidden');
+}
+document.addEventListener('click', e => {
+  const td = e.target.closest('.carno');
+  if(td && td.dataset.carno) openTimeline(td.dataset.carno);
+});
+document.addEventListener('keydown', e => {
+  if(e.key === 'Escape') closeTimeline();
+});
 
 document.getElementById('date').value = todayISO();
 document.getElementById('go').onclick    = load;
