@@ -1522,6 +1522,20 @@ const STATUS_LIST = [
   'กำลังเดินทาง', 'ถึงปลายทาง', 'จัดส่งรอบ 1', 'จัดส่งรอบ 2',
   'โหลดเก็บ', 'จบงาน', 'ยกเลิกออเดอร์',
 ];
+// สถานะจบงานจริง ๆ — จางค้างถาวร ไม่ต้องไล่ซ้ำ ส่วนสถานะอื่นถ้าเกิน 1 ชม.
+// จากที่ไล่ล่าสุด จะกลับมาเด่นใหม่ให้ไล่รอบต่อไป
+const FINAL_STATUSES = new Set(['จัดส่งรอบ 1', 'จัดส่งรอบ 2', 'โหลดเก็บ', 'จบงาน', 'ยกเลิกออเดอร์']);
+
+function isChaseDone(k){
+  const cur = CHASED[k];
+  if(!cur || !cur.status) return false;
+  if(FINAL_STATUSES.has(cur.status)) return true;
+  const at = mins(cur.at);
+  if(at == null) return true;
+  let elapsed = nowMins() - at;
+  if(elapsed < 0) elapsed += 24*60;   // ข้ามเที่ยงคืน
+  return elapsed < 60;
+}
 
 function pick(t, k){                  // ดรอปดาวน์เลือกสถานะ + เวลาที่บันทึก
   const cur = CHASED[k] || {};
@@ -1663,7 +1677,7 @@ function render(){
       .some(v => String(v||'').toLowerCase().includes(q))))
     .slice()
     .sort((a,b) => {           // ช้าที่สุดขึ้นก่อน แล้วค่อยเรียงตามเวลากำหนด
-      const ck = x => (CHASED[key(x)]&&CHASED[key(x)].status) ? 1 : 0;          // ที่ไล่แล้วลงไปอยู่ล่าง
+      const ck = x => isChaseDone(key(x)) ? 1 : 0;          // ที่ไล่แล้ว (ยังไม่ครบ 1 ชม./จบงานจริง) ลงไปอยู่ล่าง
       if (ck(a) !== ck(b)) return ck(a) - ck(b);
       const rank = s => ({late:0, transit:1, early:2, pending:3, arrived:4, cancelled:5}[s] ?? 6);
       if (rank(a.status) !== rank(b.status)) return rank(a.status) - rank(b.status);
@@ -1681,7 +1695,7 @@ function render(){
     const badge = '<span class="badge s-'+esc(t.status)+'">'
                 + (LABEL[t.status]||esc(t.status))+'</span>'
                 + (call ? '<span class="callnow">📞 ถึงเวลาโทร</span>' : '');
-    return '<tr class="'+((CHASED[k]&&CHASED[k].status)?'done':'')+'">'
+    return '<tr class="'+(isChaseDone(k)?'done':'')+'">'
       + '<td data-l="ประจำวันที่" class="mono mut">'+esc(t.date)+'</td>'
       + '<td data-l="คลังต้นทาง">'+esc(t.source)+'</td>'
       + '<td data-l="เที่ยววิ่ง">'+esc(t.trip_no)+'</td>'
