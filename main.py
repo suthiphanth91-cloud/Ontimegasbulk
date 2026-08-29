@@ -1328,7 +1328,8 @@ DASHBOARD_HTML = """<!doctype html>
   tbody tr:hover{background:var(--pd-bg)}
   /* บีบให้ทุกแถวสูงบรรทัดเดียว อ่านง่ายขึ้นมาก */
   td.wide{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px}
-  td.cust{max-width:190px;font-weight:500}
+  td.cust{max-width:220px;font-weight:500;white-space:normal;overflow:visible;text-overflow:clip;
+          word-break:break-word;line-height:1.3}
   tbody tr:nth-child(even){background:var(--pd-bg)}
   tbody tr:nth-child(even):hover,tbody tr:hover{background:var(--tr-bg)}
   /* ซ่อนคอลัมน์ On Time ถ้าทั้งวันยังไม่มีข้อมูล */
