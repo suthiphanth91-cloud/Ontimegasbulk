@@ -1319,11 +1319,12 @@ DASHBOARD_HTML = """<!doctype html>
   .c b{display:block;font-size:27px;font-weight:700;line-height:1.15}
   .c span{color:var(--mut);font-size:13px;font-weight:500}
   .c.late b{color:var(--late)} .c.ok b{color:var(--ok)} .c.tr b{color:var(--tr)}
-  .wrap{background:var(--card);border:1px solid var(--line);border-radius:13px;overflow-x:auto}
+  .wrap{background:var(--card);border:1px solid var(--line);border-radius:13px;
+        overflow:auto;max-height:calc(100vh - 280px)}
   table{border-collapse:collapse;width:100%;min-width:1180px}
   th,td{padding:10px 11px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
   th{font-size:12.5px;color:var(--mut);font-weight:600;text-transform:uppercase;
-     letter-spacing:.4px;background:var(--card)}
+     letter-spacing:.4px;background:var(--card);position:sticky;top:0;z-index:1}
   tbody tr:hover{background:var(--pd-bg)}
   /* บีบให้ทุกแถวสูงบรรทัดเดียว อ่านง่ายขึ้นมาก */
   td.wide{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px}
@@ -1378,7 +1379,7 @@ DASHBOARD_HTML = """<!doctype html>
     .chips{overflow-x:auto;flex-wrap:nowrap;padding-bottom:4px}
     .chip{flex:0 0 auto}
 
-    .wrap{background:none;border:0;overflow:visible}
+    .wrap{background:none;border:0;overflow:visible;max-height:none}
     table,thead,tbody,tr,td{display:block;width:auto}
     table{min-width:0}
     thead{display:none}
