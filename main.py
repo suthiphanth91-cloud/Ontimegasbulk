@@ -1321,10 +1321,10 @@ DASHBOARD_HTML = """<!doctype html>
   .c.late b{color:var(--late)} .c.ok b{color:var(--ok)} .c.tr b{color:var(--tr)}
   .wrap{background:var(--card);border:1px solid var(--line);border-radius:13px;
         overflow:auto;max-height:calc(100vh - 280px)}
-  table{border-collapse:collapse;width:100%;min-width:1010px}
+  table{border-collapse:separate;border-spacing:0;width:100%;min-width:1010px}
   th,td{padding:5px 7px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap;font-size:13px}
   th{font-size:12.5px;color:var(--mut);font-weight:600;text-transform:uppercase;
-     letter-spacing:.4px;background:var(--card);position:sticky;top:0;z-index:1}
+     letter-spacing:.4px;background:var(--card);position:sticky;top:0;z-index:2}
   tbody tr:hover{background:var(--pd-bg)}
   /* บีบให้ทุกแถวสูงบรรทัดเดียว อ่านง่ายขึ้นมาก */
   td.wide{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px}
