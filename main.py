@@ -1327,6 +1327,8 @@ DASHBOARD_HTML = """<!doctype html>
   button{cursor:pointer;font-weight:600}
   button.primary{background:#2563eb;border-color:#2563eb;color:#fff}
   button.primary:hover{background:#1d4ed8}
+  button.save-now{background:var(--late-bg);border-color:var(--late);color:var(--late)}
+  button.save-now:hover{background:var(--late);color:#fff}
   main{width:100%;padding:16px}
   .pin{position:sticky;top:var(--hh,60px);z-index:9;background:var(--bg);padding-top:2px;margin:0 -16px;
        padding-left:16px;padding-right:16px}
@@ -1463,6 +1465,9 @@ DASHBOARD_HTML = """<!doctype html>
     <input type="date" id="date">
     <input type="search" id="q" placeholder="ค้นหา รถ / ลูกค้า / ทะเบียน">
     <button class="primary" id="go">รีเฟรช</button>
+    <button class="save-now" id="saveNow" title="ส่งสถานะที่เลือกไว้ลง Sheet ทันที (ปกติรอ 20 นาที)" hidden>
+      💾 บันทึกลง Sheet (<span id="pendCount">0</span>)
+    </button>
     <a class="gear" href="/settings" title="ตั้งค่า">⚙️</a>
   </div>
 </header>
@@ -1678,13 +1683,24 @@ document.addEventListener('change', e => {
   localStorage.setItem('gb_chased_'+curDate(), JSON.stringify(CHASED));
 
   pendingSaves[k] = {status: b.value, t: t};   // ทับของเดิมถ้าเลือกซ้ำก่อนถึงรอบบันทึก
+  updateSaveNowBtn();
 });
+
+function updateSaveNowBtn(){
+  const n = Object.keys(pendingSaves).length;
+  const btn = document.getElementById('saveNow');
+  document.getElementById('pendCount').textContent = n;
+  btn.hidden = n === 0;
+}
+
+document.getElementById('saveNow').onclick = () => flushPendingSaves();
 
 async function flushPendingSaves(){
   const keys = Object.keys(pendingSaves);
   if(!keys.length) return;
   const batch = pendingSaves;
   pendingSaves = {};
+  updateSaveNowBtn();
   for(const k of keys){
     const {status, t} = batch[k];
     try{
@@ -1700,6 +1716,7 @@ async function flushPendingSaves(){
         + '<b>tms-249@tms-bult.iam.gserviceaccount.com</b> เป็น <b>ผู้แก้ไข</b>';
     }
   }
+  updateSaveNowBtn();
   render();
 }
 setInterval(flushPendingSaves, PENDING_SAVE_MS);
