@@ -1376,6 +1376,7 @@ DASHBOARD_HTML = """<!doctype html>
            white-space:nowrap}
   .donebtn:hover{border-color:#16a34a;color:#16a34a}
   .donebtn.on{background:var(--ok-bg);border-color:var(--ok);color:var(--ok)}
+  .cursts{font-size:13px;font-weight:700;color:var(--ok);margin-bottom:4px}
   .at{font-size:12px;color:var(--mut);margin-top:3px;white-space:nowrap}
   tr.done{opacity:.55}
   tr.done .at{color:var(--ok);font-weight:600}
@@ -1566,7 +1567,10 @@ function pick(t, k){                  // ดรอปดาวน์เลือ
   const doneBtn = cur.status === 'จบงาน'
     ? '<button type="button" class="donebtn on" title="จบงานแล้ว">✅ จบงาน</button>'
     : '<button type="button" class="donebtn" title="กดจบงาน">จบงาน</button>';
-  return '<div style="display:flex;gap:5px;align-items:center">'
+  const nowLabel = cur.status
+    ? '<div class="cursts">✓ สถานะ: '+esc(cur.status)+'</div>' : '';
+  return nowLabel
+       + '<div style="display:flex;gap:5px;align-items:center">'
        + '<select class="pickst" data-k="'+esc(k)+'">'+opts+'</select>'
        + doneBtn + '</div>'
        + (cur.at ? '<div class="at">🕐 '+esc(cur.at)+'</div>' : '');
