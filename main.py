@@ -1371,6 +1371,11 @@ DASHBOARD_HTML = """<!doctype html>
               background:var(--card);color:var(--ink);font-family:inherit;font-size:12.5px;
               min-width:118px;cursor:pointer}
   .chk select:hover{border-color:#2563eb}
+  .donebtn{padding:4px 9px;border-radius:8px;border:1px solid var(--line);background:var(--card);
+           color:var(--mut);font-family:inherit;font-size:12px;font-weight:600;cursor:pointer;
+           white-space:nowrap}
+  .donebtn:hover{border-color:#16a34a;color:#16a34a}
+  .donebtn.on{background:var(--ok-bg);border-color:var(--ok);color:var(--ok)}
   .at{font-size:12px;color:var(--mut);margin-top:3px;white-space:nowrap}
   tr.done{opacity:.55}
   tr.done .at{color:var(--ok);font-weight:600}
@@ -1552,13 +1557,18 @@ function isChaseDone(k){
   return elapsed < 60;
 }
 
-function pick(t, k){                  // ดรอปดาวน์เลือกสถานะ + เวลาที่บันทึก
+function pick(t, k){                  // ดรอปดาวน์เลือกสถานะ + ปุ่มจบงาน + เวลาที่บันทึก
   const cur = CHASED[k] || {};
   const opts = ['<option value="">— เลือกสถานะ —</option>'].concat(
     STATUS_LIST.map(s => '<option value="'+esc(s)+'"'
                        + (cur.status === s ? ' selected' : '') + '>'+esc(s)+'</option>')
   ).join('');
-  return '<select class="pickst" data-k="'+esc(k)+'">'+opts+'</select>'
+  const doneBtn = cur.status === 'จบงาน'
+    ? '<button type="button" class="donebtn on" title="จบงานแล้ว">✅ จบงาน</button>'
+    : '<button type="button" class="donebtn" title="กดจบงาน">จบงาน</button>';
+  return '<div style="display:flex;gap:5px;align-items:center">'
+       + '<select class="pickst" data-k="'+esc(k)+'">'+opts+'</select>'
+       + doneBtn + '</div>'
        + (cur.at ? '<div class="at">🕐 '+esc(cur.at)+'</div>' : '');
 }
 
@@ -1642,6 +1652,15 @@ async function saveStatus(k, status, t){
 const PENDING_SAVE_MS = 20 * 60 * 1000;
 let pendingSaves = {};   // {k: {status, t}}
 
+document.addEventListener('click', e => {          // ปุ่ม "จบงาน" ลัด — ไม่ต้องเปิดดรอปดาวน์เอง
+  const btn = e.target.closest('.donebtn');
+  if(!btn) return;
+  const sel = btn.closest('div').querySelector('.pickst');
+  if(!sel) return;
+  sel.value = 'จบงาน';
+  sel.dispatchEvent(new Event('change', {bubbles: true}));
+});
+
 document.addEventListener('change', e => {
   const b = e.target.closest('.pickst');
   if(!b) return;
@@ -1698,6 +1717,7 @@ function keep(t){                     // กรองตามชิปที่
   if(FILTER === 'active') return t.status !== 'arrived' && t.status !== 'cancelled';
   // 'hour' = ต้องจัดการในชั่วโมงนี้: ถึงเวลาโทรตาม / ช้าอยู่แล้ว / ครบกำหนดใน 60 นาที
   if(t.status === 'arrived' || t.status === 'cancelled') return false;
+  if(CHASED[key(t)] && CHASED[key(t)].status === 'จบงาน') return false;   // กดจบงานแล้ว ไม่ต้องไล่อีก
   if(String(t.prediction||'').startsWith('📞')) return true;
   if(t.status === 'late')    return true;
   const s = mins(t.sched_time);
