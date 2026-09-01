@@ -1807,9 +1807,15 @@ function getMyName(){                 // ถามชื่อครั้งแ
   return name || '';
 }
 
-function tripLoc(t){                  // ข้อความพิกัด/ตำแหน่งปัจจุบันของรถ ตอนกดอัปเดตสถานะ
-  if(t.current_lat == null || t.current_lng == null) return t.current_loc || '';
-  return t.current_loc || (t.current_lat.toFixed(5) + ', ' + t.current_lng.toFixed(5));
+function tripLoc(t){                  // ข้อความ "วันที่ เวลา / ตำแหน่งปัจจุบัน" ตอนกดอัปเดตสถานะ
+  const place = t.current_loc || (t.current_lat != null && t.current_lng != null
+    ? t.current_lat.toFixed(5) + ', ' + t.current_lng.toFixed(5) : '');
+  if(!place) return '';
+  const d = thaiNow();
+  const stamp = d.getUTCDate() + '/' + (d.getUTCMonth()+1) + '/' + d.getUTCFullYear()
+    + ' ' + String(d.getUTCHours()).padStart(2,'0') + ':' + String(d.getUTCMinutes()).padStart(2,'0')
+    + ':' + String(d.getUTCSeconds()).padStart(2,'0');
+  return stamp + ' / ' + place;
 }
 
 async function saveStatus(k, status, t, loc, by){
