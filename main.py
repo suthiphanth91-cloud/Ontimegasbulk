@@ -1398,6 +1398,15 @@ SETTINGS_HTML = """<!doctype html>
       <option value="active">🚚 ยังไม่ถึง</option>
       <option value="all">ทั้งหมด</option>
     </select>
+    <label>บันทึกสถานะที่แก้ไข (จากปุ่มอัปเดตสถานะ) ลง Sheet ทุก</label>
+    <div class="btns" id="svBtns">
+      <button type="button" class="pbtn" data-v="5">5 นาที</button>
+      <button type="button" class="pbtn" data-v="10">10 นาที</button>
+      <button type="button" class="pbtn" data-v="15">15 นาที</button>
+      <button type="button" class="pbtn" data-v="20">20 นาที</button>
+      <button type="button" class="pbtn" data-v="30">30 นาที</button>
+      <button type="button" class="pbtn" data-v="60">1 ชั่วโมง</button>
+    </div>
     <button id="save">บันทึก</button>
     <span id="done" class="ok" style="margin-left:10px"></span>
   </section>
@@ -1431,9 +1440,18 @@ SETTINGS_HTML = """<!doctype html>
   paintIvBtns();
   ivBtns.forEach(b => b.onclick = () => { ivValue = b.dataset.v; paintIvBtns(); });
 
+  let svValue = localStorage.getItem('gb_save_interval') || '20';
+  const svBtns = document.querySelectorAll('#svBtns .pbtn');
+  function paintSvBtns(){
+    svBtns.forEach(b => b.classList.toggle('on', b.dataset.v === svValue));
+  }
+  paintSvBtns();
+  svBtns.forEach(b => b.onclick = () => { svValue = b.dataset.v; paintSvBtns(); });
+
   document.getElementById('save').onclick = () => {
     localStorage.setItem('gb_interval', ivValue);
     localStorage.setItem('gb_filter',   ft.value);
+    localStorage.setItem('gb_save_interval', svValue);
     document.getElementById('done').textContent = 'บันทึกแล้ว ✓';
     setTimeout(() => document.getElementById('done').textContent = '', 2000);
   };
@@ -1828,9 +1846,9 @@ async function saveStatus(k, status, t, loc, by){
   return (await r.json()).at;
 }
 
-// ไม่ยิงบันทึกลง Sheet ทันทีทุกครั้งที่เลือก — พักไว้ในเครื่องก่อน แล้วค่อยส่งรวมทุก 20 นาที
-// (กันยิง API ถี่เกินไป) หน้าจอผู้ใช้เองยังอัปเดตทันทีเสมอ
-const PENDING_SAVE_MS = 20 * 60 * 1000;
+// ไม่ยิงบันทึกลง Sheet ทันทีทุกครั้งที่เลือก — พักไว้ในเครื่องก่อน แล้วค่อยส่งรวม
+// (กันยิง API ถี่เกินไป) หน้าจอผู้ใช้เองยังอัปเดตทันทีเสมอ ปรับรอบได้ที่หน้า ⚙️ ตั้งค่า
+const PENDING_SAVE_MS = parseInt(localStorage.getItem('gb_save_interval') || '20', 10) * 60 * 1000;
 let pendingSaves = {};   // {k: {status, t}}
 
 document.addEventListener('click', e => {          // ปุ่ม "จบงาน" ลัด — ไม่ต้องเปิดดรอปดาวน์เอง
