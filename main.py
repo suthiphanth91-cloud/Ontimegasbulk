@@ -1007,16 +1007,22 @@ def _update_daily_status(key: str, date_str: str, status: str) -> None:
         car_no, trip_no, drop = parts[1], parts[2], parts[3]
         d = datetime.strptime(date_str, "%Y-%m-%d")
         tab_name = d.strftime("%d.%m.%Y")
-        sh = gspread.authorize(_build_creds()).open_by_key(PLAN_ID)
-        ws = sh.worksheet(tab_name)
-        rows = ws.get_all_values()
+        # อ่านผ่านแคช (5 นาที) แทนการอ่านสดทุกครั้ง — กัน quota "Read requests/min" หมด
+        # ตอนมีคนกดอัปเดตสถานะหลายคันรวดเดียว (เขียนยังเป็นของสดเสมอ)
+        rows = _fetch_sheet(PLAN_ID, tab_name)
         car_key = _extract_car_no(car_no)
+        row_i = None
         for i, row in enumerate(rows[1:], start=2):
             if (_extract_car_no(_cell(row, 5)) == car_key
                     and _cell(row, 2).strip() == trip_no.strip()
                     and _cell(row, 3).strip() == drop.strip()):
-                ws.update_cell(i, 12, status)   # col L = 12 (1-based)
-                return
+                row_i = i
+                break
+        if row_i is None:
+            return
+        sh = gspread.authorize(_build_creds()).open_by_key(PLAN_ID)
+        ws = sh.worksheet(tab_name)
+        ws.update_cell(row_i, 12, status)   # col L = 12 (1-based)
     except Exception:
         pass
 
@@ -1053,13 +1059,18 @@ def chase_set(
     """ติ๊ก = บันทึกเวลาไล่  /  เอาติ๊กออก = ลบแถวนั้น"""
     try:
         ws   = _chase_ws(date_str)
-        rows = ws.get_all_values()
+        # อ่านผ่านแคชแทนอ่านสด — กัน quota หมดตอนมีคนกดอัปเดตหลายคันรวดเดียว
+        # (เผื่อกดซ้ำคันเดิมในเครื่องกัน 5 นาที อาจได้แถวใหม่ซ้ำแทนอัปเดตแถวเดิม ไม่ใช่ปัญหาใหญ่)
+        rows = _fetch_sheet(PLAN_ID, _chase_tab_name(date_str))
         hit  = next((i for i, r in enumerate(rows[1:], start=2)
                      if _cell(r, 0) == key), None)
+
+        chase_cache_key = f"{PLAN_ID}:{_chase_tab_name(date_str)}"
 
         if clear:
             if hit:
                 ws.delete_rows(hit)
+            _sheet_cache.pop(chase_cache_key, None)   # เคลียร์แคช ครั้งหน้าจะอ่านของสด
             _update_daily_status(key, date_str, "")
             return {"ok": True, "cleared": True}
 
@@ -1069,6 +1080,7 @@ def chase_set(
             ws.update(f"A{hit}:H{hit}", [row])
         else:
             ws.append_row(row, value_input_option="USER_ENTERED")
+        _sheet_cache.pop(chase_cache_key, None)
         _update_daily_status(key, date_str, status)
         return {"ok": True, "at": at}
     except Exception as e:
