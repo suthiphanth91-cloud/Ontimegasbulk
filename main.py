@@ -16,7 +16,7 @@ import json
 import os
 import re
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from math import atan2, cos, radians, sin, sqrt
 from time import time
 from typing import Optional
@@ -259,6 +259,57 @@ class SummaryResponse(BaseModel):
 _sheet_cache: dict[str, tuple[float, list]] = {}
 _eta_cache:   dict[str, tuple[float, int]]  = {}
 
+# ─── SUPABASE (แคชถาวรของข้อมูล Sheet — กัน Vercel รีเซ็ตแคชในหน่วยความจำบ่อยเกิน) ──
+SUPABASE_URL         = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+
+
+def _supabase_headers() -> dict:
+    return {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+    }
+
+
+def _supabase_get_cache(key: str):
+    """คืนข้อมูลแคชจาก Supabase ถ้ายังไม่หมดอายุ (CACHE_TTL) ไม่งั้นคืน None"""
+    if not (SUPABASE_URL and SUPABASE_SERVICE_KEY):
+        return None
+    try:
+        r = httpx.get(
+            f"{SUPABASE_URL}/rest/v1/sheet_cache",
+            params={"cache_key": f"eq.{key}", "select": "data,updated_at"},
+            headers=_supabase_headers(),
+            timeout=5,
+        )
+        r.raise_for_status()
+        rows = r.json()
+        if not rows:
+            return None
+        updated_at = datetime.fromisoformat(rows[0]["updated_at"].replace("Z", "+00:00"))
+        age = (datetime.now(timezone.utc) - updated_at).total_seconds()
+        if age > CACHE_TTL:
+            return None
+        return rows[0]["data"]
+    except Exception:
+        return None   # Supabase ล่ม/ตั้งค่าไม่ครบ → เงียบไว้ ไปอ่าน Sheet ตรงแทน
+
+
+def _supabase_set_cache(key: str, data: list) -> None:
+    if not (SUPABASE_URL and SUPABASE_SERVICE_KEY):
+        return
+    try:
+        httpx.post(
+            f"{SUPABASE_URL}/rest/v1/sheet_cache",
+            params={"on_conflict": "cache_key"},
+            headers={**_supabase_headers(), "Prefer": "resolution=merge-duplicates"},
+            json={"cache_key": key, "data": data, "updated_at": datetime.now(timezone.utc).isoformat()},
+            timeout=5,
+        )
+    except Exception:
+        pass   # เขียนแคชไม่สำเร็จไม่เป็นไร ครั้งหน้าจะลองใหม่เอง
+
 # ─── UTILITIES ───────────────────────────────────────────────────────────────
 
 def _build_creds() -> Credentials:
@@ -270,15 +321,23 @@ def _build_creds() -> Credentials:
 
 
 def _fetch_sheet(sheet_id: str, tab: str) -> list[list]:
-    """อ่าน Sheet พร้อม cache 5 นาที"""
+    """อ่าน Sheet พร้อมแคช 5 นาที — เช็คแคชในหน่วยความจำก่อน (เร็วสุด) แล้วค่อยเช็ค
+    แคชถาวรใน Supabase (กันแคชหายตอน Vercel สร้าง server ใหม่) สุดท้ายค่อยอ่าน Sheet จริง"""
     key = f"{sheet_id}:{tab}"
     if key in _sheet_cache:
         ts, data = _sheet_cache[key]
         if time() - ts < CACHE_TTL:
             return data
+
+    cached = _supabase_get_cache(key)
+    if cached is not None:
+        _sheet_cache[key] = (time(), cached)
+        return cached
+
     gc   = gspread.authorize(_build_creds())
     data = gc.open_by_key(sheet_id).worksheet(tab).get_all_values()
     _sheet_cache[key] = (time(), data)
+    _supabase_set_cache(key, data)
     return data
 
 
@@ -869,8 +928,10 @@ def debug():
 
     # 1. env var
     env = os.environ.get("GOOGLE_CREDENTIALS")
-    out["has_GOOGLE_CREDENTIALS"] = bool(env)
-    out["has_GOOGLE_ROUTES_KEY"]  = bool(os.environ.get("GOOGLE_ROUTES_KEY"))
+    out["has_GOOGLE_CREDENTIALS"]  = bool(env)
+    out["has_GOOGLE_ROUTES_KEY"]   = bool(os.environ.get("GOOGLE_ROUTES_KEY"))
+    out["has_SUPABASE_URL"]        = bool(SUPABASE_URL)
+    out["has_SUPABASE_SERVICE_KEY"]= bool(SUPABASE_SERVICE_KEY)
 
     # 2. credentials parse
     try:
