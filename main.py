@@ -969,9 +969,9 @@ def debug():
 
 # ─── ChaseLog — บันทึกว่าไล่รถคันไหนไปแล้ว ────────────────────────────────
 # เก็บแยกแท็บ "ChaseLog_dd.mm.yyyy" ต่อวัน (เหมือนแท็บ GPS รายวัน) แทนแท็บเดียวยาวๆ
-# โครงสร้าง: A=key  B=วันที่  C=เบอร์รถ  D=ปลายทาง  E=ไล่เมื่อ  F=โดย
+# โครงสร้าง: A=key B=วันที่ C=เบอร์รถ D=ปลายทาง E=ไล่เมื่อ F=สถานะ G=พิกัดตอนกด H=โดย
 
-CHASE_HEADER = ["key", "date", "car_no", "customer", "chased_at", "status"]
+CHASE_HEADER = ["key", "date", "car_no", "customer", "chased_at", "status", "location", "by"]
 
 
 def _chase_tab_name(date_str: str) -> str:
@@ -989,14 +989,14 @@ def _chase_ws(date_str: str):
     try:
         return sh.worksheet(tab)
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=tab, rows=2000, cols=6)
-        ws.update("A1:F1", [CHASE_HEADER])
+        ws = sh.add_worksheet(title=tab, rows=2000, cols=8)
+        ws.update("A1:H1", [CHASE_HEADER])
         return ws
 
 
 @app.get("/api/chase", include_in_schema=False)
 def chase_list(date_str: str = Query(None, alias="date")):
-    """คืนรายการที่ไล่แล้วของวันนั้น {key: {"at": "17:54", "by": "..."}}"""
+    """คืนรายการที่ไล่แล้วของวันนั้น {key: {"at": "17:54", "status": "...", "loc": "...", "by": "..."}}"""
     target = date_str or _today_thai()
     try:
         rows = _chase_ws(target).get_all_values()
@@ -1005,7 +1005,10 @@ def chase_list(date_str: str = Query(None, alias="date")):
     out = {}
     for r in rows[1:]:
         if _cell(r, 0):
-            out[_cell(r, 0)] = {"at": _cell(r, 4), "status": _cell(r, 5)}
+            out[_cell(r, 0)] = {
+                "at": _cell(r, 4), "status": _cell(r, 5),
+                "loc": _cell(r, 6), "by": _cell(r, 7),
+            }
     return out
 
 
@@ -1016,6 +1019,8 @@ def chase_set(
     car_no:   str = Form(""),
     customer: str = Form(""),
     status:   str = Form(""),
+    location: str = Form(""),
+    by:       str = Form(""),
     clear:    str = Form(""),
 ):
     """ติ๊ก = บันทึกเวลาไล่  /  เอาติ๊กออก = ลบแถวนั้น"""
@@ -1031,9 +1036,9 @@ def chase_set(
             return {"ok": True, "cleared": True}
 
         at = _thai_now().strftime("%H:%M")
-        row = [key, date_str, car_no, customer, at, status]
+        row = [key, date_str, car_no, customer, at, status, location, by]
         if hit:
-            ws.update(f"A{hit}:F{hit}", [row])
+            ws.update(f"A{hit}:H{hit}", [row])
         else:
             ws.append_row(row, value_input_option="USER_ENTERED")
         return {"ok": True, "at": at}
@@ -1723,9 +1728,24 @@ async function loadChased(){
   }
 }
 
-async function saveStatus(k, status, t){
+function getMyName(){                 // ถามชื่อครั้งแรกแล้วจำไว้ในเครื่องนี้ ไม่ต้องพิมพ์อีก
+  let name = localStorage.getItem('gb_by');
+  if(!name){
+    name = (prompt('กรุณาใส่ชื่อของคุณ (จำไว้ในเครื่องนี้ครั้งเดียว)') || '').trim();
+    if(name) localStorage.setItem('gb_by', name);
+  }
+  return name || '';
+}
+
+function tripLoc(t){                  // ข้อความพิกัด/ตำแหน่งปัจจุบันของรถ ตอนกดอัปเดตสถานะ
+  if(t.current_lat == null || t.current_lng == null) return t.current_loc || '';
+  return t.current_loc || (t.current_lat.toFixed(5) + ', ' + t.current_lng.toFixed(5));
+}
+
+async function saveStatus(k, status, t, loc, by){
   const body = new URLSearchParams({ key:k, date:curDate(), status:status,
-                                     car_no:t.car_no||'', customer:t.customer||'' });
+                                     car_no:t.car_no||'', customer:t.customer||'',
+                                     location: loc||'', by: by||'' });
   if(!status) body.set('clear','1');
   const r = await fetch('/api/chase', {method:'POST', body});
   if(!r.ok) throw new Error((await r.json().catch(()=>({}))).detail || 'save failed');
@@ -1758,7 +1778,10 @@ document.addEventListener('change', e => {
   render();
   localStorage.setItem('gb_chased_'+curDate(), JSON.stringify(CHASED));
 
-  pendingSaves[k] = {status: b.value, t: t};   // ทับของเดิมถ้าเลือกซ้ำก่อนถึงรอบบันทึก
+  // ถามชื่อ/อ่านพิกัด ณ ตอนกด (ไม่ใช่ตอน flush เพราะอาจรันตอนไม่มีใครอยู่หน้าจอ)
+  const by  = b.value ? getMyName() : '';
+  const loc = tripLoc(t);
+  pendingSaves[k] = {status: b.value, t: t, by: by, loc: loc};   // ทับของเดิมถ้าเลือกซ้ำก่อนถึงรอบบันทึก
   updateSaveNowBtn();
 });
 
@@ -1778,9 +1801,9 @@ async function flushPendingSaves(){
   pendingSaves = {};
   updateSaveNowBtn();
   for(const k of keys){
-    const {status, t} = batch[k];
+    const {status, t, loc, by} = batch[k];
     try{
-      const at = await saveStatus(k, status, t);
+      const at = await saveStatus(k, status, t, loc, by);
       if(status && at){ CHASED[k] = {at: at, status: status}; }
       localStorage.setItem('gb_chased_'+curDate(), JSON.stringify(CHASED));
     }catch(err){
