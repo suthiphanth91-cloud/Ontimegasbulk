@@ -968,19 +968,28 @@ def debug():
 
 
 # ─── ChaseLog — บันทึกว่าไล่รถคันไหนไปแล้ว ────────────────────────────────
-# เก็บในแท็บแยกชื่อ ChaseLog ของไฟล์แผนงาน ไม่แตะคอลัมน์เดิม
+# เก็บแยกแท็บ "ChaseLog_dd.mm.yyyy" ต่อวัน (เหมือนแท็บ GPS รายวัน) แทนแท็บเดียวยาวๆ
 # โครงสร้าง: A=key  B=วันที่  C=เบอร์รถ  D=ปลายทาง  E=ไล่เมื่อ  F=โดย
 
 CHASE_HEADER = ["key", "date", "car_no", "customer", "chased_at", "status"]
 
 
-def _chase_ws():
-    """เปิดแท็บ ChaseLog ถ้ายังไม่มีก็สร้างให้"""
-    sh = gspread.authorize(_build_creds()).open_by_key(PLAN_ID)
+def _chase_tab_name(date_str: str) -> str:
     try:
-        return sh.worksheet(CHASE_TAB)
+        d = datetime.strptime(date_str, "%Y-%m-%d")
+        return f"{CHASE_TAB}_{d.strftime('%d.%m.%Y')}"
+    except ValueError:
+        return f"{CHASE_TAB}_{date_str}"
+
+
+def _chase_ws(date_str: str):
+    """เปิดแท็บ ChaseLog ของวันนั้นๆ ถ้ายังไม่มีก็สร้างให้"""
+    sh  = gspread.authorize(_build_creds()).open_by_key(PLAN_ID)
+    tab = _chase_tab_name(date_str)
+    try:
+        return sh.worksheet(tab)
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=CHASE_TAB, rows=2000, cols=6)
+        ws = sh.add_worksheet(title=tab, rows=2000, cols=6)
         ws.update("A1:F1", [CHASE_HEADER])
         return ws
 
@@ -990,12 +999,12 @@ def chase_list(date_str: str = Query(None, alias="date")):
     """คืนรายการที่ไล่แล้วของวันนั้น {key: {"at": "17:54", "by": "..."}}"""
     target = date_str or _today_thai()
     try:
-        rows = _chase_ws().get_all_values()
+        rows = _chase_ws(target).get_all_values()
     except Exception as e:
         raise HTTPException(502, f"อ่าน ChaseLog ไม่ได้: {type(e).__name__}: {e}")
     out = {}
     for r in rows[1:]:
-        if _cell(r, 1) == target and _cell(r, 0):
+        if _cell(r, 0):
             out[_cell(r, 0)] = {"at": _cell(r, 4), "status": _cell(r, 5)}
     return out
 
@@ -1011,7 +1020,7 @@ def chase_set(
 ):
     """ติ๊ก = บันทึกเวลาไล่  /  เอาติ๊กออก = ลบแถวนั้น"""
     try:
-        ws   = _chase_ws()
+        ws   = _chase_ws(date_str)
         rows = ws.get_all_values()
         hit  = next((i for i, r in enumerate(rows[1:], start=2)
                      if _cell(r, 0) == key), None)
