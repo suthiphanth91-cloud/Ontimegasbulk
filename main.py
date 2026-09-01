@@ -39,7 +39,12 @@ PTGL_LAT   = 4   # E  Latitude
 PTGL_LNG   = 5   # F  Longitude
 PTGL_LOC   = 12  # M  LocalLocation (ที่อยู่ปัจจุบัน)
 
-# Sheet 2: แผนงาน Gasbulk — ตารางทริปประจำวัน
+# Sheet 2a: ไฟล์ต้นทางจริง "แผนงานแก๊สบัลค์ใหม่" — คนหน้างานแก้ไขแผนงานที่ไฟล์นี้โดยตรง
+# ใช้อ่าน "รายการทริป" + "ข้อมูลปลายทาง" เท่านั้น (ยังไม่มีสิทธิ์เขียน แค่ Viewer)
+SOURCE_ID    = "1bwBmxGy1mlnAEIUm5ZNNV71tud3NCyPZlHesIwP4tUs"
+
+# Sheet 2b: "Test Report Ontime PTGLG" — ยังใช้ไฟล์นี้สำหรับไทม์ไลน์ตำแหน่งรายชั่วโมง
+# (แท็บรายวัน dd.mm.yyyy) กับ ChaseLog (ประวัติสะสมอยู่ที่นี่แล้ว) เท่านั้น ไม่ใช้อ่านทริปอีกต่อไป
 PLAN_ID      = "1kksFntsGH0SuJUeF2ChAury-yyF6EorzgBpyl5mggdk"
 PLAN_TAB     = "แผนงาน Gasbulk"
 PLAN_DATE    = 2   # C  วันที่
@@ -74,8 +79,8 @@ PLAN_GPS_ST  = 33  # AH สถานะจัดส่ง GPS
 PLAN_ONTIME  = 47  # AV On Time  (PASS / Delay) — ผลตัดสินจากชีตเอง
 PLAN_ONTIME_M= 48  # AW On Time(m) จำนวนนาทีที่ช้า
 
-# Sheet 3: ข้อมูลปลายทาง — พิกัดของแต่ละจุดส่ง (อยู่ในไฟล์เดียวกับแผนงาน)
-DEST_ID      = PLAN_ID
+# Sheet 3: ข้อมูลปลายทาง — พิกัดของแต่ละจุดส่ง (อยู่ในไฟล์ต้นทางเดียวกับแผนงาน SOURCE_ID)
+DEST_ID      = SOURCE_ID
 DEST_TAB     = "ข้อมูลปลายทาง"
 DEST_NAME    = 0   # A  ชื่อปลายทาง (ตรงกับ PLAN_DEST)
 DEST_COORD   = 6   # G  พิกัด "lat,lng"  เช่น "13.802396,102.091462"
@@ -606,7 +611,7 @@ def fetch_destinations() -> dict[str, tuple[float, float]]:
 
 def fetch_trips(target_date: str) -> list[dict]:
     """คืนรายการทริปทั้งหมดของวันที่ระบุ"""
-    rows  = _fetch_sheet(PLAN_ID, PLAN_TAB)
+    rows  = _fetch_sheet(SOURCE_ID, PLAN_TAB)
     trips = []
     for i, row in enumerate(rows[1:], start=1):
         if _parse_date(_cell(row, PLAN_DATE)) != target_date:
@@ -944,8 +949,9 @@ def debug():
     # 3. เปิดแต่ละ Sheet / แต่ละแท็บ
     for label, sid, tab in (
         ("PTGL",   PTGL_ID, PTGL_TAB),
-        ("PLAN",   PLAN_ID, PLAN_TAB),
-        ("DEST",   DEST_ID, DEST_TAB),
+        ("SOURCE", SOURCE_ID, PLAN_TAB),   # ไฟล์ต้นทางจริง — รายการทริป
+        ("DEST",   DEST_ID, DEST_TAB),     # พิกัดปลายทาง (ไฟล์เดียวกับ SOURCE)
+        ("PLAN",   PLAN_ID, PLAN_TAB),     # Test Report Ontime PTGLG — ไทม์ไลน์/ChaseLog เท่านั้น
     ):
         try:
             gc = gspread.authorize(creds)
@@ -1029,7 +1035,7 @@ def chase_set(
 @app.get("/api/peek")
 def peek():
     """ดูข้อมูลดิบ 5 แถวแรกของแผนงาน เพื่อเช็คว่าคอลัมน์/วันที่ตรงไหม"""
-    rows = _fetch_sheet(PLAN_ID, PLAN_TAB)
+    rows = _fetch_sheet(SOURCE_ID, PLAN_TAB)
     return {
         "header": rows[0] if rows else [],
         "sample": [
