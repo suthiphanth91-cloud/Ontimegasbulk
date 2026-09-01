@@ -161,6 +161,9 @@ def _app_password() -> str:
     return os.environ.get("APP_PASSWORD", "")
 
 
+CRON_SECRET = os.environ.get("CRON_SECRET", "")   # ตั้งที่ Vercel — ใช้กันคนนอกยิง /api/cron/hourly-status เล่น
+
+
 def _secret() -> bytes:
     """คีย์สำหรับเซ็น token — ตั้ง SESSION_SECRET เองได้ ไม่ตั้งก็ใช้รหัสผ่านแทน"""
     return (os.environ.get("SESSION_SECRET") or _app_password() or "dev").encode()
@@ -194,7 +197,7 @@ app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], allow_headers=["*"]
 )
 
-OPEN_PATHS = {"/login", "/api/login", "/favicon.ico"}
+OPEN_PATHS = {"/login", "/api/login", "/favicon.ico", "/api/cron/hourly-status"}
 
 
 @app.middleware("http")
@@ -1070,6 +1073,35 @@ def chase_set(
         return {"ok": True, "at": at}
     except Exception as e:
         raise HTTPException(502, f"บันทึก ChaseLog ไม่ได้: {type(e).__name__}: {e}")
+
+
+@app.get("/api/cron/hourly-status", include_in_schema=False)
+def cron_hourly_status(secret: str = Query("")):
+    """เรียกจาก Apps Script (trigger ทุกชั่วโมง) — เก็บพิกัดปัจจุบันของทุกคันที่ยังไม่ถึง/ยังไม่ยกเลิก
+    ลง ChaseLog เป็นแถวใหม่ทุกครั้ง (ไม่แตะคอลัมน์ L เพราะเป็นแค่ snapshot อัตโนมัติ ไม่ใช่การกดสถานะเอง)"""
+    if not CRON_SECRET or secret != CRON_SECRET:
+        raise HTTPException(401, "unauthorized")
+
+    target = _today_thai()
+    result = get_trips(date_str=target)
+    at     = _thai_now().strftime("%H:%M")
+    saved  = 0
+    for t in result.trips:
+        if t.status in ("arrived", "cancelled"):
+            continue
+        loc = t.current_loc or (
+            f"{t.current_lat:.5f}, {t.current_lng:.5f}" if t.current_lat is not None else ""
+        )
+        if not loc:
+            continue
+        key = f"{t.date}|{t.car_no}|{t.trip_no}|{t.drop}|{t.invoice_no}"
+        row = [key, target, t.car_no, t.customer, at, "", loc, "ระบบ (ทุกชั่วโมง)"]
+        try:
+            _chase_ws(target).append_row(row, value_input_option="USER_ENTERED")
+            saved += 1
+        except Exception:
+            continue
+    return {"ok": True, "date": target, "saved": saved, "checked": len(result.trips)}
 
 
 @app.get("/api/peek")
