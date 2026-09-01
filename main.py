@@ -994,6 +994,30 @@ def _chase_ws(date_str: str):
         return ws
 
 
+def _update_daily_status(key: str, date_str: str, status: str) -> None:
+    """เขียนสถานะลงคอลัมน์ L "สถานะปัจจุบัน" ของแท็บรายวัน (dd.mm.yyyy) ตรงแถวทริปนั้นด้วย
+    เพิ่มเติมจาก ChaseLog — เป็น best-effort เท่านั้น หาไม่เจอ/แท็บไม่มีก็แค่ข้าม ไม่ throw"""
+    try:
+        parts = key.split("|")
+        if len(parts) < 4:
+            return
+        car_no, trip_no, drop = parts[1], parts[2], parts[3]
+        d = datetime.strptime(date_str, "%Y-%m-%d")
+        tab_name = d.strftime("%d.%m.%Y")
+        sh = gspread.authorize(_build_creds()).open_by_key(PLAN_ID)
+        ws = sh.worksheet(tab_name)
+        rows = ws.get_all_values()
+        car_key = _extract_car_no(car_no)
+        for i, row in enumerate(rows[1:], start=2):
+            if (_extract_car_no(_cell(row, 5)) == car_key
+                    and _cell(row, 2).strip() == trip_no.strip()
+                    and _cell(row, 3).strip() == drop.strip()):
+                ws.update_cell(i, 12, status)   # col L = 12 (1-based)
+                return
+    except Exception:
+        pass
+
+
 @app.get("/api/chase", include_in_schema=False)
 def chase_list(date_str: str = Query(None, alias="date")):
     """คืนรายการที่ไล่แล้วของวันนั้น {key: {"at": "17:54", "status": "...", "loc": "...", "by": "..."}}"""
@@ -1033,6 +1057,7 @@ def chase_set(
         if clear:
             if hit:
                 ws.delete_rows(hit)
+            _update_daily_status(key, date_str, "")
             return {"ok": True, "cleared": True}
 
         at = _thai_now().strftime("%H:%M")
@@ -1041,6 +1066,7 @@ def chase_set(
             ws.update(f"A{hit}:H{hit}", [row])
         else:
             ws.append_row(row, value_input_option="USER_ENTERED")
+        _update_daily_status(key, date_str, status)
         return {"ok": True, "at": at}
     except Exception as e:
         raise HTTPException(502, f"บันทึก ChaseLog ไม่ได้: {type(e).__name__}: {e}")
