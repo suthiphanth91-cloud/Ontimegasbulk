@@ -1265,6 +1265,11 @@ def cron_hourly_status(secret: str = Query("")):
     daily_rows = _fetch_sheet(PLAN_ID, _daily_tab_name(target))
     loc_col, status_col = _current_hour_columns(daily_rows[0] if daily_rows else [])
     cell_updates = []
+    debug = {
+        "daily_rows_count": len(daily_rows), "loc_col": loc_col, "status_col": status_col,
+        "hour": _thai_now().hour, "header_sample": (daily_rows[0] if daily_rows else [])[10:20],
+        "row_i_none_count": 0, "row_i_found_count": 0, "batch_error": None,
+    }
 
     for t in result.trips:
         if t.status in ("arrived", "cancelled"):
@@ -1291,22 +1296,28 @@ def cron_hourly_status(secret: str = Query("")):
         })
 
         if row_i is not None:
+            debug["row_i_found_count"] += 1
             if loc_col:
                 loc_text = f"{_thai_now().strftime('%d/%m/%Y %H:%M:%S')} / {loc}"
                 cell_updates.append({"range": f"{_col_letter(loc_col)}{row_i}", "values": [[loc_text]]})
             if status_col:
                 cell_updates.append({"range": f"{_col_letter(status_col)}{row_i}", "values": [[status_now]]})
+        else:
+            debug["row_i_none_count"] += 1
 
+    debug["cell_updates_count"] = len(cell_updates)
+    debug["cell_updates_sample"] = cell_updates[:3]
     if cell_updates:
         try:
             sh = gspread.authorize(_build_creds()).open_by_key(PLAN_ID)
-            sh.worksheet(_daily_tab_name(target)).batch_update(cell_updates, value_input_option="USER_ENTERED")
-        except Exception:
-            pass
+            resp = sh.worksheet(_daily_tab_name(target)).batch_update(cell_updates, value_input_option="USER_ENTERED")
+            debug["batch_resp"] = str(resp)[:300]
+        except Exception as e:
+            debug["batch_error"] = f"{type(e).__name__}: {e}"
 
     return {
         "ok": True, "date": target, "saved": saved, "checked": len(result.trips),
-        "sync": sync_result,
+        "sync": sync_result, "debug": debug,
     }
 
 
