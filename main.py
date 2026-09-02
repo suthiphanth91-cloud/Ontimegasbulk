@@ -365,6 +365,15 @@ def _fetch_sheet(sheet_id: str, tab: str) -> list[list]:
     return data
 
 
+def _refresh_sheet_cache(sheet_id: str, tab: str, ws) -> None:
+    """อ่านค่าล่าสุดจริงจาก ws แล้วยัดใส่แคชทั้ง 2 ชั้นทับของเก่า — ใช้หลังเขียนชีตเอง
+    เพื่อกัน _fetch_sheet ตัวถัดไปในคำขอเดียวกันดันไปเจอแคชเก่าของ Supabase (TTL 5 นาที) ที่ยังไม่หมดอายุ"""
+    fresh = ws.get_all_values()
+    key = f"{sheet_id}:{tab}"
+    _sheet_cache[key] = (time(), fresh)
+    _supabase_set_cache(key, fresh)
+
+
 def _cell(row: list, idx: int) -> str:
     return str(row[idx]).strip() if idx < len(row) else ""
 
@@ -1134,7 +1143,7 @@ def _sync_daily_sheet(target_date: str) -> dict:
         ws = sh.duplicate_sheet(master.id, new_sheet_name=tab_name)
         ws.batch_clear([f"A2:K{ws.row_count}"])
         ws.update("A2", filtered, value_input_option="USER_ENTERED")
-        _sheet_cache.pop(f"{PLAN_ID}:{tab_name}", None)
+        _refresh_sheet_cache(PLAN_ID, tab_name, ws)
         return {"ok": True, "created": True, "date": target_date, "rows": len(filtered)}
 
     existing = ws.get(f"A2:K{ws.row_count}")
@@ -1169,7 +1178,7 @@ def _sync_daily_sheet(target_date: str) -> dict:
     if new_rows:
         ws.append_rows(new_rows, value_input_option="USER_ENTERED")
 
-    _sheet_cache.pop(f"{PLAN_ID}:{tab_name}", None)
+    _refresh_sheet_cache(PLAN_ID, tab_name, ws)
     return {
         "ok": True, "created": False, "date": target_date,
         "updated": len(updates), "added": len(new_rows), "deleted": len(to_delete),
