@@ -318,6 +318,22 @@ def _supabase_set_cache(key: str, data: list) -> None:
     except Exception:
         pass   # เขียนแคชไม่สำเร็จไม่เป็นไร ครั้งหน้าจะลองใหม่เอง
 
+
+def _supabase_log_hourly_status(row: dict) -> None:
+    """บันทึก 1 แถวลงตาราง hourly_status_log ใน Supabase (best-effort)
+    ต้องสร้างตารางนี้ไว้ก่อนใน Supabase — ดู SQL ที่ให้ไว้ตอนตั้งค่า"""
+    if not (SUPABASE_URL and SUPABASE_SERVICE_KEY):
+        return
+    try:
+        httpx.post(
+            f"{SUPABASE_URL}/rest/v1/hourly_status_log",
+            headers=_supabase_headers(),
+            json=row,
+            timeout=5,
+        )
+    except Exception:
+        pass
+
 # ─── UTILITIES ───────────────────────────────────────────────────────────────
 
 def _build_creds() -> Credentials:
@@ -997,34 +1013,48 @@ def _chase_ws(date_str: str):
         return ws
 
 
-def _update_daily_status(key: str, date_str: str, status: str) -> None:
-    """เขียนสถานะลงคอลัมน์ L "สถานะปัจจุบัน" ของแท็บรายวัน (dd.mm.yyyy) ตรงแถวทริปนั้นด้วย
-    เพิ่มเติมจาก ChaseLog — เป็น best-effort เท่านั้น หาไม่เจอ/แท็บไม่มีก็แค่ข้าม ไม่ throw"""
+def _find_daily_row(key: str, date_str: str):
+    """หาแถวในแท็บรายวัน (dd.mm.yyyy) ที่ตรงกับ key ของทริป — คืน (row_i, row_data) หรือ (None, None)
+    อ่านผ่านแคช (5 นาที) แทนการอ่านสดทุกครั้ง กัน quota "Read requests/min" หมด"""
     try:
         parts = key.split("|")
         if len(parts) < 4:
-            return
+            return None, None
         car_no, trip_no, drop = parts[1], parts[2], parts[3]
         d = datetime.strptime(date_str, "%Y-%m-%d")
         tab_name = d.strftime("%d.%m.%Y")
-        # อ่านผ่านแคช (5 นาที) แทนการอ่านสดทุกครั้ง — กัน quota "Read requests/min" หมด
-        # ตอนมีคนกดอัปเดตสถานะหลายคันรวดเดียว (เขียนยังเป็นของสดเสมอ)
         rows = _fetch_sheet(PLAN_ID, tab_name)
         car_key = _extract_car_no(car_no)
-        row_i = None
         for i, row in enumerate(rows[1:], start=2):
             if (_extract_car_no(_cell(row, 5)) == car_key
                     and _cell(row, 2).strip() == trip_no.strip()
                     and _cell(row, 3).strip() == drop.strip()):
-                row_i = i
-                break
+                return i, row
+    except Exception:
+        pass
+    return None, None
+
+
+def _update_daily_status(key: str, date_str: str, status: str) -> None:
+    """เขียนสถานะลงคอลัมน์ L "สถานะปัจจุบัน" ของแท็บรายวัน (dd.mm.yyyy) ตรงแถวทริปนั้นด้วย
+    เพิ่มเติมจาก ChaseLog — เป็น best-effort เท่านั้น หาไม่เจอ/แท็บไม่มีก็แค่ข้าม ไม่ throw"""
+    try:
+        row_i, _ = _find_daily_row(key, date_str)
         if row_i is None:
             return
+        d = datetime.strptime(date_str, "%Y-%m-%d")
+        tab_name = d.strftime("%d.%m.%Y")
         sh = gspread.authorize(_build_creds()).open_by_key(PLAN_ID)
         ws = sh.worksheet(tab_name)
         ws.update_cell(row_i, 12, status)   # col L = 12 (1-based)
     except Exception:
         pass
+
+
+def _read_daily_status(key: str, date_str: str) -> str:
+    """อ่านค่าปัจจุบันในคอลัมน์ L "สถานะปัจจุบัน" ของแท็บรายวัน ตรงแถวทริปนั้น (ไม่พบคืนค่าว่าง)"""
+    _, row = _find_daily_row(key, date_str)
+    return _cell(row, 11) if row is not None else ""
 
 
 @app.get("/api/chase", include_in_schema=False)
@@ -1090,7 +1120,8 @@ def chase_set(
 @app.get("/api/cron/hourly-status", include_in_schema=False)
 def cron_hourly_status(secret: str = Query("")):
     """เรียกจาก Apps Script (trigger ทุกชั่วโมง) — เก็บพิกัดปัจจุบันของทุกคันที่ยังไม่ถึง/ยังไม่ยกเลิก
-    ลง ChaseLog เป็นแถวใหม่ทุกครั้ง และเขียนพิกัดล่าสุดทับคอลัมน์ L ในแท็บรายวันด้วย"""
+    ลง ChaseLog เป็นแถวใหม่ทุกครั้ง และอ่านคอลัมน์ L "สถานะปัจจุบัน" (ที่คนกรอกเอง/ChaseLog เขียนไว้)
+    ไปบันทึกเป็นประวัติรายชั่วโมงใน Supabase — ไม่เขียนทับคอลัมน์ L เลย (แค่อ่าน)"""
     if not CRON_SECRET or secret != CRON_SECRET:
         raise HTTPException(401, "unauthorized")
 
@@ -1108,12 +1139,18 @@ def cron_hourly_status(secret: str = Query("")):
             continue
         key = f"{t.date}|{t.car_no}|{t.trip_no}|{t.drop}|{t.invoice_no}"
         row = [key, target, t.car_no, t.customer, "", loc, "ระบบ (ทุกชั่วโมง)", at]
-        _update_daily_status(key, target, loc)   # อัปเดตคอลัมน์ L ด้วยพิกัดล่าสุด (best-effort)
         try:
             _chase_ws(target).append_row(row, value_input_option="USER_ENTERED")
             saved += 1
         except Exception:
-            continue
+            pass
+
+        status_now = _read_daily_status(key, target)   # แค่อ่าน ไม่เขียนทับ
+        _supabase_log_hourly_status({
+            "source_depot": t.source, "trip_no": t.trip_no, "drop_no": t.drop,
+            "customer": t.customer, "car_no": t.car_no, "log_date": target,
+            "status": status_now, "recorded_at_th": at,
+        })
     return {"ok": True, "date": target, "saved": saved, "checked": len(result.trips)}
 
 
