@@ -999,7 +999,7 @@ def debug():
 # เก็บแยกแท็บ "ChaseLog_dd.mm.yyyy" ต่อวัน (เหมือนแท็บ GPS รายวัน) แทนแท็บเดียวยาวๆ
 # โครงสร้าง: A=key B=วันที่ C=เบอร์รถ D=ปลายทาง E=สถานะ F=พิกัดตอนกด G=โดย H=ไล่เมื่อ
 
-CHASE_HEADER = ["key", "date", "car_no", "customer", "status", "location", "by", "chased_at"] + [f"{h}:00 น." for h in range(5, 23)]
+CHASE_HEADER = ["key", "date", "car_no", "customer", "status", "location", "by", "chased_at"] + [f"{h}:00 น." for h in range(0, 24)]
 
 
 def _chase_tab_name(date_str: str) -> str:
