@@ -2116,9 +2116,13 @@ async function flushPendingSaves(){
       pendingSaves[k] = batch[k];   // ล้มเหลว เก็บไว้ลองรอบหน้าใหม่
       const w = document.getElementById('nopass');
       w.hidden = false;
-      w.innerHTML = '⚠️ บันทึกลง Google Sheet ไม่ได้ (' + esc(err.message) + ')<br>'
-        + 'เก็บไว้ในเครื่องนี้ก่อน — ต้องแชร์ไฟล์แผนงานให้ '
-        + '<b>tms-249@tms-bult.iam.gserviceaccount.com</b> เป็น <b>ผู้แก้ไข</b>';
+      const isQuota = /429|quota/i.test(err.message || '');
+      w.innerHTML = isQuota
+        ? '⚠️ ระบบใช้งาน Google Sheet ถี่เกินไปชั่วคราว (Quota exceeded)<br>'
+          + 'เก็บไว้ในเครื่องนี้ก่อน — เดี๋ยวลองบันทึกซ้ำให้เองใน 1-2 นาที ไม่ต้องทำอะไรเพิ่ม'
+        : '⚠️ บันทึกลง Google Sheet ไม่ได้ (' + esc(err.message) + ')<br>'
+          + 'เก็บไว้ในเครื่องนี้ก่อน — ต้องแชร์ไฟล์แผนงานให้ '
+          + '<b>tms-249@tms-bult.iam.gserviceaccount.com</b> เป็น <b>ผู้แก้ไข</b>';
     }
   }
   updateSaveNowBtn();
