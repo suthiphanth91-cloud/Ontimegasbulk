@@ -1090,7 +1090,7 @@ def chase_set(
 @app.get("/api/cron/hourly-status", include_in_schema=False)
 def cron_hourly_status(secret: str = Query("")):
     """เรียกจาก Apps Script (trigger ทุกชั่วโมง) — เก็บพิกัดปัจจุบันของทุกคันที่ยังไม่ถึง/ยังไม่ยกเลิก
-    ลง ChaseLog เป็นแถวใหม่ทุกครั้ง (ไม่แตะคอลัมน์ L เพราะเป็นแค่ snapshot อัตโนมัติ ไม่ใช่การกดสถานะเอง)"""
+    ลง ChaseLog เป็นแถวใหม่ทุกครั้ง และเขียนพิกัดล่าสุดทับคอลัมน์ L ในแท็บรายวันด้วย"""
     if not CRON_SECRET or secret != CRON_SECRET:
         raise HTTPException(401, "unauthorized")
 
@@ -1108,6 +1108,7 @@ def cron_hourly_status(secret: str = Query("")):
             continue
         key = f"{t.date}|{t.car_no}|{t.trip_no}|{t.drop}|{t.invoice_no}"
         row = [key, target, t.car_no, t.customer, at, "", loc, "ระบบ (ทุกชั่วโมง)"]
+        _update_daily_status(key, target, loc)   # อัปเดตคอลัมน์ L ด้วยพิกัดล่าสุด (best-effort)
         try:
             _chase_ws(target).append_row(row, value_input_option="USER_ENTERED")
             saved += 1
