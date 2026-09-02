@@ -1149,7 +1149,7 @@ def cron_hourly_status(secret: str = Query("")):
         _supabase_log_hourly_status({
             "source_depot": t.source, "trip_no": t.trip_no, "drop_no": t.drop,
             "customer": t.customer, "car_no": t.car_no, "log_date": target,
-            "status": status_now, "recorded_at_th": at,
+            "status": status_now, "location": loc, "recorded_at_th": at,
         })
     return {"ok": True, "date": target, "saved": saved, "checked": len(result.trips)}
 
