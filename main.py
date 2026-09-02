@@ -1255,6 +1255,17 @@ def cron_hourly_status(secret: str = Query("")):
     if not CRON_SECRET or secret != CRON_SECRET:
         raise HTTPException(401, "unauthorized")
 
+    try:
+        return _cron_hourly_status_impl()
+    except Exception as e:
+        return JSONResponse(
+            {"ok": False, "error": f"{type(e).__name__}: {e}",
+             "trace": traceback.format_exc().splitlines()[-15:]},
+            status_code=200,
+        )
+
+
+def _cron_hourly_status_impl():
     target = _today_thai()
     sync_result = _sync_daily_sheet(target)
 
