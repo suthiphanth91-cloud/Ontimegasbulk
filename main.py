@@ -972,9 +972,9 @@ def debug():
 
 # ─── ChaseLog — บันทึกว่าไล่รถคันไหนไปแล้ว ────────────────────────────────
 # เก็บแยกแท็บ "ChaseLog_dd.mm.yyyy" ต่อวัน (เหมือนแท็บ GPS รายวัน) แทนแท็บเดียวยาวๆ
-# โครงสร้าง: A=key B=วันที่ C=เบอร์รถ D=ปลายทาง E=ไล่เมื่อ F=สถานะ G=พิกัดตอนกด H=โดย
+# โครงสร้าง: A=key B=วันที่ C=เบอร์รถ D=ปลายทาง E=สถานะ F=พิกัดตอนกด G=โดย H=ไล่เมื่อ
 
-CHASE_HEADER = ["key", "date", "car_no", "customer", "chased_at", "status", "location", "by"]
+CHASE_HEADER = ["key", "date", "car_no", "customer", "status", "location", "by", "chased_at"]
 
 
 def _chase_tab_name(date_str: str) -> str:
@@ -1039,8 +1039,8 @@ def chase_list(date_str: str = Query(None, alias="date")):
     for r in rows[1:]:
         if _cell(r, 0):
             out[_cell(r, 0)] = {
-                "at": _cell(r, 4), "status": _cell(r, 5),
-                "loc": _cell(r, 6), "by": _cell(r, 7),
+                "status": _cell(r, 4), "loc": _cell(r, 5),
+                "by": _cell(r, 6), "at": _cell(r, 7),
             }
     return out
 
@@ -1075,7 +1075,7 @@ def chase_set(
             return {"ok": True, "cleared": True}
 
         at = _thai_now().strftime("%H:%M")
-        row = [key, date_str, car_no, customer, at, status, location, by]
+        row = [key, date_str, car_no, customer, status, location, by, at]
         if hit:
             ws.update(f"A{hit}:H{hit}", [row])
         else:
@@ -1107,7 +1107,7 @@ def cron_hourly_status(secret: str = Query("")):
         if not loc:
             continue
         key = f"{t.date}|{t.car_no}|{t.trip_no}|{t.drop}|{t.invoice_no}"
-        row = [key, target, t.car_no, t.customer, at, "", loc, "ระบบ (ทุกชั่วโมง)"]
+        row = [key, target, t.car_no, t.customer, "", loc, "ระบบ (ทุกชั่วโมง)", at]
         _update_daily_status(key, target, loc)   # อัปเดตคอลัมน์ L ด้วยพิกัดล่าสุด (best-effort)
         try:
             _chase_ws(target).append_row(row, value_input_option="USER_ENTERED")
