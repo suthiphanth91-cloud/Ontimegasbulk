@@ -999,7 +999,7 @@ def debug():
 # เก็บแยกแท็บ "ChaseLog_dd.mm.yyyy" ต่อวัน (เหมือนแท็บ GPS รายวัน) แทนแท็บเดียวยาวๆ
 # โครงสร้าง: A=key B=วันที่ C=เบอร์รถ D=ปลายทาง E=สถานะ F=พิกัดตอนกด G=โดย H=ไล่เมื่อ
 
-CHASE_HEADER = ["key", "date", "car_no", "customer", "status", "location", "by", "chased_at"]
+CHASE_HEADER = ["key", "date", "car_no", "customer", "status", "location", "by", "chased_at"] + [f"{h}:00 น." for h in range(5, 23)]
 
 
 def _chase_tab_name(date_str: str) -> str:
@@ -1017,8 +1017,9 @@ def _chase_ws(date_str: str, sh=None):
     try:
         return sh.worksheet(tab)
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=tab, rows=2000, cols=8)
-        ws.update("A1:H1", [CHASE_HEADER])
+        ncols = len(CHASE_HEADER)
+        ws = sh.add_worksheet(title=tab, rows=2000, cols=ncols)
+        ws.update(f"A1:{_col_letter(ncols)}1", [CHASE_HEADER])
         return ws
 
 
@@ -1267,6 +1268,15 @@ def cron_hourly_status(secret: str = Query("")):
         )
 
 
+def _chase_hour_col(hour: int) -> Optional[int]:
+    """คืนคอลัมน์ (1-based) ของชั่วโมงนั้นใน CHASE_HEADER — None ถ้าอยู่นอกช่วง 5:00-22:00"""
+    label = f"{hour}:00 น."
+    try:
+        return CHASE_HEADER.index(label) + 1   # 1-based
+    except ValueError:
+        return None
+
+
 def _cron_hourly_status_impl():
     target = _today_thai()
     sh = gspread.authorize(_build_creds()).open_by_key(PLAN_ID)   # เปิดไฟล์ครั้งเดียว ใช้ซ้ำทั้งคำขอ กัน quota อ่านหมด
@@ -1275,11 +1285,25 @@ def _cron_hourly_status_impl():
 
     result = get_trips(date_str=target)
     at     = _thai_now().strftime("%H:%M")
+    hour   = _thai_now().hour
     saved  = 0
 
     daily_rows = _fetch_sheet(PLAN_ID, _daily_tab_name(target))
     loc_col, status_col = _current_hour_columns(daily_rows[0] if daily_rows else [])
     cell_updates = []
+
+    # อ่าน ChaseLog ที่มีอยู่ → สร้าง lookup key → row number
+    chase_tab = _chase_tab_name(target)
+    chase_rows = _fetch_sheet(PLAN_ID, chase_tab)
+    chase_key_to_row: dict[str, int] = {}
+    for ci, cr in enumerate(chase_rows[1:], start=2):
+        ck = _cell(cr, 0)
+        if ck:
+            chase_key_to_row[ck] = ci
+
+    chase_hour_col = _chase_hour_col(hour)   # คอลัมน์ชั่วโมงนี้ (1-based)
+    chase_updates = []
+    chase_new_rows = []
 
     for t in result.trips:
         if t.status in ("arrived", "cancelled"):
@@ -1290,12 +1314,24 @@ def _cron_hourly_status_impl():
         if not loc:
             continue
         key = f"{t.date}|{t.car_no}|{t.trip_no}|{t.drop}|{t.invoice_no}"
-        row = [key, target, t.car_no, t.customer, "", loc, "ระบบ (ทุกชั่วโมง)", at]
-        try:
-            chase_ws.append_row(row, value_input_option="USER_ENTERED")
-            saved += 1
-        except Exception:
-            pass
+        loc_text_chase = f"{_thai_now().strftime('%d/%m/%Y %H:%M:%S')} / {loc}"
+
+        # ── ChaseLog แนวนอน: หาแถวเดิม → เขียนคอลัมน์ชั่วโมง ──
+        chase_row_i = chase_key_to_row.get(key)
+        if chase_row_i and chase_hour_col:
+            chase_updates.append({
+                "range": f"{_col_letter(chase_hour_col)}{chase_row_i}",
+                "values": [[loc_text_chase]],
+            })
+        elif not chase_row_i:
+            new_row = [key, target, t.car_no, t.customer, "", loc, "ระบบ (ทุกชั่วโมง)", at]
+            if chase_hour_col:
+                while len(new_row) < chase_hour_col:
+                    new_row.append("")
+                new_row[chase_hour_col - 1] = loc_text_chase
+            chase_new_rows.append(new_row)
+            chase_key_to_row[key] = len(chase_rows) + len(chase_new_rows)
+        saved += 1
 
         row_i, row_data = _find_daily_row(key, target)
         status_now = _cell(row_data, 11) if row_data is not None else ""   # แค่อ่าน ไม่เขียนทับ
@@ -1312,6 +1348,25 @@ def _cron_hourly_status_impl():
             if status_col:
                 cell_updates.append({"range": f"{_col_letter(status_col)}{row_i}", "values": [[status_now]]})
 
+    # เขียน ChaseLog — batch update แถวเดิม + append แถวใหม่
+    chase_written = False
+    chase_error   = None
+    try:
+        if chase_updates:
+            chase_ws.batch_update(chase_updates, value_input_option="USER_ENTERED")
+        if chase_new_rows:
+            ncols = len(CHASE_HEADER)
+            for nr in chase_new_rows:
+                while len(nr) < ncols:
+                    nr.append("")
+            start = chase_ws.row_count + 1 if not chase_rows else len(chase_rows) + 1
+            chase_ws.update(f"A{start}:{_col_letter(ncols)}{start + len(chase_new_rows) - 1}",
+                            chase_new_rows, value_input_option="USER_ENTERED")
+        chase_written = True
+        _refresh_sheet_cache(PLAN_ID, chase_tab, chase_ws)
+    except Exception as e:
+        chase_error = f"{type(e).__name__}: {e}"
+
     hourly_cols_written = False
     hourly_cols_error   = None
     if cell_updates and daily_ws is not None:
@@ -1325,6 +1380,7 @@ def _cron_hourly_status_impl():
         "ok": True, "date": target, "saved": saved, "checked": len(result.trips),
         "sync": sync_result, "hourly_cols_written": hourly_cols_written,
         "hourly_cols_error": hourly_cols_error,
+        "chase_written": chase_written, "chase_error": chase_error,
     }
 
 
