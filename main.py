@@ -1010,9 +1010,9 @@ def _chase_tab_name(date_str: str) -> str:
         return f"{CHASE_TAB}_{date_str}"
 
 
-def _chase_ws(date_str: str):
-    """เปิดแท็บ ChaseLog ของวันนั้นๆ ถ้ายังไม่มีก็สร้างให้"""
-    sh  = gspread.authorize(_build_creds()).open_by_key(PLAN_ID)
+def _chase_ws(date_str: str, sh=None):
+    """เปิดแท็บ ChaseLog ของวันนั้นๆ ถ้ายังไม่มีก็สร้างให้ — ส่ง sh (Spreadsheet ที่เปิดไว้แล้ว) มาได้ กันเปิดไฟล์ซ้ำ"""
+    sh  = sh or gspread.authorize(_build_creds()).open_by_key(PLAN_ID)
     tab = _chase_tab_name(date_str)
     try:
         return sh.worksheet(tab)
@@ -1117,9 +1117,10 @@ def _current_hour_columns(header_row: list) -> tuple[Optional[int], Optional[int
     return loc_col, status_col
 
 
-def _sync_daily_sheet(target_date: str) -> dict:
+def _sync_daily_sheet(target_date: str, sh=None):
     """ดึงทริปของวันที่ target_date จากไฟล์ต้นทาง (SOURCE_ID) มาสร้าง/อัปเดตแท็บรายวัน (dd.mm.yyyy)
-    ในไฟล์ PLAN_ID — แก้แค่คอลัมน์ A:K เท่านั้น ไม่แตะคอลัมน์ L (สถานะปัจจุบัน) เป็นต้นไปของแถวที่จับคู่ได้"""
+    ในไฟล์ PLAN_ID — แก้แค่คอลัมน์ A:K เท่านั้น ไม่แตะคอลัมน์ L (สถานะปัจจุบัน) เป็นต้นไปของแถวที่จับคู่ได้
+    คืน (result, ws) — ws เป็น worksheet ของแท็บรายวันที่เพิ่งซิงก์ (ให้ผู้เรียกเอาไปใช้ต่อ กันเปิดไฟล์ซ้ำ)"""
     src_rows = _fetch_sheet(SOURCE_ID, PLAN_TAB)
     filtered = []
     for row in src_rows[1:]:
@@ -1132,10 +1133,11 @@ def _sync_daily_sheet(target_date: str) -> dict:
             _cell(row, PLAN_INVOICE), _cell(row, PLAN_GPS_ST),
         ])
     if not filtered:
-        return {"ok": False, "reason": "no_rows", "date": target_date}
+        return {"ok": False, "reason": "no_rows", "date": target_date}, None
 
     tab_name = _daily_tab_name(target_date)
-    sh = gspread.authorize(_build_creds()).open_by_key(PLAN_ID)
+    if sh is None:
+        sh = gspread.authorize(_build_creds()).open_by_key(PLAN_ID)
     try:
         ws = sh.worksheet(tab_name)
     except gspread.WorksheetNotFound:
@@ -1144,7 +1146,7 @@ def _sync_daily_sheet(target_date: str) -> dict:
         ws.batch_clear([f"A2:K{ws.row_count}"])
         ws.update("A2", filtered, value_input_option="USER_ENTERED")
         _refresh_sheet_cache(PLAN_ID, tab_name, ws)
-        return {"ok": True, "created": True, "date": target_date, "rows": len(filtered)}
+        return {"ok": True, "created": True, "date": target_date, "rows": len(filtered)}, ws
 
     existing = ws.get(f"A2:K{ws.row_count}")
     existing_by_key: dict[str, int] = {}
@@ -1182,7 +1184,7 @@ def _sync_daily_sheet(target_date: str) -> dict:
     return {
         "ok": True, "created": False, "date": target_date,
         "updated": len(updates), "added": len(new_rows), "deleted": len(to_delete),
-    }
+    }, ws
 
 
 @app.get("/api/chase", include_in_schema=False)
@@ -1267,7 +1269,9 @@ def cron_hourly_status(secret: str = Query("")):
 
 def _cron_hourly_status_impl():
     target = _today_thai()
-    sync_result = _sync_daily_sheet(target)
+    sh = gspread.authorize(_build_creds()).open_by_key(PLAN_ID)   # เปิดไฟล์ครั้งเดียว ใช้ซ้ำทั้งคำขอ กัน quota อ่านหมด
+    sync_result, daily_ws = _sync_daily_sheet(target, sh=sh)
+    chase_ws = _chase_ws(target, sh=sh)
 
     result = get_trips(date_str=target)
     at     = _thai_now().strftime("%H:%M")
@@ -1288,7 +1292,7 @@ def _cron_hourly_status_impl():
         key = f"{t.date}|{t.car_no}|{t.trip_no}|{t.drop}|{t.invoice_no}"
         row = [key, target, t.car_no, t.customer, "", loc, "ระบบ (ทุกชั่วโมง)", at]
         try:
-            _chase_ws(target).append_row(row, value_input_option="USER_ENTERED")
+            chase_ws.append_row(row, value_input_option="USER_ENTERED")
             saved += 1
         except Exception:
             pass
@@ -1309,10 +1313,9 @@ def _cron_hourly_status_impl():
                 cell_updates.append({"range": f"{_col_letter(status_col)}{row_i}", "values": [[status_now]]})
 
     hourly_cols_written = False
-    if cell_updates:
+    if cell_updates and daily_ws is not None:
         try:
-            sh = gspread.authorize(_build_creds()).open_by_key(PLAN_ID)
-            sh.worksheet(_daily_tab_name(target)).batch_update(cell_updates, value_input_option="USER_ENTERED")
+            daily_ws.batch_update(cell_updates, value_input_option="USER_ENTERED")
             hourly_cols_written = True
         except Exception:
             pass
