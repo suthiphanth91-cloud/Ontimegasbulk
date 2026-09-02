@@ -1313,16 +1313,18 @@ def _cron_hourly_status_impl():
                 cell_updates.append({"range": f"{_col_letter(status_col)}{row_i}", "values": [[status_now]]})
 
     hourly_cols_written = False
+    hourly_cols_error   = None
     if cell_updates and daily_ws is not None:
         try:
             daily_ws.batch_update(cell_updates, value_input_option="USER_ENTERED")
             hourly_cols_written = True
-        except Exception:
-            pass
+        except Exception as e:
+            hourly_cols_error = f"{type(e).__name__}: {e}"
 
     return {
         "ok": True, "date": target, "saved": saved, "checked": len(result.trips),
         "sync": sync_result, "hourly_cols_written": hourly_cols_written,
+        "hourly_cols_error": hourly_cols_error,
     }
 
 
