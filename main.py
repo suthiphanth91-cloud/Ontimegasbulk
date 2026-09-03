@@ -394,6 +394,23 @@ def _extract_car_no(raw: str) -> str:
     return m.group(0).lstrip("0") or m.group(0) if m else ""
 
 
+def _car_key(raw: str) -> str:
+    """คีย์จับคู่รถแบบรวม "อักษรนำหน้า + เลข" — กันคนละคันที่เลขซ้ำกันจับคู่ผิด
+      'PTL.456(61-1566)' → 'PTL456'
+      'PTL.456'          → 'PTL456'
+      'No.456(63-3248)'  → 'NO456'
+      '0465'             → '465'      (ไม่มีอักษรนำหน้า)
+
+    เคยเจอของจริง: ชีต GPS มีทั้ง PTL.456 กับ No.456 คนละคันกัน พอตัดเหลือแต่เลข
+    '456' ทั้งคู่ ตำแหน่งของอีกคันเลยไปแสดงผิดคัน (PTL.456 ไปโชว์พิกัดของ No.456)"""
+    s = re.sub(r"\(.*", "", raw or "")            # ตัดวงเล็บทะเบียนท้ายชื่อออก
+    m = re.match(r"\s*([A-Za-z]*)\s*\.?\s*0*(\d+)", s)
+    if not m:
+        return _extract_car_no(raw)
+    prefix, num = m.group(1).upper(), (m.group(2).lstrip("0") or m.group(2))
+    return f"{prefix}{num}"
+
+
 def _parse_coords(raw: str) -> Optional[tuple[float, float]]:
     """'13.756, 100.501' → (13.756, 100.501)"""
     nums = re.findall(r"[-+]?\d+\.\d+", raw)
@@ -603,14 +620,22 @@ def _get_travel_minutes(
 
 def fetch_ptgl() -> dict[str, dict]:
     """
-    คืน dict: car_no (str) → {lat, lng, location}
-    เช่น {"465": {"lat": 13.75, "lng": 100.50, "location": "ถนนพระราม 9"}}
+    คืน dict: คีย์รถ → {lat, lng, location}
+    ใส่ไว้ 2 คีย์ต่อคัน: แบบมีอักษรนำหน้า ('PTL456') กับแบบเลขล้วน ('456')
+
+    แบบมีอักษรนำหน้าเป็นตัวหลัก — กันกรณีคนละคันเลขซ้ำกัน (PTL.456 กับ No.456)
+    ส่วนแบบเลขล้วนไว้เป็นตัวสำรอง เผื่อชีตฝั่งใดเขียนเลขเปล่า ๆ ไม่มีอักษรนำหน้า
+    และจะใส่ให้เฉพาะเลขที่ไม่ซ้ำกับคันอื่นเท่านั้น ถ้าซ้ำจะไม่ใส่ ให้จับคู่ด้วย
+    อักษรนำหน้าอย่างเดียว ดีกว่าเสี่ยงหยิบผิดคัน
     """
     rows   = _fetch_sheet(PTGL_ID, PTGL_TAB)
     result: dict[str, dict] = {}
+    by_num: dict[str, list[str]] = {}          # เลขล้วน → คีย์เต็มของทุกคันที่ใช้เลขนี้
+
     for row in rows[1:]:
-        car_no = _extract_car_no(_cell(row, PTGL_LICNO))
-        if not car_no:
+        raw = _cell(row, PTGL_LICNO)
+        ckey = _car_key(raw)
+        if not ckey:
             continue
         try:
             lat = float(_cell(row, PTGL_LAT))
@@ -619,11 +644,16 @@ def fetch_ptgl() -> dict[str, dict]:
             continue
         if not (-90 <= lat <= 90 and -180 <= lng <= 180):
             continue
-        result[car_no] = {
+        result[ckey] = {
             "lat":      lat,
             "lng":      lng,
             "location": _cell(row, PTGL_LOC),
         }
+        by_num.setdefault(_extract_car_no(raw), []).append(ckey)
+
+    for num, keys in by_num.items():
+        if num and len(keys) == 1 and num not in result:
+            result[num] = result[keys[0]]
     return result
 
 
@@ -653,7 +683,7 @@ def fetch_trips(target_date: str) -> list[dict]:
         trips.append({
             "id":         i,
             "car_no":     car_no,                      # แสดงผลตามที่กรอกจริง
-            "car_key":    _extract_car_no(car_no),     # ใช้จับคู่กับ PTGL
+            "car_key":    _car_key(car_no),            # ใช้จับคู่กับ PTGL (รวมอักษรนำหน้า)
             "plate":      _cell(row, PLAN_PLATE),
             "trip_no":    _cell(row, PLAN_TRIP),
             "drop":       _cell(row, PLAN_DROP),
@@ -1049,9 +1079,9 @@ def _find_daily_row(key: str, date_str: str):
         d = datetime.strptime(date_str, "%Y-%m-%d")
         tab_name = d.strftime("%d.%m.%Y")
         rows = _fetch_sheet(PLAN_ID, tab_name)
-        car_key = _extract_car_no(car_no)
+        car_key = _car_key(car_no)
         for i, row in enumerate(rows[1:], start=2):
-            if (_extract_car_no(_cell(row, 5)) == car_key
+            if (_car_key(_cell(row, 5)) == car_key
                     and _cell(row, 2).strip() == trip_no.strip()
                     and _cell(row, 3).strip() == drop.strip()):
                 return i, row
@@ -1555,11 +1585,11 @@ def timeline(
         if m:
             hour_cols.append((i, str(h).strip()))
 
-    car_key = _extract_car_no(car_no)
+    car_key = _car_key(car_no)
     match_row = None
     if car_key:
         for r in rows[1:]:
-            if _extract_car_no(_cell(r, TIMELINE_CARNO_COL)) == car_key:
+            if _car_key(_cell(r, TIMELINE_CARNO_COL)) == car_key:
                 match_row = r
                 break
 
