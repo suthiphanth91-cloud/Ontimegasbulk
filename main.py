@@ -43,9 +43,14 @@ PTGL_LOC   = 12  # M  LocalLocation (ที่อยู่ปัจจุบั�
 # ใช้อ่าน "รายการทริป" + "ข้อมูลปลายทาง" เท่านั้น (ยังไม่มีสิทธิ์เขียน แค่ Viewer)
 SOURCE_ID    = "1bwBmxGy1mlnAEIUm5ZNNV71tud3NCyPZlHesIwP4tUs"
 
-# Sheet 2b: "Test Report Ontime PTGLG" — ยังใช้ไฟล์นี้สำหรับไทม์ไลน์ตำแหน่งรายชั่วโมง
-# (แท็บรายวัน dd.mm.yyyy) กับ ChaseLog (ประวัติสะสมอยู่ที่นี่แล้ว) เท่านั้น ไม่ใช้อ่านทริปอีกต่อไป
-PLAN_ID      = "1kksFntsGH0SuJUeF2ChAury-yyF6EorzgBpyl5mggdk"
+# Sheet 2b: ไฟล์ปลายทางที่ระบบเขียนลง — แท็บรายวัน (dd.mm.yyyy) + ChaseLog + Master
+# ไม่ได้ใช้อ่านรายการทริปแล้ว (ย้ายไปอ่านจาก SOURCE_ID ตรง ๆ)
+#
+# ตั้งผ่าน Environment Variable "PLAN_ID" บน Vercel ได้ เผื่อย้ายไปไฟล์อื่น
+# (เช่น ไฟล์ที่ลูกค้าเปิดดู) จะได้ไม่ต้องแก้โค้ด — ไฟล์ปลายทางใหม่ต้องมีแท็บ
+# "Master" (แม่แบบ พร้อม dropdown/หัวคอลัมน์รายชั่วโมง) และแชร์ให้ service account
+# เป็นผู้แก้ไขก่อน ไม่งั้นระบบจะสร้างแท็บรายวันไม่ได้
+PLAN_ID      = os.environ.get("PLAN_ID", "1kksFntsGH0SuJUeF2ChAury-yyF6EorzgBpyl5mggdk")
 PLAN_TAB     = "แผนงาน Gasbulk"
 PLAN_DATE    = 2   # C  วันที่
 PLAN_DUE     = 5   # F  วันที่ส่งมอบ  ← ใช้คู่กับ G เป็นกำหนดจริง (อาจข้ามวันจาก C)
