@@ -997,9 +997,19 @@ def debug():
 
 # ─── ChaseLog — บันทึกว่าไล่รถคันไหนไปแล้ว ────────────────────────────────
 # เก็บแยกแท็บ "ChaseLog_dd.mm.yyyy" ต่อวัน (เหมือนแท็บ GPS รายวัน) แทนแท็บเดียวยาวๆ
-# โครงสร้าง: A=key B=วันที่ C=เบอร์รถ D=ปลายทาง E=สถานะ F=พิกัดตอนกด G=โดย H=ไล่เมื่อ
+# 1 ทริป = 1 แถว — ตำแหน่งรายชั่วโมงไล่ไปทางขวา (0:00 น. ถึง 23:00 น.)
+# โครงสร้าง: A=key B=วันที่ C=คลังต้นทาง D=เที่ยววิ่ง E=Drop F=เบอร์รถ G=ปลายทาง
+#            H=ปริมาณ I=เลขที่ใบกำกับ J=สถานะ K=พิกัดตอนกด L=โดย M=ไล่เมื่อ N.. = รายชั่วโมง
 
-CHASE_HEADER = ["key", "date", "car_no", "customer", "status", "location", "by", "chased_at"] + [f"{h}:00 น." for h in range(0, 24)]
+CHASE_HEADER = [
+    "key", "date", "คลังต้นทาง", "เที่ยววิ่ง", "Drop", "car_no", "customer",
+    "ปริมาณ", "เลขที่ใบกำกับการขนส่ง", "status", "location", "by", "chased_at",
+] + [f"{h}:00 น." for h in range(0, 24)]
+
+# ตำแหน่ง (0-based) ของช่องที่โค้ดอ่าน/เขียนบ่อย — อ้างชื่อแทนเลข กันพลาดเวลาสลับคอลัมน์
+CH_KEY, CH_DATE, CH_SOURCE, CH_TRIP, CH_DROP, CH_CARNO, CH_CUSTOMER = 0, 1, 2, 3, 4, 5, 6
+CH_VOLUME, CH_INVOICE, CH_STATUS, CH_LOC, CH_BY, CH_AT = 7, 8, 9, 10, 11, 12
+CH_DESC_FIRST, CH_DESC_LAST = CH_SOURCE, CH_INVOICE   # ช่วงคอลัมน์ "รายละเอียดทริป" C:I
 
 
 def _chase_tab_name(date_str: str) -> str:
@@ -1198,10 +1208,10 @@ def chase_list(date_str: str = Query(None, alias="date")):
         raise HTTPException(502, f"อ่าน ChaseLog ไม่ได้: {type(e).__name__}: {e}")
     out = {}
     for r in rows[1:]:
-        if _cell(r, 0):
-            out[_cell(r, 0)] = {
-                "status": _cell(r, 4), "loc": _cell(r, 5),
-                "by": _cell(r, 6), "at": _cell(r, 7),
+        if _cell(r, CH_KEY):
+            out[_cell(r, CH_KEY)] = {
+                "status": _cell(r, CH_STATUS), "loc": _cell(r, CH_LOC),
+                "by": _cell(r, CH_BY), "at": _cell(r, CH_AT),
             }
     return out
 
@@ -1224,7 +1234,7 @@ def chase_set(
         # (เผื่อกดซ้ำคันเดิมในเครื่องกัน 5 นาที อาจได้แถวใหม่ซ้ำแทนอัปเดตแถวเดิม ไม่ใช่ปัญหาใหญ่)
         rows = _fetch_sheet(PLAN_ID, _chase_tab_name(date_str))
         hit  = next((i for i, r in enumerate(rows[1:], start=2)
-                     if _cell(r, 0) == key), None)
+                     if _cell(r, CH_KEY) == key), None)
 
         chase_cache_key = f"{PLAN_ID}:{_chase_tab_name(date_str)}"
 
@@ -1236,10 +1246,26 @@ def chase_set(
             return {"ok": True, "cleared": True}
 
         at = _thai_now().strftime("%H:%M")
-        row = [key, date_str, car_no, customer, status, location, by, at]
         if hit:
-            ws.update(f"A{hit}:H{hit}", [row])
+            # เขียนทับเฉพาะช่วง "สถานะ" (J:M) เท่านั้น — ไม่แตะคอลัมน์รายละเอียดทริป (C:I)
+            # กับคอลัมน์รายชั่วโมง (N เป็นต้นไป) ที่ระบบอัตโนมัติเขียนไว้
+            ws.update(
+                f"{_col_letter(CH_STATUS + 1)}{hit}:{_col_letter(CH_AT + 1)}{hit}",
+                [[status, location, by, at]],
+                value_input_option="USER_ENTERED",
+            )
         else:
+            # แถวใหม่ (ยังไม่เคยมีรอบอัตโนมัติเขียนไว้) — เติมเท่าที่รู้จาก key
+            # key = date|car_no|trip_no|drop|invoice_no ; คลังต้นทาง/ปริมาณ ไม่มีใน key
+            # ปล่อยว่างไว้ก่อน เดี๋ยวรอบอัตโนมัติชั่วโมงถัดไปเติมให้เอง
+            p = key.split("|")
+            row = [""] * len(CHASE_HEADER)
+            row[CH_KEY], row[CH_DATE] = key, date_str
+            row[CH_TRIP]    = p[2] if len(p) > 2 else ""
+            row[CH_DROP]    = p[3] if len(p) > 3 else ""
+            row[CH_INVOICE] = p[4] if len(p) > 4 else ""
+            row[CH_CARNO], row[CH_CUSTOMER] = car_no, customer
+            row[CH_STATUS], row[CH_LOC], row[CH_BY], row[CH_AT] = status, location, by, at
             ws.append_row(row, value_input_option="USER_ENTERED")
         _sheet_cache.pop(chase_cache_key, None)
         _update_daily_status(key, date_str, status)
@@ -1268,9 +1294,14 @@ def cron_hourly_status(secret: str = Query("")):
         )
 
 
-def _chase_hour_col(hour: int) -> Optional[int]:
-    """คืนคอลัมน์ (1-based) ของชั่วโมงนั้นใน CHASE_HEADER — None ถ้าอยู่นอกช่วง 5:00-22:00"""
+def _chase_hour_col(hour: int, header_row: list = None) -> Optional[int]:
+    """คืนคอลัมน์ (1-based) ของชั่วโมงนั้นใน ChaseLog — หาจากหัวตารางจริงของชีตก่อน
+    (กันกรณีแท็บเก่ายังเรียงคอลัมน์ไม่ตรงกับ CHASE_HEADER ปัจจุบัน) ไม่เจอค่อยใช้ CHASE_HEADER"""
     label = f"{hour}:00 น."
+    if header_row:
+        for i, cell in enumerate(header_row, start=1):
+            if str(cell).strip() == label:
+                return i
     try:
         return CHASE_HEADER.index(label) + 1   # 1-based
     except ValueError:
@@ -1296,12 +1327,15 @@ def _cron_hourly_status_impl():
     chase_tab = _chase_tab_name(target)
     chase_rows = _fetch_sheet(PLAN_ID, chase_tab)
     chase_key_to_row: dict[str, int] = {}
+    chase_row_by_key: dict[str, list] = {}
     for ci, cr in enumerate(chase_rows[1:], start=2):
-        ck = _cell(cr, 0)
+        ck = _cell(cr, CH_KEY)
         if ck:
             chase_key_to_row[ck] = ci
+            chase_row_by_key[ck] = cr
 
-    chase_hour_col = _chase_hour_col(hour)   # คอลัมน์ชั่วโมงนี้ (1-based)
+    chase_header  = chase_rows[0] if chase_rows else []
+    chase_hour_col = _chase_hour_col(hour, chase_header)   # คอลัมน์ชั่วโมงนี้ (1-based)
     chase_updates = []
     chase_new_rows = []
 
@@ -1316,15 +1350,29 @@ def _cron_hourly_status_impl():
         key = f"{t.date}|{t.car_no}|{t.trip_no}|{t.drop}|{t.invoice_no}"
         loc_text_chase = f"{_thai_now().strftime('%d/%m/%Y %H:%M:%S')} / {loc}"
 
+        # รายละเอียดทริป C:I — คลังต้นทาง / เที่ยววิ่ง / Drop / เบอร์รถ / ปลายทาง / ปริมาณ / เลขที่ใบกำกับ
+        desc = [t.source, t.trip_no, t.drop, t.car_no, t.customer, t.volume, t.invoice_no]
+
         # ── ChaseLog แนวนอน: หาแถวเดิม → เขียนคอลัมน์ชั่วโมง ──
         chase_row_i = chase_key_to_row.get(key)
-        if chase_row_i and chase_hour_col:
-            chase_updates.append({
-                "range": f"{_col_letter(chase_hour_col)}{chase_row_i}",
-                "values": [[loc_text_chase]],
-            })
-        elif not chase_row_i:
-            new_row = [key, target, t.car_no, t.customer, "", loc, "ระบบ (ทุกชั่วโมง)", at]
+        if chase_row_i:
+            if chase_hour_col:
+                chase_updates.append({
+                    "range": f"{_col_letter(chase_hour_col)}{chase_row_i}",
+                    "values": [[loc_text_chase]],
+                })
+            # เติมรายละเอียดทริปให้แถวเดิมที่ยังว่าง (แท็บที่สร้างก่อนเพิ่มคอลัมน์พวกนี้)
+            old = chase_row_by_key.get(key, [])
+            if [_cell(old, i) for i in range(CH_DESC_FIRST, CH_DESC_LAST + 1)] != [str(d).strip() for d in desc]:
+                chase_updates.append({
+                    "range": f"{_col_letter(CH_DESC_FIRST + 1)}{chase_row_i}:{_col_letter(CH_DESC_LAST + 1)}{chase_row_i}",
+                    "values": [desc],
+                })
+        else:
+            new_row = [""] * len(CHASE_HEADER)
+            new_row[CH_KEY], new_row[CH_DATE] = key, target
+            new_row[CH_DESC_FIRST:CH_DESC_LAST + 1] = desc
+            new_row[CH_LOC], new_row[CH_BY], new_row[CH_AT] = loc, "ระบบ (ทุกชั่วโมง)", at
             if chase_hour_col:
                 while len(new_row) < chase_hour_col:
                     new_row.append("")
@@ -1783,6 +1831,10 @@ DASHBOARD_HTML = """<!doctype html>
   tbody tr:hover{background:var(--pd-bg)}
   /* บีบให้ทุกแถวสูงบรรทัดเดียว อ่านง่ายขึ้นมาก */
   td.wide{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px}
+  /* ตำแหน่งปัจจุบันเป็นชื่อสถานที่ยาว (ถนน/ตำบล/อำเภอ/จังหวัด) 170px สั้นไปมาก
+     ให้กว้างขึ้นและตัดขึ้นบรรทัดที่ 2 ได้ อ่านออกโดยไม่ต้องเอาเมาส์ไปชี้ */
+  td.loc{max-width:360px;min-width:240px;white-space:normal;word-break:break-word;
+         line-height:1.25;overflow:hidden}
   td.cust{max-width:200px;font-weight:500;white-space:normal;overflow:visible;text-overflow:clip;
           word-break:break-word;line-height:1.2}
   tbody tr:nth-child(even){background:var(--pd-bg)}
@@ -1852,7 +1904,7 @@ DASHBOARD_HTML = """<!doctype html>
        align-items:flex-start;justify-content:space-between}
     td::before{content:attr(data-l);color:var(--mut);font-size:12.5px;
                flex:0 0 40%;font-weight:500}
-    td.wide,td.cust{max-width:none;min-width:0}
+    td.wide,td.cust,td.loc{max-width:none;min-width:0}
     /* เบอร์รถ + ลูกค้า + สถานะ = ข้อมูลหลัก ทำให้เด่น */
     td.carno{font-size:20px;padding-bottom:2px}
     td.carno::before{align-self:center}
@@ -2253,7 +2305,7 @@ function render(){
       + '<td data-l="ต่าง" class="mono">'+diff+'</td>'
       + '<td data-l="On Time (ชีต)">'+ot(t)+'</td>'
       + '<td data-l="สถานะ" class="st">'+badge+'</td>'
-      + '<td data-l="ตำแหน่งปัจจุบัน" class="wide mut">'+loc(t)+'</td>'
+      + '<td data-l="ตำแหน่งปัจจุบัน" class="loc">'+loc(t)+'</td>'
       + '<td data-l="อัปเดตสถานะ" class="chk">'+pick(t, k)+'</td>'
       + '</tr>';
   }).join('') : '<tr><td colspan="18" class="empty">'
