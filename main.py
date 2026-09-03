@@ -1089,16 +1089,29 @@ def _daily_tab_name(date_str: str) -> str:
     return d.strftime("%d.%m.%Y")
 
 
+def _norm_time(raw: str) -> str:
+    """'11:00' / '11:00 น.' / '6:00 น.' → '11:00' / '06:00' — ใช้เทียบเวลาให้ตรงกันเสมอ
+
+    จำเป็นเพราะไฟล์ต้นทางเก็บเวลาเป็นข้อความ '11:00' แต่พอเขียนลงแท็บรายวันแบบ
+    USER_ENTERED กูเกิลชีตแปลงเป็นค่าเวลาจริงแล้วแสดงตามรูปแบบของชีตเป็น '11:00 น.'
+    ถ้าเทียบดิบ ๆ จะกลายเป็นคนละค่า ทำให้ทริปที่ไม่มีเลขใบกำกับ (ATL- เฉย ๆ)
+    ถูกลบแล้วสร้างใหม่ทุกชั่วโมง พร้อมทำพิกัด/สถานะรายชั่วโมงที่สะสมไว้หายไปด้วย"""
+    m = re.search(r"(\d{1,2}):(\d{2})", raw or "")
+    return f"{int(m.group(1)):02d}:{m.group(2)}" if m else (raw or "").strip()
+
+
 def _daily_row_key(row: list) -> str:
-    """จับคู่ทริปเดิม-ใหม่ด้วยเลขที่ใบกำกับ (หรือ เบอร์รถ+เวลา+ลูกค้าปลายทาง ถ้าไม่มีเลขใบกำกับจริง)
-    ตรรกะเดียวกับ buildTripKey ที่เคยอยู่ฝั่ง Apps Script (เทสดึง.js)"""
+    """จับคู่ทริปเดิม-ใหม่ด้วยเลขที่ใบกำกับ (หรือ เบอร์รถ+เที่ยว+Drop+เวลา+ลูกค้าปลายทาง
+    ถ้าไม่มีเลขใบกำกับจริง) — ตรรกะเดิมจาก buildTripKey ฝั่ง Apps Script (เทสดึง.js)"""
     invoice = _cell(row, 9).strip()
     if invoice and invoice != "ATL-":
         return f"INV:{invoice}"
     car_no   = _cell(row, 5).strip()
-    sched    = _cell(row, 8).strip()
+    trip_no  = _cell(row, 2).strip()
+    drop     = _cell(row, 3).strip()
+    sched    = _norm_time(_cell(row, 8))
     customer = _cell(row, 4).strip()
-    return f"ALT:{car_no}|{sched}|{customer}"
+    return f"ALT:{car_no}|{trip_no}|{drop}|{sched}|{customer}"
 
 
 def _col_letter(n: int) -> str:
@@ -1159,20 +1172,26 @@ def _sync_daily_sheet(target_date: str, sh=None):
         _refresh_sheet_cache(PLAN_ID, tab_name, ws)
         return {"ok": True, "created": True, "date": target_date, "rows": len(filtered)}, ws
 
+    # คีย์เดียวอาจตรงได้หลายแถว (เคยเจอ 2 ทริปคนละคันแต่กรอกเลขใบกำกับซ้ำกันในต้นทาง)
+    # จึงเก็บเป็น "คิวของเลขแถว" แล้วจ่ายทีละแถว — กันไม่ให้ทริปหนึ่งไปเขียนทับอีกทริป
+    # และกันไม่ให้แถวที่เหลือถูกมองว่าไม่มีเจ้าของแล้วโดนลบทิ้ง
     existing = ws.get(f"A2:K{ws.row_count}")
-    existing_by_key: dict[str, int] = {}
+    existing_by_key: dict[str, list[int]] = {}
+    all_rows: list[int] = []
     for i, row in enumerate(existing):
         if not any(row):
             continue
-        existing_by_key[_daily_row_key(row)] = i + 2   # แถวจริงในชีต (เริ่ม A2)
+        row_i = i + 2                                  # แถวจริงในชีต (เริ่ม A2)
+        existing_by_key.setdefault(_daily_row_key(row), []).append(row_i)
+        all_rows.append(row_i)
 
     matched_rows = set()
     updates   = []
     new_rows  = []
     for row in filtered:
-        key = _daily_row_key(row)
-        row_i = existing_by_key.get(key)
-        if row_i:
+        queue = existing_by_key.get(_daily_row_key(row))
+        if queue:
+            row_i = queue.pop(0)
             matched_rows.add(row_i)
             updates.append({"range": f"A{row_i}:K{row_i}", "values": [row]})
         else:
@@ -1182,7 +1201,7 @@ def _sync_daily_sheet(target_date: str, sh=None):
         ws.batch_update(updates, value_input_option="USER_ENTERED")
 
     to_delete = sorted(
-        (row_i for row_i in existing_by_key.values() if row_i not in matched_rows),
+        (row_i for row_i in all_rows if row_i not in matched_rows),
         reverse=True,
     )
     for row_i in to_delete:
