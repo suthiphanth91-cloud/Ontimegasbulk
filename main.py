@@ -14,6 +14,7 @@ import hashlib
 import hmac
 import json
 import os
+import random
 import re
 import traceback
 from datetime import datetime, timedelta, timezone
@@ -399,16 +400,30 @@ def _with_retry(fn, tries: int = 3, wait: float = 2.0):
             sleep(wait * (2 ** attempt))
 
 
+# สุ่มยืดอายุแคชเพิ่มอีก 0-150 วินาที ต่างกันไปในแต่ละ server และแต่ละชีต
+#
+# ถ้าทุกที่หมดอายุพร้อมกันเป๊ะทุก 5 นาที พอถึงวินาทีนั้นทุก server ที่กำลังรับ
+# request อยู่จะเห็นว่าแคชหมดอายุพร้อมกันหมด แล้วแห่กันไปอ่าน Sheet สดพร้อมกัน
+# หลายไฟล์หลายคน = ทะลุโควตา 60 ครั้ง/นาที ทันที แล้ววนแบบนี้ทุก 5 นาที
+# เหลื่อมเวลาออกจากกันแล้วการอ่านจะกระจายตัว ไม่กระจุกเป็นช่วง ๆ
+_JITTER_SEED = random.random()          # ต่างกันทุกครั้งที่ Vercel สร้าง server ใหม่
+
+
+def _ttl_jitter(key: str) -> float:
+    return ((hash(key) % 100) / 100 + _JITTER_SEED) % 1 * 150
+
+
 def _fetch_sheet(sheet_id: str, tab: str) -> list[list]:
     """อ่าน Sheet พร้อมแคช 5 นาที — เช็คแคชในหน่วยความจำก่อน (เร็วสุด) แล้วค่อยเช็ค
     แคชถาวรใน Supabase (กันแคชหายตอน Vercel สร้าง server ใหม่) สุดท้ายค่อยอ่าน Sheet จริง"""
     key = f"{sheet_id}:{tab}"
+    ttl = CACHE_TTL + _ttl_jitter(key)
     if key in _sheet_cache:
         ts, data = _sheet_cache[key]
-        if time() - ts < CACHE_TTL:
+        if time() - ts < ttl:
             return data
 
-    cached = _supabase_get_cache(key)
+    cached = _supabase_get_cache(key, max_age=ttl)
     if cached is not None:
         _sheet_cache[key] = (time(), cached)
         return cached
