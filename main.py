@@ -1734,12 +1734,12 @@ DASHBOARD_HTML = """<!doctype html>
   th,td{padding:3px 6px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap;font-size:12.5px}
   th{font-size:12.5px;color:var(--mut);font-weight:600;text-transform:uppercase;
      letter-spacing:.4px;background:var(--card);position:sticky;top:0;z-index:2}
-  /* แถวตัวกรองใต้หัวตาราง — เลือกค่าที่ต้องการดูเฉพาะคอลัมน์นั้น */
-  tr.filters th{top:var(--th1,26px);padding:2px 4px;text-transform:none;letter-spacing:0}
-  tr.filters select{width:100%;max-width:150px;font:inherit;font-size:11.5px;
-     padding:2px 4px;border:1px solid var(--line);border-radius:5px;
-     background:var(--card);color:inherit;cursor:pointer}
-  tr.filters select.on{border-color:var(--tr);color:var(--tr);font-weight:600}
+  /* กดหัวคอลัมน์เพื่อเรียง — กดซ้ำสลับ น้อย→มาก / มาก→น้อย / กลับเป็นลำดับไฟล์ต้นทาง */
+  th[data-col]{cursor:pointer;user-select:none;white-space:nowrap}
+  th[data-col]:hover{color:var(--tr)}
+  th[data-col] .ar{opacity:.3;font-size:9px;margin-left:3px}
+  th[data-col].sorted{color:var(--tr)}
+  th[data-col].sorted .ar{opacity:1}
   tbody tr:hover{background:var(--pd-bg)}
   /* บีบให้ทุกแถวสูงบรรทัดเดียว อ่านง่ายขึ้นมาก */
   td.wide{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px}
@@ -1890,16 +1890,13 @@ DASHBOARD_HTML = """<!doctype html>
   </div>
   <div class="wrap">
     <table id="tbl">
-      <thead>
-      <tr>
+      <thead><tr id="headRow">
         <th>ประจำวันที่</th><th>คลังต้นทาง</th><th>เที่ยววิ่ง</th><th>Drop</th>
         <th>ลูกค้าปลายทาง</th><th>เบอร์รถ</th><th>ทะเบียน</th><th>ปริมาณ</th>
         <th>พขร. / โทร</th>
         <th>เวลา</th><th>เลขที่ใบกำกับการขนส่ง</th><th>สถานะ GPS</th>
         <th>ETA / ถึงจริง</th><th>ต่าง</th><th>On Time</th><th>สถานะ</th><th>ตำแหน่งปัจจุบัน</th><th>อัปเดตสถานะ</th>
-      </tr>
-      <tr id="filterRow" class="filters"></tr>
-      </thead>
+      </tr></thead>
       <tbody id="rows"></tbody>
     </table>
   </div>
@@ -2179,55 +2176,53 @@ function keep(t){                     // กรองตามชิปที่
   return s != null && s - nowMins() <= 60;
 }
 
-// ── ตัวกรองรายคอลัมน์ (ลิสต์ใต้หัวตาราง) ─────────────────────────────────
-// col = ลำดับคอลัมน์ในตาราง (0-based) ต้องตรงกับลำดับ <th> และ <td>
-const FILTER_COLS = [
-  { col:1,  field:'source'     },
-  { col:2,  field:'trip_no'    },
-  { col:3,  field:'drop'       },
-  { col:4,  field:'customer'   },
-  { col:5,  field:'car_no'     },
-  { col:6,  field:'plate'      },
-  { col:7,  field:'volume'     },
-  { col:8,  field:'driver'     },
-  { col:9,  field:'sched_time' },
-  { col:11, field:'gps_status' },
-  { col:14, field:'ontime'     },
-  { col:15, field:'status', label:v => LABEL[v] || v },
-];
-const TOTAL_COLS = 18;
-let FILTERS = {};                       // field -> ค่าที่เลือก ('' = ทั้งหมด)
+// ── กดหัวคอลัมน์เพื่อเรียงลำดับ ────────────────────────────────────────────
+// ลำดับต้องตรงกับ <th> และ <td> ในตาราง (0-based)
+// val = ค่าที่เอาไปเทียบ คืน number สำหรับคอลัมน์ตัวเลข/เวลา คืน string สำหรับข้อความ
+const SORT_COLS = {
+   0:{ val:t => t.date || ''                 },
+   1:{ val:t => t.source || ''               },
+   2:{ val:t => t.trip_no || ''              },
+   3:{ val:t => t.drop || ''                 },
+   4:{ val:t => t.customer || ''             },
+   5:{ val:t => t.car_no || ''               },
+   6:{ val:t => t.plate || ''                },
+   7:{ val:t => num(t.volume)                },
+   8:{ val:t => t.driver || ''               },
+   9:{ val:t => mins(t.sched_time) ?? 1e9    },
+  10:{ val:t => t.invoice_no || ''           },
+  11:{ val:t => t.gps_status || ''           },
+  12:{ val:t => mins(t.arrive_time || t.eta_time) ?? 1e9 },
+  13:{ val:t => t.diff_minutes == null ? 1e9 : t.diff_minutes },
+  14:{ val:t => t.ontime || ''               },
+  15:{ val:t => LABEL[t.status] || t.status || '' },
+  16:{ val:t => t.current_loc || ''          },
+};
+function num(v){                       // '22,000' -> 22000 ; ไม่ใช่ตัวเลขให้ไปท้ายสุด
+  const n = parseFloat(String(v ?? '').replace(/[^\d.-]/g, ''));
+  return isNaN(n) ? Infinity : n;
+}
+let SORT = { col:null, dir:1 };        // col=null คือเรียงตามลำดับไฟล์ต้นทาง
 
-function buildFilters(){
-  const row = document.getElementById('filterRow');
+function buildHead(){
+  const row = document.getElementById('headRow');
   if(!row) return;
-  const cells = [];
-  for(let c=0; c<TOTAL_COLS; c++){
-    const def = FILTER_COLS.find(f => f.col === c);
-    if(!def){ cells.push('<th></th>'); continue; }
-    // ค่าที่เลือกได้ = ค่าที่มีจริงในข้อมูลของวันนั้น (ไม่รวมค่าว่าง)
-    const vals = [...new Set(ALL.map(t => String(t[def.field] ?? '').trim()).filter(v => v))]
-                 .sort((a,b) => a.localeCompare(b, 'th', {numeric:true}));
-    const cur  = FILTERS[def.field] || '';
-    cells.push('<th><select data-f="'+def.field+'" class="'+(cur?'on':'')+'">'
-      + '<option value="">ทั้งหมด</option>'
-      + vals.map(v => '<option value="'+esc(v)+'"'+(v===cur?' selected':'')+'>'
-                    + esc(def.label ? def.label(v) : v)+'</option>').join('')
-      + '</select></th>');
-  }
-  row.innerHTML = cells.join('');
-  row.querySelectorAll('select').forEach(sel => {
-    sel.onchange = () => {
-      const f = sel.getAttribute('data-f');
-      if(sel.value) FILTERS[f] = sel.value; else delete FILTERS[f];
+  [...row.children].forEach((th, i) => {
+    if(!SORT_COLS[i]) return;          // คอลัมน์อัปเดตสถานะ กดเรียงไม่ได้
+    th.setAttribute('data-col', i);
+    const on  = SORT.col === i;
+    th.className = on ? 'sorted' : '';
+    const base = th.getAttribute('data-label') || th.textContent.replace(/[▲▼↕]/g,'').trim();
+    th.setAttribute('data-label', base);
+    th.innerHTML = esc(base) + '<span class="ar">' + (on ? (SORT.dir>0?'▲':'▼') : '↕') + '</span>';
+    th.onclick = () => {
+      // กดคอลัมน์เดิมซ้ำ: น้อย→มาก → มาก→น้อย → กลับเป็นลำดับไฟล์ต้นทาง
+      if(SORT.col !== i)        SORT = { col:i, dir:1 };
+      else if(SORT.dir === 1)   SORT = { col:i, dir:-1 };
+      else                      SORT = { col:null, dir:1 };
       render();
     };
   });
-}
-
-function passFilters(t){
-  return Object.keys(FILTERS).every(f =>
-    String(t[f] ?? '').trim() === FILTERS[f]);
 }
 
 function render(){
@@ -2236,11 +2231,22 @@ function render(){
   const list = (!q ? DATA : DATA.filter(t =>
     [t.car_no, t.plate, t.customer, t.source, t.invoice_no]
       .some(v => String(v||'').toLowerCase().includes(q))))
-    .filter(passFilters)
-    .slice()
-    // เรียงตามลำดับเดิมในไฟล์ต้นทาง (t.id = ลำดับแถวที่อ่านมาจากแผนงาน)
-    // อ่านเทียบกับไฟล์ต้นทางได้ตรง ๆ ไม่ต้องไล่หาว่าแถวไหนอยู่ตรงไหน
-    .sort((a,b) => (a.id||0) - (b.id||0));
+    .slice();
+
+  const sc = SORT.col != null ? SORT_COLS[SORT.col] : null;
+  if(sc){
+    list.sort((a,b) => {
+      const x = sc.val(a), y = sc.val(b);
+      const c = (typeof x === 'number' && typeof y === 'number')
+        ? x - y
+        : String(x).localeCompare(String(y), 'th', {numeric:true});
+      return (c || (a.id||0) - (b.id||0)) * SORT.dir;   // ค่าเท่ากันให้ยึดลำดับไฟล์ต้นทาง
+    });
+  }else{
+    // ค่าเริ่มต้น: เรียงตามลำดับเดิมในไฟล์ต้นทาง (t.id = ลำดับแถวที่อ่านมาจากแผนงาน)
+    list.sort((a,b) => (a.id||0) - (b.id||0));
+  }
+  buildHead();
 
   document.getElementById('rows').innerHTML = list.length ? list.map(t => {
     const k    = key(t);
@@ -2295,12 +2301,6 @@ async function load(){
     if(!r.ok) throw new Error((await r.json()).detail || r.statusText);
     const j = await r.json();
     ALL = j.trips || [];
-    // ตัวกรองที่เลือกไว้ ถ้าไม่มีค่านั้นในข้อมูลวันใหม่แล้ว ให้ยกเลิกไปเอง
-    // ไม่งั้นตารางจะว่างเปล่าโดยหาสาเหตุไม่เจอ
-    Object.keys(FILTERS).forEach(f => {
-      if(!ALL.some(t => String(t[f] ?? '').trim() === FILTERS[f])) delete FILTERS[f];
-    });
-    buildFilters();
     await loadChased();
     document.getElementById('cards').innerHTML =
         card(j.total,'ทริปทั้งหมด','')
@@ -2383,9 +2383,6 @@ load();
 // ล็อค header + การ์ด/ปุ่มกรอง ไว้ให้เห็นตลอดตอนเลื่อนดูรายการยาวๆ
 function syncStickyOffset(){
   document.documentElement.style.setProperty('--hh', document.querySelector('header').offsetHeight + 'px');
-  // แถวตัวกรองต้องหนีบใต้แถวหัวตารางพอดี วัดความสูงจริงเอา ไม่ฝังตัวเลขไว้
-  const th1 = document.querySelector('thead tr:first-child');
-  if(th1) document.documentElement.style.setProperty('--th1', th1.offsetHeight + 'px');
 }
 window.addEventListener('resize', syncStickyOffset);
 syncStickyOffset();
