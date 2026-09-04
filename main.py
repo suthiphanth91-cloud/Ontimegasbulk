@@ -1116,190 +1116,6 @@ def _chase_ws(date_str: str, sh=None):
         return ws
 
 
-def _find_daily_row(key: str, date_str: str):
-    """หาแถวในแท็บรายวัน (dd.mm.yyyy) ที่ตรงกับ key ของทริป — คืน (row_i, row_data) หรือ (None, None)
-    อ่านผ่านแคช (5 นาที) แทนการอ่านสดทุกครั้ง กัน quota "Read requests/min" หมด"""
-    try:
-        parts = key.split("|")
-        if len(parts) < 4:
-            return None, None
-        car_no, trip_no, drop = parts[1], parts[2], parts[3]
-        d = datetime.strptime(date_str, "%Y-%m-%d")
-        tab_name = d.strftime("%d.%m.%Y")
-        rows = _fetch_sheet(PLAN_ID, tab_name)
-        car_key = _car_key(car_no)
-        for i, row in enumerate(rows[1:], start=2):
-            if (_car_key(_cell(row, 5)) == car_key
-                    and _cell(row, 2).strip() == trip_no.strip()
-                    and _cell(row, 3).strip() == drop.strip()):
-                return i, row
-    except Exception:
-        pass
-    return None, None
-
-
-def _update_daily_status(key: str, date_str: str, status: str, sh=None) -> None:
-    """เขียนสถานะลงคอลัมน์ L "สถานะปัจจุบัน" ของแท็บรายวัน (dd.mm.yyyy) ตรงแถวทริปนั้นด้วย
-    เพิ่มเติมจาก ChaseLog — เป็น best-effort เท่านั้น หาไม่เจอ/แท็บไม่มีก็แค่ข้าม ไม่ throw
-    ส่ง sh (Spreadsheet ที่เปิดไว้แล้ว) มาได้ กันเปิดไฟล์ซ้ำ (กิน quota ฟรี ๆ)"""
-    try:
-        row_i, _ = _find_daily_row(key, date_str)
-        if row_i is None:
-            return
-        d = datetime.strptime(date_str, "%Y-%m-%d")
-        tab_name = d.strftime("%d.%m.%Y")
-        sh = sh or gspread.authorize(_build_creds()).open_by_key(PLAN_ID)
-        ws = sh.worksheet(tab_name)
-        ws.update_cell(row_i, 12, status)   # col L = 12 (1-based)
-    except Exception:
-        pass
-
-
-def _read_daily_status(key: str, date_str: str) -> str:
-    """อ่านค่าปัจจุบันในคอลัมน์ L "สถานะปัจจุบัน" ของแท็บรายวัน ตรงแถวทริปนั้น (ไม่พบคืนค่าว่าง)"""
-    _, row = _find_daily_row(key, date_str)
-    return _cell(row, 11) if row is not None else ""
-
-
-# ─── แท็บรายวัน (dd.mm.yyyy) — ดึง/ซิงก์จากไฟล์ต้นทางเอง ─────────────────────
-# แทนที่ createOrUpdateDateSheet ฝั่ง Apps Script เดิม (เคยพังบ่อยจาก getSheetByName
-# คืน null แบบสุ่ม ๆ) — ทำผ่าน Python ให้เสถียรกว่า ยังใช้ "Master" เป็นเทมเพลต
-# (มีการจัดรูปแบบ + dropdown คอลัมน์ L + หัวคอลัมน์รายชั่วโมงอยู่แล้ว) สำหรับสร้างแท็บใหม่เท่านั้น
-MASTER_TAB = "Master"
-
-
-def _daily_tab_name(date_str: str) -> str:
-    d = datetime.strptime(date_str, "%Y-%m-%d")
-    return d.strftime("%d.%m.%Y")
-
-
-def _norm_time(raw: str) -> str:
-    """'11:00' / '11:00 น.' / '6:00 น.' → '11:00' / '06:00' — ใช้เทียบเวลาให้ตรงกันเสมอ
-
-    จำเป็นเพราะไฟล์ต้นทางเก็บเวลาเป็นข้อความ '11:00' แต่พอเขียนลงแท็บรายวันแบบ
-    USER_ENTERED กูเกิลชีตแปลงเป็นค่าเวลาจริงแล้วแสดงตามรูปแบบของชีตเป็น '11:00 น.'
-    ถ้าเทียบดิบ ๆ จะกลายเป็นคนละค่า ทำให้ทริปที่ไม่มีเลขใบกำกับ (ATL- เฉย ๆ)
-    ถูกลบแล้วสร้างใหม่ทุกชั่วโมง พร้อมทำพิกัด/สถานะรายชั่วโมงที่สะสมไว้หายไปด้วย"""
-    m = re.search(r"(\d{1,2}):(\d{2})", raw or "")
-    return f"{int(m.group(1)):02d}:{m.group(2)}" if m else (raw or "").strip()
-
-
-def _daily_row_key(row: list) -> str:
-    """จับคู่ทริปเดิม-ใหม่ด้วยเลขที่ใบกำกับ (หรือ เบอร์รถ+เที่ยว+Drop+เวลา+ลูกค้าปลายทาง
-    ถ้าไม่มีเลขใบกำกับจริง) — ตรรกะเดิมจาก buildTripKey ฝั่ง Apps Script (เทสดึง.js)"""
-    invoice = _cell(row, 9).strip()
-    if invoice and invoice != "ATL-":
-        return f"INV:{invoice}"
-    car_no   = _cell(row, 5).strip()
-    trip_no  = _cell(row, 2).strip()
-    drop     = _cell(row, 3).strip()
-    sched    = _norm_time(_cell(row, 8))
-    customer = _cell(row, 4).strip()
-    return f"ALT:{car_no}|{trip_no}|{drop}|{sched}|{customer}"
-
-
-def _col_letter(n: int) -> str:
-    s = ""
-    while n > 0:
-        n, r = divmod(n - 1, 26)
-        s = chr(65 + r) + s
-    return s
-
-
-_GPS_HOUR_RE    = re.compile(r"^(\d{1,2}):00\s*น")
-_STATUS_HOUR_RE = re.compile(r"^(\d{1,2}):00\s*สถานะ")
-
-
-def _current_hour_columns(header_row: list) -> tuple[Optional[int], Optional[int]]:
-    """หาคอลัมน์ "H:00 น." (พิกัด) และ "H:00 สถานะ" ที่ตรงกับชั่วโมงปัจจุบัน จากหัวตาราง — คืน (loc_col, status_col) แบบ 1-based"""
-    hour = _thai_now().hour
-    loc_col = status_col = None
-    for i, cell in enumerate(header_row, start=1):
-        text = (cell or "").strip()
-        m = _GPS_HOUR_RE.match(text)
-        if m and int(m.group(1)) == hour:
-            loc_col = i
-        m2 = _STATUS_HOUR_RE.match(text)
-        if m2 and int(m2.group(1)) == hour:
-            status_col = i
-    return loc_col, status_col
-
-
-def _sync_daily_sheet(target_date: str, sh=None):
-    """ดึงทริปของวันที่ target_date จากไฟล์ต้นทาง (SOURCE_ID) มาสร้าง/อัปเดตแท็บรายวัน (dd.mm.yyyy)
-    ในไฟล์ PLAN_ID — แก้แค่คอลัมน์ A:K เท่านั้น ไม่แตะคอลัมน์ L (สถานะปัจจุบัน) เป็นต้นไปของแถวที่จับคู่ได้
-    คืน (result, ws) — ws เป็น worksheet ของแท็บรายวันที่เพิ่งซิงก์ (ให้ผู้เรียกเอาไปใช้ต่อ กันเปิดไฟล์ซ้ำ)"""
-    src_rows = _fetch_sheet(SOURCE_ID, PLAN_TAB)
-    filtered = []
-    for row in src_rows[1:]:
-        if _parse_date(_cell(row, PLAN_DATE)) != target_date:
-            continue
-        filtered.append([
-            _cell(row, PLAN_DATE), _cell(row, PLAN_SOURCE), _cell(row, PLAN_TRIP),
-            _cell(row, PLAN_DROP), _cell(row, PLAN_DEST), _cell(row, PLAN_CARNO),
-            _cell(row, PLAN_PLATE), _cell(row, PLAN_VOLUME), _cell(row, PLAN_SCHED),
-            _cell(row, PLAN_INVOICE), _cell(row, PLAN_GPS_ST),
-        ])
-    if not filtered:
-        return {"ok": False, "reason": "no_rows", "date": target_date}, None
-
-    tab_name = _daily_tab_name(target_date)
-    if sh is None:
-        sh = gspread.authorize(_build_creds()).open_by_key(PLAN_ID)
-    try:
-        ws = sh.worksheet(tab_name)
-    except gspread.WorksheetNotFound:
-        master = sh.worksheet(MASTER_TAB)
-        ws = sh.duplicate_sheet(master.id, new_sheet_name=tab_name)
-        ws.batch_clear([f"A2:K{ws.row_count}"])
-        ws.update("A2", filtered, value_input_option="USER_ENTERED")
-        _refresh_sheet_cache(PLAN_ID, tab_name, ws)
-        return {"ok": True, "created": True, "date": target_date, "rows": len(filtered)}, ws
-
-    # คีย์เดียวอาจตรงได้หลายแถว (เคยเจอ 2 ทริปคนละคันแต่กรอกเลขใบกำกับซ้ำกันในต้นทาง)
-    # จึงเก็บเป็น "คิวของเลขแถว" แล้วจ่ายทีละแถว — กันไม่ให้ทริปหนึ่งไปเขียนทับอีกทริป
-    # และกันไม่ให้แถวที่เหลือถูกมองว่าไม่มีเจ้าของแล้วโดนลบทิ้ง
-    existing = ws.get(f"A2:K{ws.row_count}")
-    existing_by_key: dict[str, list[int]] = {}
-    all_rows: list[int] = []
-    for i, row in enumerate(existing):
-        if not any(row):
-            continue
-        row_i = i + 2                                  # แถวจริงในชีต (เริ่ม A2)
-        existing_by_key.setdefault(_daily_row_key(row), []).append(row_i)
-        all_rows.append(row_i)
-
-    matched_rows = set()
-    updates   = []
-    new_rows  = []
-    for row in filtered:
-        queue = existing_by_key.get(_daily_row_key(row))
-        if queue:
-            row_i = queue.pop(0)
-            matched_rows.add(row_i)
-            updates.append({"range": f"A{row_i}:K{row_i}", "values": [row]})
-        else:
-            new_rows.append(row)
-
-    if updates:
-        ws.batch_update(updates, value_input_option="USER_ENTERED")
-
-    to_delete = sorted(
-        (row_i for row_i in all_rows if row_i not in matched_rows),
-        reverse=True,
-    )
-    for row_i in to_delete:
-        ws.delete_rows(row_i, row_i)
-
-    if new_rows:
-        ws.append_rows(new_rows, value_input_option="USER_ENTERED")
-
-    _refresh_sheet_cache(PLAN_ID, tab_name, ws)
-    return {
-        "ok": True, "created": False, "date": target_date,
-        "updated": len(updates), "added": len(new_rows), "deleted": len(to_delete),
-    }, ws
-
 
 @app.get("/api/chase", include_in_schema=False)
 def chase_list(date_str: str = Query(None, alias="date")):
@@ -1337,10 +1153,7 @@ def chase_set(
 ):
     """ติ๊ก = บันทึกเวลาไล่  /  เอาติ๊กออก = ลบแถวนั้น"""
     try:
-        # เปิดไฟล์ครั้งเดียวแล้วใช้ซ้ำทั้งคำขอ — เดิมเปิดซ้ำอีกรอบใน _update_daily_status
-        # ทุกครั้งที่กดสถานะ กิน quota เปล่า ๆ
-        sh   = gspread.authorize(_build_creds()).open_by_key(PLAN_ID)
-        ws   = _chase_ws(date_str, sh=sh)
+        ws   = _chase_ws(date_str)
         # อ่านผ่านแคชแทนอ่านสด — กัน quota หมดตอนมีคนกดอัปเดตหลายคันรวดเดียว
         # (เผื่อกดซ้ำคันเดิมในเครื่องกัน 5 นาที อาจได้แถวใหม่ซ้ำแทนอัปเดตแถวเดิม ไม่ใช่ปัญหาใหญ่)
         rows = _fetch_sheet(PLAN_ID, _chase_tab_name(date_str))
@@ -1353,7 +1166,6 @@ def chase_set(
             if hit:
                 ws.delete_rows(hit)
             _drop_sheet_cache(PLAN_ID, chase_tab)     # เคลียร์แคช ครั้งหน้าจะอ่านของสด
-            _update_daily_status(key, date_str, "", sh=sh)
             return {"ok": True, "cleared": True}
 
         at = _thai_now().strftime("%H:%M")
@@ -1379,7 +1191,6 @@ def chase_set(
             row[CH_STATUS], row[CH_LOC], row[CH_BY], row[CH_AT] = status, location, by, at
             ws.append_row(row, value_input_option="USER_ENTERED")
         _drop_sheet_cache(PLAN_ID, chase_tab)
-        _update_daily_status(key, date_str, status, sh=sh)
         return {"ok": True, "at": at}
     except Exception as e:
         raise HTTPException(502, f"บันทึก ChaseLog ไม่ได้: {type(e).__name__}: {e}")
@@ -1424,17 +1235,12 @@ def _cron_hourly_status_impl():
     # เปิดไฟล์ครั้งเดียว ใช้ซ้ำทั้งคำขอ กัน quota อ่านหมด — ใส่ retry เพราะถ้าพลาดตรงนี้
     # จะล้มทั้งรอบ ข้อมูลของชั่วโมงนั้นหายไปเลย (เคยเจอ 503 ตอนตี 1)
     sh = _with_retry(lambda: gspread.authorize(_build_creds()).open_by_key(PLAN_ID))
-    sync_result, daily_ws = _sync_daily_sheet(target, sh=sh)
     chase_ws = _chase_ws(target, sh=sh)
 
     result = get_trips(date_str=target)
     at     = _thai_now().strftime("%H:%M")
     hour   = _thai_now().hour
     saved  = 0
-
-    daily_rows = _fetch_sheet(PLAN_ID, _daily_tab_name(target))
-    loc_col, status_col = _current_hour_columns(daily_rows[0] if daily_rows else [])
-    cell_updates = []
 
     # อ่าน ChaseLog ที่มีอยู่ → สร้าง lookup key → row number
     chase_tab = _chase_tab_name(target)
@@ -1494,20 +1300,13 @@ def _cron_hourly_status_impl():
             chase_key_to_row[key] = len(chase_rows) + len(chase_new_rows)
         saved += 1
 
-        row_i, row_data = _find_daily_row(key, target)
-        status_now = _cell(row_data, 11) if row_data is not None else ""   # แค่อ่าน ไม่เขียนทับ
+        # สถานะล่าสุดที่คนกดไว้ — อ่านจากคอลัมน์ status ของ ChaseLog แถวเดียวกัน
+        status_now = _cell(chase_row_by_key.get(key, []), CH_STATUS)
         _supabase_log_hourly_status({
             "source_depot": t.source, "trip_no": t.trip_no, "drop_no": t.drop,
             "customer": t.customer, "car_no": t.car_no, "log_date": target,
             "status": status_now, "location": loc, "recorded_at_th": at,
         })
-
-        if row_i is not None:
-            if loc_col:
-                loc_text = f"{_thai_now().strftime('%d/%m/%Y %H:%M:%S')} / {loc}"
-                cell_updates.append({"range": f"{_col_letter(loc_col)}{row_i}", "values": [[loc_text]]})
-            if status_col:
-                cell_updates.append({"range": f"{_col_letter(status_col)}{row_i}", "values": [[status_now]]})
 
     # เขียน ChaseLog — batch update แถวเดิม + append แถวใหม่
     chase_written = False
@@ -1528,19 +1327,8 @@ def _cron_hourly_status_impl():
     except Exception as e:
         chase_error = f"{type(e).__name__}: {e}"
 
-    hourly_cols_written = False
-    hourly_cols_error   = None
-    if cell_updates and daily_ws is not None:
-        try:
-            _with_retry(lambda: daily_ws.batch_update(cell_updates, value_input_option="USER_ENTERED"))
-            hourly_cols_written = True
-        except Exception as e:
-            hourly_cols_error = f"{type(e).__name__}: {e}"
-
     return {
         "ok": True, "date": target, "saved": saved, "checked": len(result.trips),
-        "sync": sync_result, "hourly_cols_written": hourly_cols_written,
-        "hourly_cols_error": hourly_cols_error,
         "chase_written": chase_written, "chase_error": chase_error,
     }
 
@@ -1603,13 +1391,9 @@ def peek_tab(
             "sample": [label(r) for r in data[1:1 + rows]]}
 
 
-# ตำแหน่งย้อนหลังรายชั่วโมงต่อคัน -- Gasbulk Track เองไม่มีที่เก็บประวัติ
-# (PTGL เป็น "ตำแหน่งปัจจุบัน" อย่างเดียว บันทึกซ้ำก็ยังเป็นค่าล่าสุดเสมอ)
-# แต่สเปรดชีตเดียวกับ PLAN_ID มีแท็บรายวัน (ชื่อแท็บ = dd.MM.yyyy เช่น
-# "29.08.2026") ที่ Apps Script อีกตัว (Test Report Ontime PTGLG) คอย
-# บันทึกตำแหน่งทุกชั่วโมงลงไว้อยู่แล้ว เลยอ่านจากตรงนั้นแทนการสร้างระบบ
-# เก็บประวัติของตัวเอง
-TIMELINE_CARNO_COL = 5  # F "เบอร์รถ" ในแท็บรายวัน (0-based)
+# ตำแหน่งย้อนหลังรายชั่วโมงต่อคัน -- PTGL เป็น "ตำแหน่งปัจจุบัน" อย่างเดียว
+# บันทึกซ้ำก็ยังเป็นค่าล่าสุดเสมอ จึงอ่านประวัติจากคอลัมน์รายชั่วโมงใน ChaseLog
+# ที่รอบอัตโนมัติเขียนสะสมไว้ให้ทุกชั่วโมงแทน
 
 
 @app.get("/api/timeline")
@@ -1617,7 +1401,11 @@ def timeline(
     car_no:   str = Query(..., description="เบอร์รถ เช่น PTL.403 หรือ NO.418"),
     date_str: str = Query(None, alias="date", description="yyyy-MM-dd (default=วันนี้)", example="2026-08-29"),
 ):
-    """ตำแหน่งรายชั่วโมงของรถคันเดียวในวันที่ระบุ จากแท็บรายวันในสเปรดชีต PLAN"""
+    """ตำแหน่งรายชั่วโมงของรถคันเดียวในวันที่ระบุ — อ่านจากแท็บ ChaseLog ของวันนั้น
+
+    รถคันเดียวมีได้หลายทริปในวันเดียว (คนละแถวใน ChaseLog) แต่ตำแหน่งรายชั่วโมง
+    เป็นของ "รถ" ไม่ใช่ของทริป จึงรวมทุกแถวของรถคันนั้นเข้าด้วยกัน
+    ชั่วโมงไหนมีค่าในแถวใดก็ใช้ค่านั้น"""
     if date_str:
         try:
             d = datetime.strptime(date_str, "%Y-%m-%d")
@@ -1625,7 +1413,8 @@ def timeline(
             raise HTTPException(400, "date ต้องเป็นรูปแบบ yyyy-MM-dd")
     else:
         d = datetime.strptime(_today_thai(), "%Y-%m-%d")
-    tab_name = d.strftime("%d.%m.%Y")
+    target   = d.strftime("%Y-%m-%d")
+    tab_name = _chase_tab_name(target)
 
     try:
         rows = _fetch_sheet(PLAN_ID, tab_name)
@@ -1644,20 +1433,15 @@ def timeline(
         if m:
             hour_cols.append((i, str(h).strip()))
 
-    car_key = _car_key(car_no)
-    match_row = None
-    if car_key:
-        for r in rows[1:]:
-            if _car_key(_cell(r, TIMELINE_CARNO_COL)) == car_key:
-                match_row = r
-                break
-
-    if match_row is None:
+    car_key   = _car_key(car_no)
+    car_rows  = [r for r in rows[1:]
+                 if car_key and _car_key(_cell(r, CH_CARNO)) == car_key]
+    if not car_rows:
         return {"tab": tab_name, "car_no": car_no, "found": False, "timeline": []}
 
     entries = []
     for idx, label in hour_cols:
-        val = _cell(match_row, idx)
+        val = next((_cell(r, idx) for r in car_rows if _cell(r, idx)), "")
         if val:
             entries.append({"hour": label, "raw": val})
 
