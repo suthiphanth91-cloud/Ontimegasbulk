@@ -392,17 +392,20 @@ def _drop_sheet_cache(sheet_id: str, tab: str) -> None:
         pass
 
 
-def _supabase_log_hourly_status(row: dict) -> None:
-    """บันทึก 1 แถวลงตาราง hourly_status_log ใน Supabase (best-effort)
+def _supabase_log_hourly_status(rows: list[dict]) -> None:
+    """บันทึกประวัติรายชั่วโมงลงตาราง hourly_status_log ใน Supabase (best-effort)
+
+    ส่งทั้งชุดในครั้งเดียว — เดิมยิงทีละแถว รอบหนึ่งมีร้อยกว่าคันก็ยิงร้อยกว่าครั้ง
+    ครั้งละ ~0.2 วิ รวมแล้วกินเวลาไปหลายสิบวินาทีต่อรอบ
     ต้องสร้างตารางนี้ไว้ก่อนใน Supabase — ดู SQL ที่ให้ไว้ตอนตั้งค่า"""
-    if not (SUPABASE_URL and SUPABASE_SERVICE_KEY):
+    if not (SUPABASE_URL and SUPABASE_SERVICE_KEY) or not rows:
         return
     try:
         httpx.post(
             f"{SUPABASE_URL}/rest/v1/hourly_status_log",
             headers=_supabase_headers(),
-            json=row,
-            timeout=5,
+            json=rows,
+            timeout=20,
         )
     except Exception:
         pass
@@ -1346,6 +1349,7 @@ def _cron_hourly_status_impl():
     chase_hour_col = _chase_hour_col(hour, chase_header)   # คอลัมน์ชั่วโมงนี้ (1-based)
     chase_updates = []
     chase_new_rows = []
+    supa_rows      = []      # ประวัติรายชั่วโมง สะสมไว้ส่ง Supabase ทีเดียวตอนจบ
 
     for t in result.trips:
         if t.status in ("arrived", "cancelled"):
@@ -1391,11 +1395,13 @@ def _cron_hourly_status_impl():
 
         # สถานะล่าสุดที่คนกดไว้ — อ่านจากคอลัมน์ status ของ ChaseLog แถวเดียวกัน
         status_now = _cell(chase_row_by_key.get(key, []), CH_STATUS)
-        _supabase_log_hourly_status({
+        supa_rows.append({
             "source_depot": t.source, "trip_no": t.trip_no, "drop_no": t.drop,
             "customer": t.customer, "car_no": t.car_no, "log_date": target,
             "status": status_now, "location": loc, "recorded_at_th": at,
         })
+
+    _supabase_log_hourly_status(supa_rows)     # ส่งทีเดียวทั้งชุด
 
     # เขียน ChaseLog — batch update แถวเดิม + append แถวใหม่
     chase_written = False
