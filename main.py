@@ -1882,6 +1882,12 @@ DASHBOARD_HTML = """<!doctype html>
   th,td{padding:3px 6px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap;font-size:12.5px}
   th{font-size:12.5px;color:var(--mut);font-weight:600;text-transform:uppercase;
      letter-spacing:.4px;background:var(--card);position:sticky;top:0;z-index:2}
+  /* แถวตัวกรองใต้หัวตาราง — เลือกค่าที่ต้องการดูเฉพาะคอลัมน์นั้น */
+  tr.filters th{top:var(--th1,26px);padding:2px 4px;text-transform:none;letter-spacing:0}
+  tr.filters select{width:100%;max-width:150px;font:inherit;font-size:11.5px;
+     padding:2px 4px;border:1px solid var(--line);border-radius:5px;
+     background:var(--card);color:inherit;cursor:pointer}
+  tr.filters select.on{border-color:var(--tr);color:var(--tr);font-weight:600}
   tbody tr:hover{background:var(--pd-bg)}
   /* บีบให้ทุกแถวสูงบรรทัดเดียว อ่านง่ายขึ้นมาก */
   td.wide{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px}
@@ -2032,13 +2038,16 @@ DASHBOARD_HTML = """<!doctype html>
   </div>
   <div class="wrap">
     <table id="tbl">
-      <thead><tr>
+      <thead>
+      <tr>
         <th>ประจำวันที่</th><th>คลังต้นทาง</th><th>เที่ยววิ่ง</th><th>Drop</th>
         <th>ลูกค้าปลายทาง</th><th>เบอร์รถ</th><th>ทะเบียน</th><th>ปริมาณ</th>
         <th>พขร. / โทร</th>
         <th>เวลา</th><th>เลขที่ใบกำกับการขนส่ง</th><th>สถานะ GPS</th>
         <th>ETA / ถึงจริง</th><th>ต่าง</th><th>On Time</th><th>สถานะ</th><th>ตำแหน่งปัจจุบัน</th><th>อัปเดตสถานะ</th>
-      </tr></thead>
+      </tr>
+      <tr id="filterRow" class="filters"></tr>
+      </thead>
       <tbody id="rows"></tbody>
     </table>
   </div>
@@ -2316,21 +2325,68 @@ function keep(t){                     // กรองตามชิปที่
   return s != null && s - nowMins() <= 60;
 }
 
+// ── ตัวกรองรายคอลัมน์ (ลิสต์ใต้หัวตาราง) ─────────────────────────────────
+// col = ลำดับคอลัมน์ในตาราง (0-based) ต้องตรงกับลำดับ <th> และ <td>
+const FILTER_COLS = [
+  { col:1,  field:'source'     },
+  { col:2,  field:'trip_no'    },
+  { col:3,  field:'drop'       },
+  { col:4,  field:'customer'   },
+  { col:5,  field:'car_no'     },
+  { col:6,  field:'plate'      },
+  { col:7,  field:'volume'     },
+  { col:8,  field:'driver'     },
+  { col:9,  field:'sched_time' },
+  { col:11, field:'gps_status' },
+  { col:14, field:'ontime'     },
+  { col:15, field:'status', label:v => LABEL[v] || v },
+];
+const TOTAL_COLS = 18;
+let FILTERS = {};                       // field -> ค่าที่เลือก ('' = ทั้งหมด)
+
+function buildFilters(){
+  const row = document.getElementById('filterRow');
+  if(!row) return;
+  const cells = [];
+  for(let c=0; c<TOTAL_COLS; c++){
+    const def = FILTER_COLS.find(f => f.col === c);
+    if(!def){ cells.push('<th></th>'); continue; }
+    // ค่าที่เลือกได้ = ค่าที่มีจริงในข้อมูลของวันนั้น (ไม่รวมค่าว่าง)
+    const vals = [...new Set(ALL.map(t => String(t[def.field] ?? '').trim()).filter(v => v))]
+                 .sort((a,b) => a.localeCompare(b, 'th', {numeric:true}));
+    const cur  = FILTERS[def.field] || '';
+    cells.push('<th><select data-f="'+def.field+'" class="'+(cur?'on':'')+'">'
+      + '<option value="">ทั้งหมด</option>'
+      + vals.map(v => '<option value="'+esc(v)+'"'+(v===cur?' selected':'')+'>'
+                    + esc(def.label ? def.label(v) : v)+'</option>').join('')
+      + '</select></th>');
+  }
+  row.innerHTML = cells.join('');
+  row.querySelectorAll('select').forEach(sel => {
+    sel.onchange = () => {
+      const f = sel.getAttribute('data-f');
+      if(sel.value) FILTERS[f] = sel.value; else delete FILTERS[f];
+      render();
+    };
+  });
+}
+
+function passFilters(t){
+  return Object.keys(FILTERS).every(f =>
+    String(t[f] ?? '').trim() === FILTERS[f]);
+}
+
 function render(){
   const q = document.getElementById('q').value.trim().toLowerCase();
   DATA = ALL.filter(keep);
   const list = (!q ? DATA : DATA.filter(t =>
     [t.car_no, t.plate, t.customer, t.source, t.invoice_no]
       .some(v => String(v||'').toLowerCase().includes(q))))
+    .filter(passFilters)
     .slice()
-    .sort((a,b) => {           // ช้าที่สุดขึ้นก่อน แล้วค่อยเรียงตามเวลากำหนด
-      const ck = x => isChaseDone(key(x)) ? 1 : 0;          // ที่ไล่แล้ว (ยังไม่ครบ 1 ชม./จบงานจริง) ลงไปอยู่ล่าง
-      if (ck(a) !== ck(b)) return ck(a) - ck(b);
-      const rank = s => ({late:0, transit:1, early:2, pending:3, arrived:4, cancelled:5}[s] ?? 6);
-      if (rank(a.status) !== rank(b.status)) return rank(a.status) - rank(b.status);
-      if (a.status === 'late') return (b.diff_minutes||0) - (a.diff_minutes||0);
-      return String(a.sched_time||'').localeCompare(String(b.sched_time||''));
-    });
+    // เรียงตามลำดับเดิมในไฟล์ต้นทาง (t.id = ลำดับแถวที่อ่านมาจากแผนงาน)
+    // อ่านเทียบกับไฟล์ต้นทางได้ตรง ๆ ไม่ต้องไล่หาว่าแถวไหนอยู่ตรงไหน
+    .sort((a,b) => (a.id||0) - (b.id||0));
 
   document.getElementById('rows').innerHTML = list.length ? list.map(t => {
     const k    = key(t);
@@ -2385,6 +2441,12 @@ async function load(){
     if(!r.ok) throw new Error((await r.json()).detail || r.statusText);
     const j = await r.json();
     ALL = j.trips || [];
+    // ตัวกรองที่เลือกไว้ ถ้าไม่มีค่านั้นในข้อมูลวันใหม่แล้ว ให้ยกเลิกไปเอง
+    // ไม่งั้นตารางจะว่างเปล่าโดยหาสาเหตุไม่เจอ
+    Object.keys(FILTERS).forEach(f => {
+      if(!ALL.some(t => String(t[f] ?? '').trim() === FILTERS[f])) delete FILTERS[f];
+    });
+    buildFilters();
     await loadChased();
     document.getElementById('cards').innerHTML =
         card(j.total,'ทริปทั้งหมด','')
@@ -2467,6 +2529,9 @@ load();
 // ล็อค header + การ์ด/ปุ่มกรอง ไว้ให้เห็นตลอดตอนเลื่อนดูรายการยาวๆ
 function syncStickyOffset(){
   document.documentElement.style.setProperty('--hh', document.querySelector('header').offsetHeight + 'px');
+  // แถวตัวกรองต้องหนีบใต้แถวหัวตารางพอดี วัดความสูงจริงเอา ไม่ฝังตัวเลขไว้
+  const th1 = document.querySelector('thead tr:first-child');
+  if(th1) document.documentElement.style.setProperty('--th1', th1.offsetHeight + 'px');
 }
 window.addEventListener('resize', syncStickyOffset);
 syncStickyOffset();
