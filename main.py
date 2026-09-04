@@ -324,6 +324,25 @@ def _supabase_set_cache(key: str, data: list) -> None:
         pass   # เขียนแคชไม่สำเร็จไม่เป็นไร ครั้งหน้าจะลองใหม่เอง
 
 
+def _drop_sheet_cache(sheet_id: str, tab: str) -> None:
+    """ล้างแคชของแท็บนั้นทั้ง 2 ชั้น — ใช้หลังเขียนชีตเอง
+    ถ้าล้างแต่แคชในหน่วยความจำ ตัวถัดไปจะไปเจอแคชเก่าของ Supabase (TTL 5 นาที)
+    ที่ยังไม่หมดอายุ แล้วได้ข้อมูลก่อนแก้กลับไป"""
+    key = f"{sheet_id}:{tab}"
+    _sheet_cache.pop(key, None)
+    if not (SUPABASE_URL and SUPABASE_SERVICE_KEY):
+        return
+    try:
+        httpx.delete(
+            f"{SUPABASE_URL}/rest/v1/sheet_cache",
+            params={"cache_key": f"eq.{key}"},
+            headers=_supabase_headers(),
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+
 def _supabase_log_hourly_status(row: dict) -> None:
     """บันทึก 1 แถวลงตาราง hourly_status_log ใน Supabase (best-effort)
     ต้องสร้างตารางนี้ไว้ก่อนใน Supabase — ดู SQL ที่ให้ไว้ตอนตั้งค่า"""
@@ -1090,16 +1109,17 @@ def _find_daily_row(key: str, date_str: str):
     return None, None
 
 
-def _update_daily_status(key: str, date_str: str, status: str) -> None:
+def _update_daily_status(key: str, date_str: str, status: str, sh=None) -> None:
     """เขียนสถานะลงคอลัมน์ L "สถานะปัจจุบัน" ของแท็บรายวัน (dd.mm.yyyy) ตรงแถวทริปนั้นด้วย
-    เพิ่มเติมจาก ChaseLog — เป็น best-effort เท่านั้น หาไม่เจอ/แท็บไม่มีก็แค่ข้าม ไม่ throw"""
+    เพิ่มเติมจาก ChaseLog — เป็น best-effort เท่านั้น หาไม่เจอ/แท็บไม่มีก็แค่ข้าม ไม่ throw
+    ส่ง sh (Spreadsheet ที่เปิดไว้แล้ว) มาได้ กันเปิดไฟล์ซ้ำ (กิน quota ฟรี ๆ)"""
     try:
         row_i, _ = _find_daily_row(key, date_str)
         if row_i is None:
             return
         d = datetime.strptime(date_str, "%Y-%m-%d")
         tab_name = d.strftime("%d.%m.%Y")
-        sh = gspread.authorize(_build_creds()).open_by_key(PLAN_ID)
+        sh = sh or gspread.authorize(_build_creds()).open_by_key(PLAN_ID)
         ws = sh.worksheet(tab_name)
         ws.update_cell(row_i, 12, status)   # col L = 12 (1-based)
     except Exception:
@@ -1256,8 +1276,13 @@ def _sync_daily_sheet(target_date: str, sh=None):
 def chase_list(date_str: str = Query(None, alias="date")):
     """คืนรายการที่ไล่แล้วของวันนั้น {key: {"at": "17:54", "status": "...", "loc": "...", "by": "..."}}"""
     target = date_str or _today_thai()
+    # อ่านผ่านแคช (5 นาที) — หน้าเว็บเรียกทุกครั้งที่โหลด/รีเฟรช ถ้าอ่านสดทุกครั้ง
+    # จะกิน quota "Read requests/min" หนักที่สุดในระบบ (ยิ่ง ChaseLog กว้าง 37 คอลัมน์)
+    # ยังไม่มีแท็บของวันนั้น = ยังไม่มีใครไล่ คืนค่าว่างไปเลย ไม่ต้องสร้างแท็บให้เสียเวลา
     try:
-        rows = _chase_ws(target).get_all_values()
+        rows = _fetch_sheet(PLAN_ID, _chase_tab_name(target))
+    except gspread.WorksheetNotFound:
+        return {}
     except Exception as e:
         raise HTTPException(502, f"อ่าน ChaseLog ไม่ได้: {type(e).__name__}: {e}")
     out = {}
@@ -1283,20 +1308,23 @@ def chase_set(
 ):
     """ติ๊ก = บันทึกเวลาไล่  /  เอาติ๊กออก = ลบแถวนั้น"""
     try:
-        ws   = _chase_ws(date_str)
+        # เปิดไฟล์ครั้งเดียวแล้วใช้ซ้ำทั้งคำขอ — เดิมเปิดซ้ำอีกรอบใน _update_daily_status
+        # ทุกครั้งที่กดสถานะ กิน quota เปล่า ๆ
+        sh   = gspread.authorize(_build_creds()).open_by_key(PLAN_ID)
+        ws   = _chase_ws(date_str, sh=sh)
         # อ่านผ่านแคชแทนอ่านสด — กัน quota หมดตอนมีคนกดอัปเดตหลายคันรวดเดียว
         # (เผื่อกดซ้ำคันเดิมในเครื่องกัน 5 นาที อาจได้แถวใหม่ซ้ำแทนอัปเดตแถวเดิม ไม่ใช่ปัญหาใหญ่)
         rows = _fetch_sheet(PLAN_ID, _chase_tab_name(date_str))
         hit  = next((i for i, r in enumerate(rows[1:], start=2)
                      if _cell(r, CH_KEY) == key), None)
 
-        chase_cache_key = f"{PLAN_ID}:{_chase_tab_name(date_str)}"
+        chase_tab = _chase_tab_name(date_str)
 
         if clear:
             if hit:
                 ws.delete_rows(hit)
-            _sheet_cache.pop(chase_cache_key, None)   # เคลียร์แคช ครั้งหน้าจะอ่านของสด
-            _update_daily_status(key, date_str, "")
+            _drop_sheet_cache(PLAN_ID, chase_tab)     # เคลียร์แคช ครั้งหน้าจะอ่านของสด
+            _update_daily_status(key, date_str, "", sh=sh)
             return {"ok": True, "cleared": True}
 
         at = _thai_now().strftime("%H:%M")
@@ -1321,8 +1349,8 @@ def chase_set(
             row[CH_CARNO], row[CH_CUSTOMER] = car_no, customer
             row[CH_STATUS], row[CH_LOC], row[CH_BY], row[CH_AT] = status, location, by, at
             ws.append_row(row, value_input_option="USER_ENTERED")
-        _sheet_cache.pop(chase_cache_key, None)
-        _update_daily_status(key, date_str, status)
+        _drop_sheet_cache(PLAN_ID, chase_tab)
+        _update_daily_status(key, date_str, status, sh=sh)
         return {"ok": True, "at": at}
     except Exception as e:
         raise HTTPException(502, f"บันทึก ChaseLog ไม่ได้: {type(e).__name__}: {e}")
