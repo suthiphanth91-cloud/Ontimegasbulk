@@ -330,6 +330,49 @@ def _supabase_set_cache(key: str, data: list) -> None:
         pass   # เขียนแคชไม่สำเร็จไม่เป็นไร ครั้งหน้าจะลองใหม่เอง
 
 
+# แคช ETA เก็บถาวรใน Supabase ด้วย ไม่ใช่แค่ในหน่วยความจำ
+#
+# การคำนวณ ETA ต้องยิง API เส้นทางภายนอกทีละคัน (สูงสุด 12 คันต่อ 1 คำขอ) ซึ่งช้ามาก
+# ถ้าเก็บผลไว้แค่ในหน่วยความจำ พอ Vercel สร้าง server ใหม่ (ซึ่งเกิดบ่อย) ก็ต้อง
+# ยิงใหม่ทั้ง 12 คัน เคยวัดได้ถึง 60 กว่าวินาทีต่อการโหลดหน้าเว็บ 1 ครั้ง
+# เก็บทั้งก้อนเป็นแถวเดียวใน Supabase แล้วโหลดมาใช้ต่อ = เหลือ 1 ครั้งแทน 12 ครั้ง
+_ETA_CACHE_KEY  = "__eta_cache__"
+_eta_cache_dirty = False
+
+
+def _mark_eta_dirty() -> None:
+    global _eta_cache_dirty
+    _eta_cache_dirty = True
+
+
+def _load_eta_cache() -> None:
+    if _eta_cache:
+        return                                   # server ตัวนี้อุ่นอยู่แล้ว
+    data = _supabase_get_cache(_ETA_CACHE_KEY, max_age=ETA_CACHE_TTL)
+    if not isinstance(data, dict):
+        return
+    now = time()
+    for k, v in data.items():
+        try:
+            ts, mins = float(v[0]), int(v[1])
+        except Exception:
+            continue
+        if now - ts < ETA_CACHE_TTL:
+            _eta_cache[k] = (ts, mins)
+
+
+def _save_eta_cache() -> None:
+    global _eta_cache_dirty
+    if not _eta_cache_dirty:
+        return
+    _eta_cache_dirty = False
+    now = time()
+    _supabase_set_cache(_ETA_CACHE_KEY, {
+        k: [ts, mins] for k, (ts, mins) in _eta_cache.items()
+        if now - ts < ETA_CACHE_TTL
+    })
+
+
 def _drop_sheet_cache(sheet_id: str, tab: str) -> None:
     """ล้างแคชของแท็บนั้นทั้ง 2 ชั้น — ใช้หลังเขียนชีตเอง
     ถ้าล้างแต่แคชในหน่วยความจำ ตัวถัดไปจะไปเจอแคชเก่าของ Supabase (TTL 5 นาที)
@@ -632,7 +675,7 @@ def _ors_minutes(orig_lat, orig_lng, dest_lat, dest_lng) -> Optional[int]:
             "https://api.openrouteservice.org/v2/directions/driving-hgv",
             json={"coordinates": [[orig_lng, orig_lat], [dest_lng, dest_lat]]},
             headers={"Authorization": api_key, "Content-Type": "application/json"},
-            timeout=6,
+            timeout=4,    # เกินนี้รอไม่ไหว ถอยไปใช้สูตรคำนวณเร็วกว่า
         )
         resp.raise_for_status()
         secs = resp.json()["routes"][0]["summary"]["duration"]
@@ -665,7 +708,7 @@ def _get_travel_minutes(
     if not api_key:
         mins = _ors_minutes(orig_lat, orig_lng, dest_lat, dest_lng) \
                or _estimate_minutes(orig_lat, orig_lng, dest_lat, dest_lng)
-        _eta_cache[key] = (time(), mins)
+        _eta_cache[key] = (time(), mins); _mark_eta_dirty()
         return mins
 
     try:
@@ -683,18 +726,18 @@ def _get_travel_minutes(
                 "X-Goog-FieldMask": "routes.duration",
                 "Content-Type":    "application/json",
             },
-            timeout=10,
+            timeout=5,    # เกินนี้รอไม่ไหว ถอยไปใช้สูตรคำนวณเร็วกว่า
         )
         resp.raise_for_status()
         duration_s  = resp.json()["routes"][0]["duration"]   # "1234s"
         travel_mins = int(duration_s.replace("s", "")) // 60
-        _eta_cache[key] = (time(), travel_mins)
+        _eta_cache[key] = (time(), travel_mins); _mark_eta_dirty()
         return travel_mins
     except Exception:
         # Google ใช้ไม่ได้ (key ผิด / ยังไม่เปิดบิล) → ถอยไปใช้ตัวสำรอง
         mins = _ors_minutes(orig_lat, orig_lng, dest_lat, dest_lng) \
                or _estimate_minutes(orig_lat, orig_lng, dest_lat, dest_lng)
-        _eta_cache[key] = (time(), mins)
+        _eta_cache[key] = (time(), mins); _mark_eta_dirty()
         return mins
 
 # ─── DATA FETCHERS ───────────────────────────────────────────────────────────
@@ -803,6 +846,8 @@ def get_trips(
         datetime.strptime(target, "%Y-%m-%d")
     except ValueError:
         raise HTTPException(400, "รูปแบบวันที่ต้องเป็น yyyy-MM-dd")
+
+    _load_eta_cache()      # ดึงแคช ETA ของ server ตัวอื่นมาใช้ต่อ กันยิง API ซ้ำ
 
     try:
         ptgl_map = fetch_ptgl()
@@ -1046,6 +1091,8 @@ def get_trips(
     late       = sum(1 for r in results if r.status == "late")
     pending    = sum(1 for r in results if r.status == "pending")
     cancelled  = sum(1 for r in results if r.status == "cancelled")
+
+    _save_eta_cache()      # เก็บ ETA ที่เพิ่งคำนวณไว้ให้ server ตัวอื่นใช้ต่อ
 
     return SummaryResponse(
         date       = target,
