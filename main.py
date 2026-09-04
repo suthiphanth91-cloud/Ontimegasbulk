@@ -18,7 +18,7 @@ import re
 import traceback
 from datetime import datetime, timedelta, timezone
 from math import atan2, cos, radians, sin, sqrt
-from time import time
+from time import sleep, time
 from typing import Optional
 
 import httpx
@@ -368,6 +368,32 @@ def _build_creds() -> Credentials:
     return Credentials.from_service_account_file(local, scopes=SCOPES)
 
 
+# error ที่เป็นแค่อาการชั่วคราวฝั่ง Google — เจอแล้วรอสักครู่แล้วลองใหม่มักผ่าน
+# 429 = เรียกถี่เกินโควตา, 500/502/503/504 = ฝั่ง Google เองขัดข้องชั่วคราว
+_RETRY_STATUS = (429, 500, 502, 503, 504)
+
+
+def _is_transient(err: Exception) -> bool:
+    code = getattr(getattr(err, "response", None), "status_code", None)
+    if code in _RETRY_STATUS:
+        return True
+    return any(str(c) in str(err) for c in _RETRY_STATUS)
+
+
+def _with_retry(fn, tries: int = 3, wait: float = 2.0):
+    """เรียก fn() ใหม่เมื่อเจอ error ชั่วคราว (รอ 2 → 4 วินาที)
+
+    เคยเจอของจริง: รอบ 01:34 Google ตอบ 503 กลับมา ทั้งรอบเลยล้มทั้งชั่วโมง
+    ข้อมูลพิกัดของชั่วโมงนั้นหายไปเลย ทั้งที่รอถัดไปไม่กี่วินาทีก็ใช้ได้แล้ว"""
+    for attempt in range(tries):
+        try:
+            return fn()
+        except Exception as e:
+            if attempt == tries - 1 or not _is_transient(e):
+                raise
+            sleep(wait * (2 ** attempt))
+
+
 def _fetch_sheet(sheet_id: str, tab: str) -> list[list]:
     """อ่าน Sheet พร้อมแคช 5 นาที — เช็คแคชในหน่วยความจำก่อน (เร็วสุด) แล้วค่อยเช็ค
     แคชถาวรใน Supabase (กันแคชหายตอน Vercel สร้าง server ใหม่) สุดท้ายค่อยอ่าน Sheet จริง"""
@@ -382,8 +408,11 @@ def _fetch_sheet(sheet_id: str, tab: str) -> list[list]:
         _sheet_cache[key] = (time(), cached)
         return cached
 
-    gc   = gspread.authorize(_build_creds())
-    data = gc.open_by_key(sheet_id).worksheet(tab).get_all_values()
+    def _read():
+        gc = gspread.authorize(_build_creds())
+        return gc.open_by_key(sheet_id).worksheet(tab).get_all_values()
+
+    data = _with_retry(_read)
     _sheet_cache[key] = (time(), data)
     _supabase_set_cache(key, data)
     return data
@@ -1392,7 +1421,9 @@ def _chase_hour_col(hour: int, header_row: list = None) -> Optional[int]:
 
 def _cron_hourly_status_impl():
     target = _today_thai()
-    sh = gspread.authorize(_build_creds()).open_by_key(PLAN_ID)   # เปิดไฟล์ครั้งเดียว ใช้ซ้ำทั้งคำขอ กัน quota อ่านหมด
+    # เปิดไฟล์ครั้งเดียว ใช้ซ้ำทั้งคำขอ กัน quota อ่านหมด — ใส่ retry เพราะถ้าพลาดตรงนี้
+    # จะล้มทั้งรอบ ข้อมูลของชั่วโมงนั้นหายไปเลย (เคยเจอ 503 ตอนตี 1)
+    sh = _with_retry(lambda: gspread.authorize(_build_creds()).open_by_key(PLAN_ID))
     sync_result, daily_ws = _sync_daily_sheet(target, sh=sh)
     chase_ws = _chase_ws(target, sh=sh)
 
@@ -1483,15 +1514,15 @@ def _cron_hourly_status_impl():
     chase_error   = None
     try:
         if chase_updates:
-            chase_ws.batch_update(chase_updates, value_input_option="USER_ENTERED")
+            _with_retry(lambda: chase_ws.batch_update(chase_updates, value_input_option="USER_ENTERED"))
         if chase_new_rows:
             ncols = len(CHASE_HEADER)
             for nr in chase_new_rows:
                 while len(nr) < ncols:
                     nr.append("")
             start = chase_ws.row_count + 1 if not chase_rows else len(chase_rows) + 1
-            chase_ws.update(f"A{start}:{_col_letter(ncols)}{start + len(chase_new_rows) - 1}",
-                            chase_new_rows, value_input_option="USER_ENTERED")
+            rng = f"A{start}:{_col_letter(ncols)}{start + len(chase_new_rows) - 1}"
+            _with_retry(lambda: chase_ws.update(rng, chase_new_rows, value_input_option="USER_ENTERED"))
         chase_written = True
         _refresh_sheet_cache(PLAN_ID, chase_tab, chase_ws)
     except Exception as e:
@@ -1501,7 +1532,7 @@ def _cron_hourly_status_impl():
     hourly_cols_error   = None
     if cell_updates and daily_ws is not None:
         try:
-            daily_ws.batch_update(cell_updates, value_input_option="USER_ENTERED")
+            _with_retry(lambda: daily_ws.batch_update(cell_updates, value_input_option="USER_ENTERED"))
             hourly_cols_written = True
         except Exception as e:
             hourly_cols_error = f"{type(e).__name__}: {e}"
