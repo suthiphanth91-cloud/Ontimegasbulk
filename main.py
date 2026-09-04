@@ -248,6 +248,9 @@ class TripOut(BaseModel):
     current_lat:  Optional[float] = None
     current_lng:  Optional[float] = None
     current_loc:  Optional[str]   = None
+    # พิกัดปลายทาง (จากชีต "ข้อมูลปลายทาง") — ใช้เปิดเส้นทางใน Google Maps
+    dest_lat:     Optional[float] = None
+    dest_lng:     Optional[float] = None
     # ETA (จาก Routes API)
     travel_mins:  Optional[int]   = None   # นาทีจากตำแหน่งปัจจุบัน → ปลายทาง
     eta_time:     Optional[str]   = None   # เวลาถึงโดยประมาณ "HH:MM"
@@ -1038,6 +1041,8 @@ def get_trips(
             current_lat  = pos["lat"]      if pos else None,
             current_lng  = pos["lng"]      if pos else None,
             current_loc  = pos["location"] if pos else None,
+            dest_lat     = dest_coord[0] if dest_coord else None,
+            dest_lng     = dest_coord[1] if dest_coord else None,
             travel_mins  = travel_mins,
             eta_time     = eta_time_str,
             status       = status,
@@ -1833,6 +1838,10 @@ DASHBOARD_HTML = """<!doctype html>
      ให้กว้างขึ้นและตัดขึ้นบรรทัดที่ 2 ได้ อ่านออกโดยไม่ต้องเอาเมาส์ไปชี้ */
   td.loc{max-width:360px;min-width:240px;white-space:normal;word-break:break-word;
          line-height:1.25;overflow:hidden}
+  .routebtn{display:inline-block;margin-left:6px;padding:1px 7px;border-radius:999px;
+     border:1px solid var(--tr);color:var(--tr);text-decoration:none;
+     font-size:11px;white-space:nowrap}
+  .routebtn:hover{background:var(--tr);color:#fff}
   td.cust{max-width:200px;font-weight:500;white-space:normal;overflow:visible;text-overflow:clip;
           word-break:break-word;line-height:1.2}
   tbody tr:nth-child(even){background:var(--pd-bg)}
@@ -2115,7 +2124,18 @@ function loc(t){
   if(t.current_lat == null || t.current_lng == null) return '—';
   const url  = 'https://www.google.com/maps?q=' + t.current_lat + ',' + t.current_lng;
   const text = t.current_loc || (t.current_lat.toFixed(5) + ', ' + t.current_lng.toFixed(5));
-  return '<a href="'+url+'" target="_blank" rel="noopener" style="color:var(--tr)">📍 '+esc(text)+'</a>';
+  let out = '<a href="'+url+'" target="_blank" rel="noopener" style="color:var(--tr)">📍 '+esc(text)+'</a>';
+  // ปุ่มดูเส้นทาง: ตำแหน่งรถตอนนี้ → ปลายทาง เปิดใน Google Maps (มีเส้นทาง+ระยะเวลาจริง)
+  // ต้องมีพิกัดปลายทางในชีต "ข้อมูลปลายทาง" ถึงจะขึ้นปุ่มนี้
+  if(t.dest_lat != null && t.dest_lng != null){
+    const dir = 'https://www.google.com/maps/dir/?api=1'
+      + '&origin=' + t.current_lat + ',' + t.current_lng
+      + '&destination=' + t.dest_lat + ',' + t.dest_lng
+      + '&travelmode=driving';
+    out += '<a class="routebtn" href="'+dir+'" target="_blank" rel="noopener"'
+         + ' title="ดูเส้นทางจากตำแหน่งรถตอนนี้ไปปลายทาง">🗺️ เส้นทาง</a>';
+  }
+  return out;
 }
 
 // ── บันทึกว่าไล่รถคันไหนไปแล้ว → เก็บลงแท็บ ChaseLog ใน Google Sheet ──────
