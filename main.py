@@ -285,16 +285,18 @@ def _supabase_headers() -> dict:
     }
 
 
-def _supabase_get_cache(key: str):
-    """คืนข้อมูลแคชจาก Supabase ถ้ายังไม่หมดอายุ (CACHE_TTL) ไม่งั้นคืน None"""
+def _supabase_get_cache(key: str, max_age: Optional[float] = None):
+    """คืนข้อมูลแคชจาก Supabase ถ้าอายุยังไม่เกิน max_age (ค่าเริ่มต้น CACHE_TTL)
+    ส่ง max_age=None ผ่าน _ANY_AGE เพื่อขอของเก่ามาใช้ตอนอ่าน Sheet สดไม่ได้"""
     if not (SUPABASE_URL and SUPABASE_SERVICE_KEY):
         return None
+    limit = CACHE_TTL if max_age is None else max_age
     try:
         r = httpx.get(
             f"{SUPABASE_URL}/rest/v1/sheet_cache",
             params={"cache_key": f"eq.{key}", "select": "data,updated_at"},
             headers=_supabase_headers(),
-            timeout=5,
+            timeout=15,     # ก้อนแคชของชีตใหญ่ ๆ โหลดนานกว่า 5 วิ ได้
         )
         r.raise_for_status()
         rows = r.json()
@@ -302,7 +304,7 @@ def _supabase_get_cache(key: str):
             return None
         updated_at = datetime.fromisoformat(rows[0]["updated_at"].replace("Z", "+00:00"))
         age = (datetime.now(timezone.utc) - updated_at).total_seconds()
-        if age > CACHE_TTL:
+        if age > limit:
             return None
         return rows[0]["data"]
     except Exception:
@@ -318,7 +320,10 @@ def _supabase_set_cache(key: str, data: list) -> None:
             params={"on_conflict": "cache_key"},
             headers={**_supabase_headers(), "Prefer": "resolution=merge-duplicates"},
             json={"cache_key": key, "data": data, "updated_at": datetime.now(timezone.utc).isoformat()},
-            timeout=5,
+            # ชีต PTGL มีพันกว่าแถว แปลงเป็น JSON แล้วเป็นเมกะไบต์ ถ้า timeout สั้นไป
+            # การเขียนแคชจะล้มเงียบ ๆ ทุกครั้ง แล้วทุก request ที่ instance ใหม่
+            # ต้องไปอ่าน Sheet สดใหม่หมด → quota เต็มเร็วมาก
+            timeout=20,
         )
     except Exception:
         pass   # เขียนแคชไม่สำเร็จไม่เป็นไร ครั้งหน้าจะลองใหม่เอง
@@ -412,7 +417,20 @@ def _fetch_sheet(sheet_id: str, tab: str) -> list[list]:
         gc = gspread.authorize(_build_creds())
         return gc.open_by_key(sheet_id).worksheet(tab).get_all_values()
 
-    data = _with_retry(_read)
+    try:
+        data = _with_retry(_read)
+    except Exception:
+        # อ่านสดไม่ได้ (ส่วนใหญ่คือ 429 quota เต็ม) — เอาของเก่าในแคชมาใช้แทน
+        # ข้อมูลเก่าไม่กี่นาทียังมีประโยชน์กว่าหน้าจอว่างเปล่ามาก
+        stale = _sheet_cache.get(key)
+        if stale is not None:
+            return stale[1]
+        stale_remote = _supabase_get_cache(key, max_age=float("inf"))
+        if stale_remote is not None:
+            _sheet_cache[key] = (time(), stale_remote)
+            return stale_remote
+        raise
+
     _sheet_cache[key] = (time(), data)
     _supabase_set_cache(key, data)
     return data
