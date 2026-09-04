@@ -1095,6 +1095,15 @@ CH_VOLUME, CH_INVOICE, CH_STATUS, CH_LOC, CH_BY, CH_AT = 7, 8, 9, 10, 11, 12
 CH_DESC_FIRST, CH_DESC_LAST = CH_SOURCE, CH_INVOICE   # ช่วงคอลัมน์ "รายละเอียดทริป" C:I
 
 
+def _col_letter(n: int) -> str:
+    """เลขคอลัมน์ (1-based) → ตัวอักษรแบบ A1 notation  27 → 'AA'"""
+    s = ""
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
 def _chase_tab_name(date_str: str) -> str:
     try:
         d = datetime.strptime(date_str, "%Y-%m-%d")
