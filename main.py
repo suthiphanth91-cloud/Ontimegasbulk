@@ -1768,6 +1768,8 @@ DASHBOARD_HTML = """<!doctype html>
   .chip:hover{border-color:#2563eb;color:#2563eb}
   .chip.on{background:#2563eb;border-color:#2563eb;color:#fff}
   .note{color:var(--mut);font-size:13px;margin:10px 2px}
+  .linkbtn{background:none;border:0;padding:0;font:inherit;color:var(--tr);
+     cursor:pointer;text-decoration:underline}
   .empty{padding:48px;text-align:center;color:var(--mut)}
   .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);margin-right:6px}
   .chk select{padding:4px 6px;border-radius:8px;border:1px solid var(--line);
@@ -1918,6 +1920,8 @@ DASHBOARD_HTML = """<!doctype html>
 const LABEL = {late:'ช้า', arrived:'ส่งแล้ว', transit:'กำลังไป',
                early:'เร็วกว่ากำหนด', pending:'รอออกรถ', cancelled:'ยกเลิก'};
 let ALL = [], DATA = [], FILTER = localStorage.getItem('gb_filter') || 'hour';
+// ซ่อนคันที่ปิดงานแล้วเป็นค่าเริ่มต้น — จำค่าที่เลือกไว้ในเครื่อง
+let SHOW_DONE = localStorage.getItem('gb_show_done') === '1';
 if(('__NOPASS__') === '1') document.getElementById('nopass').hidden = false;
 
 function thaiNow(){                    // เวลาไทย (UTC+7) — อ่านค่าด้วย getUTC* เท่านั้น
@@ -2163,13 +2167,22 @@ function nowMins(){
   return d.getUTCHours()*60 + d.getUTCMinutes();
 }
 
+// งานปิดแล้ว = ไม่ต้องไล่อีก ทั้งที่กด "จบงาน" เอง และที่ชีตขึ้นว่าส่งถึงแล้ว
+function isDone(t){
+  if(t.status === 'arrived') return true;                                  // ส่งแล้ว / จัดส่งสำเร็จ
+  return !!(CHASED[key(t)] && CHASED[key(t)].status === 'จบงาน');          // กดจบงานเอง
+}
+
 function keep(t){                     // กรองตามชิปที่เลือก
+  // คันที่ปิดงานแล้วเอาออกจากตารางทุกมุมมอง (กดปุ่มใต้ตารางเพื่อดูย้อนหลังได้)
+  // เพราะเรียงตามไฟล์ต้นทาง คันที่ยังต้องไล่จะกระจายอยู่ทั่วตาราง ถ้าคันที่ปิดงาน
+  // แล้วยังค้างอยู่ด้วยจะหาคันที่ต้องทำจริงยากมาก
+  if(isDone(t) && !SHOW_DONE) return false;
   if(FILTER === 'all')    return true;
   if(FILTER === 'late')   return t.status === 'late';
   if(FILTER === 'active') return t.status !== 'arrived' && t.status !== 'cancelled';
   // 'hour' = ต้องจัดการในชั่วโมงนี้: ถึงเวลาโทรตาม / ช้าอยู่แล้ว / ครบกำหนดใน 60 นาที
   if(t.status === 'arrived' || t.status === 'cancelled') return false;
-  if(CHASED[key(t)] && CHASED[key(t)].status === 'จบงาน') return false;   // กดจบงานแล้ว ไม่ต้องไล่อีก
   if(String(t.prediction||'').startsWith('📞')) return true;
   if(t.status === 'late')    return true;
   const s = mins(t.sched_time);
@@ -2288,8 +2301,21 @@ function render(){
   document.getElementById('tbl').classList.toggle('hide-ot',
     !ALL.some(t => String(t.ontime||'').trim()));   // ไม่มีข้อมูล On Time ก็ซ่อนคอลัมน์ไป
 
-  document.getElementById('foot').textContent =
-    'แสดง ' + list.length + ' ทริป (จากทั้งวัน ' + ALL.length + ' ทริป)';
+  const doneCount = ALL.filter(isDone).length;
+  const foot = document.getElementById('foot');
+  foot.innerHTML = 'แสดง ' + list.length + ' ทริป (จากทั้งวัน ' + ALL.length + ' ทริป)'
+    + (doneCount
+        ? ' · <button type="button" id="toggleDone" class="linkbtn">'
+          + (SHOW_DONE ? 'ซ่อนคันที่ปิดงานแล้ว (' + doneCount + ')'
+                       : 'ปิดงานแล้ว ' + doneCount + ' คัน — แสดง')
+          + '</button>'
+        : '');
+  const td = document.getElementById('toggleDone');
+  if(td) td.onclick = () => {
+    SHOW_DONE = !SHOW_DONE;
+    localStorage.setItem('gb_show_done', SHOW_DONE ? '1' : '0');
+    render();
+  };
 }
 
 async function load(){
