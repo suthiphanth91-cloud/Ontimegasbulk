@@ -413,6 +413,28 @@ def _supabase_log_hourly_status(rows: list[dict]) -> None:
     except Exception:
         pass
 
+
+# เก็บประวัติรายชั่วโมงย้อนหลังกี่วัน เก่ากว่านี้ลบทิ้งอัตโนมัติ
+# ตารางนี้โตวันละ ~2,400 แถว ถ้าไม่ลบเลยจะสะสมไปเรื่อย ๆ ไม่มีที่สิ้นสุด
+HOURLY_LOG_KEEP_DAYS = 4
+
+
+def _supabase_prune_hourly_log() -> None:
+    """ลบแถวใน hourly_status_log ที่เก่ากว่า HOURLY_LOG_KEEP_DAYS วัน (best-effort)
+    เรียกรอบละครั้งตอนจบ cron — เป็นคำสั่งเดียว ไม่กินเวลา"""
+    if not (SUPABASE_URL and SUPABASE_SERVICE_KEY):
+        return
+    cutoff = (_thai_now() - timedelta(days=HOURLY_LOG_KEEP_DAYS)).strftime("%Y-%m-%d")
+    try:
+        httpx.delete(
+            f"{SUPABASE_URL}/rest/v1/hourly_status_log",
+            params={"log_date": f"lt.{cutoff}"},
+            headers=_supabase_headers(),
+            timeout=20,
+        )
+    except Exception:
+        pass
+
 # ─── UTILITIES ───────────────────────────────────────────────────────────────
 
 def _build_creds() -> Credentials:
@@ -1407,6 +1429,7 @@ def _cron_hourly_status_impl():
         })
 
     _supabase_log_hourly_status(supa_rows)     # ส่งทีเดียวทั้งชุด
+    _supabase_prune_hourly_log()               # ลบประวัติที่เก่ากว่า 4 วันทิ้ง
 
     # เขียน ChaseLog — batch update แถวเดิม + append แถวใหม่
     chase_written = False
