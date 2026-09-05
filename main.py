@@ -17,6 +17,7 @@ import os
 import random
 import re
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from math import atan2, cos, radians, sin, sqrt
 from time import sleep, time
@@ -863,6 +864,60 @@ def fetch_trips(target_date: str) -> list[dict]:
         })
     return trips
 
+def _prefetch_routes(trips, api_budget, ptgl_map, dest_map, is_today) -> None:
+    """ยิง API เส้นทางของทุกทริปที่ได้สิทธิ์ "พร้อมกัน" แล้วเก็บผลไว้ใน _eta_cache
+    ก่อนเข้าลูปคำนวณจริง — พอถึงลูป ทุกเส้นทางอยู่ในแคชหมดแล้ว ไม่ต้องรอเน็ตอีก
+
+    เดิมยิงทีละเส้นเรียงกันในลูป 12 เส้นก็รอ 12 รอบ (วัดได้ ~30-40 วินาที)
+    ยิงพร้อมกันแล้วเวลารวมเท่ากับเส้นที่ช้าที่สุดเส้นเดียว
+
+    เงื่อนไขว่าทริปไหนต้องใช้เส้นทางไหน ต้องตรงกับลูปคำนวณด้านล่าง ถ้าเผลอไม่ตรง
+    ผลไม่ผิด แค่เส้นที่ไม่ได้ดึงล่วงหน้าจะกลับไปยิงทีละเส้นแบบเดิมเท่านั้น
+    """
+    if not api_budget or not is_today:
+        return
+
+    jobs: dict[str, tuple[float, float, float, float]] = {}   # cache key → พิกัด 2 จุด
+    for t in trips:
+        if t["id"] not in api_budget:
+            continue
+        state_tx = (t["gps_status"] + " " + t["status_man"]).lower()
+        if t["arrive"] or any(k in state_tx for k in CANCEL_KEYWORDS + DONE_KEYWORDS):
+            continue
+
+        pos        = ptgl_map.get(t["car_key"])
+        dest_coord = dest_map.get(t["customer"])
+        depot      = DEPOTS.get(t["source"])
+        origin     = pos or ({"lat": depot[0], "lng": depot[1]} if depot else None)
+
+        def add(a_lat, a_lng, b_lat, b_lng):
+            key = f"{a_lat:.3f},{a_lng:.3f}->{b_lat:.4f},{b_lng:.4f}"
+            if key not in _eta_cache:
+                jobs[key] = (a_lat, a_lng, b_lat, b_lng)
+
+        if not t["yard_time"] and pos and depot and dest_coord:
+            add(pos["lat"], pos["lng"], depot[0], depot[1])          # รถ → คลัง
+            add(depot[0], depot[1], dest_coord[0], dest_coord[1])    # คลัง → ปลายทาง
+        elif origin and dest_coord:
+            add(origin["lat"], origin["lng"], dest_coord[0], dest_coord[1])
+
+    if not jobs:
+        return
+
+    # ThreadPool ไม่ใช่ async เพราะ httpx ที่ใช้อยู่เป็นแบบ sync ทั้งไฟล์
+    # งานพวกนี้เป็น "รอเน็ต" ล้วน ๆ เธรดจึงทำงานพร้อมกันได้จริงแม้ติด GIL
+    with ThreadPoolExecutor(max_workers=min(len(jobs), MAX_ROUTE_CALLS)) as pool:
+        futures = {
+            pool.submit(_get_travel_minutes, a, b, c, d, True): key
+            for key, (a, b, c, d) in jobs.items()
+        }
+        for fut in futures:
+            try:
+                fut.result(timeout=15)
+            except Exception:
+                pass        # เส้นไหนพลาด ลูปข้างล่างจะยิงเองแบบเดิม
+
+
 # ─── ENDPOINT ────────────────────────────────────────────────────────────────
 
 @app.get("/api/trips", response_model=SummaryResponse, summary="ดึงทริป+ETA ตามวันที่")
@@ -900,6 +955,8 @@ def get_trips(
         )
     ]
     api_budget = set(pending_ids[:MAX_ROUTE_CALLS])
+
+    _prefetch_routes(trips, api_budget, ptgl_map, dest_map, is_today)
 
     results: list[TripOut] = []
     now_dt = _thai_now().replace(second=0, microsecond=0)
