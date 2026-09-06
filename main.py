@@ -277,164 +277,9 @@ class SummaryResponse(BaseModel):
 _sheet_cache: dict[str, tuple[float, list]] = {}
 _eta_cache:   dict[str, tuple[float, int]]  = {}
 
-# ─── SUPABASE (แคชถาวรของข้อมูล Sheet — กัน Vercel รีเซ็ตแคชในหน่วยความจำบ่อยเกิน) ──
-SUPABASE_URL         = os.environ.get("SUPABASE_URL", "").rstrip("/")
-SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
-
-
-def _supabase_headers() -> dict:
-    return {
-        "apikey": SUPABASE_SERVICE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-        "Content-Type": "application/json",
-    }
-
-
-def _supabase_get_cache(key: str, max_age: Optional[float] = None):
-    """คืนข้อมูลแคชจาก Supabase ถ้าอายุยังไม่เกิน max_age (ค่าเริ่มต้น CACHE_TTL)
-    ส่ง max_age=None ผ่าน _ANY_AGE เพื่อขอของเก่ามาใช้ตอนอ่าน Sheet สดไม่ได้"""
-    if not (SUPABASE_URL and SUPABASE_SERVICE_KEY):
-        return None
-    limit = CACHE_TTL if max_age is None else max_age
-    try:
-        r = httpx.get(
-            f"{SUPABASE_URL}/rest/v1/sheet_cache",
-            params={"cache_key": f"eq.{key}", "select": "data,updated_at"},
-            headers=_supabase_headers(),
-            timeout=15,     # ก้อนแคชของชีตใหญ่ ๆ โหลดนานกว่า 5 วิ ได้
-        )
-        r.raise_for_status()
-        rows = r.json()
-        if not rows:
-            return None
-        updated_at = datetime.fromisoformat(rows[0]["updated_at"].replace("Z", "+00:00"))
-        age = (datetime.now(timezone.utc) - updated_at).total_seconds()
-        if age > limit:
-            return None
-        return rows[0]["data"]
-    except Exception:
-        return None   # Supabase ล่ม/ตั้งค่าไม่ครบ → เงียบไว้ ไปอ่าน Sheet ตรงแทน
-
-
-def _supabase_set_cache(key: str, data: list) -> None:
-    if not (SUPABASE_URL and SUPABASE_SERVICE_KEY):
-        return
-    try:
-        httpx.post(
-            f"{SUPABASE_URL}/rest/v1/sheet_cache",
-            params={"on_conflict": "cache_key"},
-            headers={**_supabase_headers(), "Prefer": "resolution=merge-duplicates"},
-            json={"cache_key": key, "data": data, "updated_at": datetime.now(timezone.utc).isoformat()},
-            # ชีต PTGL มีพันกว่าแถว แปลงเป็น JSON แล้วเป็นเมกะไบต์ ถ้า timeout สั้นไป
-            # การเขียนแคชจะล้มเงียบ ๆ ทุกครั้ง แล้วทุก request ที่ instance ใหม่
-            # ต้องไปอ่าน Sheet สดใหม่หมด → quota เต็มเร็วมาก
-            timeout=20,
-        )
-    except Exception:
-        pass   # เขียนแคชไม่สำเร็จไม่เป็นไร ครั้งหน้าจะลองใหม่เอง
-
-
-# แคช ETA เก็บถาวรใน Supabase ด้วย ไม่ใช่แค่ในหน่วยความจำ
-#
-# การคำนวณ ETA ต้องยิง API เส้นทางภายนอกทีละคัน (สูงสุด 12 คันต่อ 1 คำขอ) ซึ่งช้ามาก
-# ถ้าเก็บผลไว้แค่ในหน่วยความจำ พอ Vercel สร้าง server ใหม่ (ซึ่งเกิดบ่อย) ก็ต้อง
-# ยิงใหม่ทั้ง 12 คัน เคยวัดได้ถึง 60 กว่าวินาทีต่อการโหลดหน้าเว็บ 1 ครั้ง
-# เก็บทั้งก้อนเป็นแถวเดียวใน Supabase แล้วโหลดมาใช้ต่อ = เหลือ 1 ครั้งแทน 12 ครั้ง
-_ETA_CACHE_KEY  = "__eta_cache__"
-_eta_cache_dirty = False
-
-
-def _mark_eta_dirty() -> None:
-    global _eta_cache_dirty
-    _eta_cache_dirty = True
-
-
-def _load_eta_cache() -> None:
-    if _eta_cache:
-        return                                   # server ตัวนี้อุ่นอยู่แล้ว
-    data = _supabase_get_cache(_ETA_CACHE_KEY, max_age=ETA_CACHE_TTL)
-    if not isinstance(data, dict):
-        return
-    now = time()
-    for k, v in data.items():
-        try:
-            ts, mins = float(v[0]), int(v[1])
-        except Exception:
-            continue
-        if now - ts < ETA_CACHE_TTL:
-            _eta_cache[k] = (ts, mins)
-
-
-def _save_eta_cache() -> None:
-    global _eta_cache_dirty
-    if not _eta_cache_dirty:
-        return
-    _eta_cache_dirty = False
-    now = time()
-    _supabase_set_cache(_ETA_CACHE_KEY, {
-        k: [ts, mins] for k, (ts, mins) in _eta_cache.items()
-        if now - ts < ETA_CACHE_TTL
-    })
-
-
 def _drop_sheet_cache(sheet_id: str, tab: str) -> None:
-    """ล้างแคชของแท็บนั้นทั้ง 2 ชั้น — ใช้หลังเขียนชีตเอง
-    ถ้าล้างแต่แคชในหน่วยความจำ ตัวถัดไปจะไปเจอแคชเก่าของ Supabase (TTL 5 นาที)
-    ที่ยังไม่หมดอายุ แล้วได้ข้อมูลก่อนแก้กลับไป"""
-    key = f"{sheet_id}:{tab}"
-    _sheet_cache.pop(key, None)
-    if not (SUPABASE_URL and SUPABASE_SERVICE_KEY):
-        return
-    try:
-        httpx.delete(
-            f"{SUPABASE_URL}/rest/v1/sheet_cache",
-            params={"cache_key": f"eq.{key}"},
-            headers=_supabase_headers(),
-            timeout=5,
-        )
-    except Exception:
-        pass
-
-
-def _supabase_log_hourly_status(rows: list[dict]) -> None:
-    """บันทึกประวัติรายชั่วโมงลงตาราง hourly_status_log ใน Supabase (best-effort)
-
-    ส่งทั้งชุดในครั้งเดียว — เดิมยิงทีละแถว รอบหนึ่งมีร้อยกว่าคันก็ยิงร้อยกว่าครั้ง
-    ครั้งละ ~0.2 วิ รวมแล้วกินเวลาไปหลายสิบวินาทีต่อรอบ
-    ต้องสร้างตารางนี้ไว้ก่อนใน Supabase — ดู SQL ที่ให้ไว้ตอนตั้งค่า"""
-    if not (SUPABASE_URL and SUPABASE_SERVICE_KEY) or not rows:
-        return
-    try:
-        httpx.post(
-            f"{SUPABASE_URL}/rest/v1/hourly_status_log",
-            headers=_supabase_headers(),
-            json=rows,
-            timeout=20,
-        )
-    except Exception:
-        pass
-
-
-# เก็บประวัติรายชั่วโมงย้อนหลังกี่วัน เก่ากว่านี้ลบทิ้งอัตโนมัติ
-# ตารางนี้โตวันละ ~2,400 แถว ถ้าไม่ลบเลยจะสะสมไปเรื่อย ๆ ไม่มีที่สิ้นสุด
-HOURLY_LOG_KEEP_DAYS = 4
-
-
-def _supabase_prune_hourly_log() -> None:
-    """ลบแถวใน hourly_status_log ที่เก่ากว่า HOURLY_LOG_KEEP_DAYS วัน (best-effort)
-    เรียกรอบละครั้งตอนจบ cron — เป็นคำสั่งเดียว ไม่กินเวลา"""
-    if not (SUPABASE_URL and SUPABASE_SERVICE_KEY):
-        return
-    cutoff = (_thai_now() - timedelta(days=HOURLY_LOG_KEEP_DAYS)).strftime("%Y-%m-%d")
-    try:
-        httpx.delete(
-            f"{SUPABASE_URL}/rest/v1/hourly_status_log",
-            params={"log_date": f"lt.{cutoff}"},
-            headers=_supabase_headers(),
-            timeout=20,
-        )
-    except Exception:
-        pass
+    """ล้างแคชในหน่วยความจำของแท็บนั้น — ใช้หลังเขียนชีตเอง กันอ่านซ้ำเจอของเก่า"""
+    _sheet_cache.pop(f"{sheet_id}:{tab}", None)
 
 # ─── UTILITIES ───────────────────────────────────────────────────────────────
 
@@ -486,19 +331,14 @@ def _ttl_jitter(key: str) -> float:
 
 
 def _fetch_sheet(sheet_id: str, tab: str) -> list[list]:
-    """อ่าน Sheet พร้อมแคช 5 นาที — เช็คแคชในหน่วยความจำก่อน (เร็วสุด) แล้วค่อยเช็ค
-    แคชถาวรใน Supabase (กันแคชหายตอน Vercel สร้าง server ใหม่) สุดท้ายค่อยอ่าน Sheet จริง"""
+    """อ่าน Sheet พร้อมแคชในหน่วยความจำ (ไม่พึ่ง Supabase แล้ว — อ่านจาก Google ตรง ๆ
+    เสมอเมื่อแคชหมดอายุ ข้อมูลจึงอัปเดตตามไฟล์ต้นทางเร็วขึ้น)"""
     key = f"{sheet_id}:{tab}"
     ttl = CACHE_TTL + _ttl_jitter(key)
     if key in _sheet_cache:
         ts, data = _sheet_cache[key]
         if time() - ts < ttl:
             return data
-
-    cached = _supabase_get_cache(key, max_age=ttl)
-    if cached is not None:
-        _sheet_cache[key] = (time(), cached)
-        return cached
 
     def _read():
         gc = gspread.authorize(_build_creds())
@@ -512,24 +352,17 @@ def _fetch_sheet(sheet_id: str, tab: str) -> list[list]:
         stale = _sheet_cache.get(key)
         if stale is not None:
             return stale[1]
-        stale_remote = _supabase_get_cache(key, max_age=float("inf"))
-        if stale_remote is not None:
-            _sheet_cache[key] = (time(), stale_remote)
-            return stale_remote
         raise
 
     _sheet_cache[key] = (time(), data)
-    _supabase_set_cache(key, data)
     return data
 
 
 def _refresh_sheet_cache(sheet_id: str, tab: str, ws) -> None:
-    """อ่านค่าล่าสุดจริงจาก ws แล้วยัดใส่แคชทั้ง 2 ชั้นทับของเก่า — ใช้หลังเขียนชีตเอง
-    เพื่อกัน _fetch_sheet ตัวถัดไปในคำขอเดียวกันดันไปเจอแคชเก่าของ Supabase (TTL 5 นาที) ที่ยังไม่หมดอายุ"""
+    """อ่านค่าล่าสุดจริงจาก ws แล้วยัดใส่แคชในหน่วยความจำทับของเก่า — ใช้หลังเขียนชีตเอง
+    กัน _fetch_sheet ตัวถัดไปในคำขอเดียวกันเจอแคชเก่า"""
     fresh = ws.get_all_values()
-    key = f"{sheet_id}:{tab}"
-    _sheet_cache[key] = (time(), fresh)
-    _supabase_set_cache(key, fresh)
+    _sheet_cache[f"{sheet_id}:{tab}"] = (time(), fresh)
 
 
 def _cell(row: list, idx: int) -> str:
@@ -737,7 +570,7 @@ def _get_travel_minutes(
     if not api_key:
         mins = _ors_minutes(orig_lat, orig_lng, dest_lat, dest_lng) \
                or _estimate_minutes(orig_lat, orig_lng, dest_lat, dest_lng)
-        _eta_cache[key] = (time(), mins); _mark_eta_dirty()
+        _eta_cache[key] = (time(), mins)
         return mins
 
     try:
@@ -760,13 +593,13 @@ def _get_travel_minutes(
         resp.raise_for_status()
         duration_s  = resp.json()["routes"][0]["duration"]   # "1234s"
         travel_mins = int(duration_s.replace("s", "")) // 60
-        _eta_cache[key] = (time(), travel_mins); _mark_eta_dirty()
+        _eta_cache[key] = (time(), travel_mins)
         return travel_mins
     except Exception:
         # Google ใช้ไม่ได้ (key ผิด / ยังไม่เปิดบิล) → ถอยไปใช้ตัวสำรอง
         mins = _ors_minutes(orig_lat, orig_lng, dest_lat, dest_lng) \
                or _estimate_minutes(orig_lat, orig_lng, dest_lat, dest_lng)
-        _eta_cache[key] = (time(), mins); _mark_eta_dirty()
+        _eta_cache[key] = (time(), mins)
         return mins
 
 # ─── DATA FETCHERS ───────────────────────────────────────────────────────────
@@ -929,8 +762,6 @@ def get_trips(
         datetime.strptime(target, "%Y-%m-%d")
     except ValueError:
         raise HTTPException(400, "รูปแบบวันที่ต้องเป็น yyyy-MM-dd")
-
-    _load_eta_cache()      # ดึงแคช ETA ของ server ตัวอื่นมาใช้ต่อ กันยิง API ซ้ำ
 
     try:
         ptgl_map = fetch_ptgl()
@@ -1179,8 +1010,6 @@ def get_trips(
     pending    = sum(1 for r in results if r.status == "pending")
     cancelled  = sum(1 for r in results if r.status == "cancelled")
 
-    _save_eta_cache()      # เก็บ ETA ที่เพิ่งคำนวณไว้ให้ server ตัวอื่นใช้ต่อ
-
     return SummaryResponse(
         date       = target,
         fetched_at = _thai_now().strftime("%Y-%m-%dT%H:%M:%S+07:00"),
@@ -1213,8 +1042,6 @@ def debug():
     env = os.environ.get("GOOGLE_CREDENTIALS")
     out["has_GOOGLE_CREDENTIALS"]  = bool(env)
     out["has_GOOGLE_ROUTES_KEY"]   = bool(os.environ.get("GOOGLE_ROUTES_KEY"))
-    out["has_SUPABASE_URL"]        = bool(SUPABASE_URL)
-    out["has_SUPABASE_SERVICE_KEY"]= bool(SUPABASE_SERVICE_KEY)
 
     # 2. credentials parse
     try:
@@ -1376,9 +1203,8 @@ def chase_set(
 def cron_hourly_status(secret: str = Query("")):
     """เรียกจาก Apps Script (trigger ทุกชั่วโมง) — ทำทุกอย่างที่เคยเป็นหน้าที่ Apps Script ในไฟล์เดียวนี้:
     1) ซิงก์แท็บรายวัน (dd.mm.yyyy) จากไฟล์ต้นทาง  2) เก็บพิกัดปัจจุบันของทุกคันที่ยังไม่ถึง/ยังไม่ยกเลิก
-    ลง ChaseLog เป็นแถวใหม่ทุกครั้ง  3) เขียนพิกัด+สถานะลงคอลัมน์รายชั่วโมง (H:00 น. / H:00 สถานะ) ของแท็บรายวัน
-    4) อ่านคอลัมน์ L "สถานะปัจจุบัน" (ที่คนกรอกเอง/ChaseLog เขียนไว้) ไปบันทึกเป็นประวัติใน Supabase
-    — ไม่เขียนทับคอลัมน์ L เลย (แค่อ่าน)"""
+    ลง ChaseLog แบบแนวนอน (ทริปละ 1 แถว ตำแหน่งรายชั่วโมงไปทางขวา)  3) เขียนพิกัด+สถานะลงคอลัมน์รายชั่วโมง
+    (H:00 น. / H:00 สถานะ) ของแท็บรายวัน — ข้อมูลทั้งหมดอยู่ใน Google Sheet เท่านั้น ไม่มีที่เก็บภายนอกอีก"""
     if not CRON_SECRET or secret != CRON_SECRET:
         raise HTTPException(401, "unauthorized")
 
@@ -1433,7 +1259,6 @@ def _cron_hourly_status_impl():
     chase_hour_col = _chase_hour_col(hour, chase_header)   # คอลัมน์ชั่วโมงนี้ (1-based)
     chase_updates = []
     chase_new_rows = []
-    supa_rows      = []      # ประวัติรายชั่วโมง สะสมไว้ส่ง Supabase ทีเดียวตอนจบ
 
     for t in result.trips:
         if t.status in ("arrived", "cancelled"):
@@ -1476,17 +1301,6 @@ def _cron_hourly_status_impl():
             chase_new_rows.append(new_row)
             chase_key_to_row[key] = len(chase_rows) + len(chase_new_rows)
         saved += 1
-
-        # สถานะล่าสุดที่คนกดไว้ — อ่านจากคอลัมน์ status ของ ChaseLog แถวเดียวกัน
-        status_now = _cell(chase_row_by_key.get(key, []), CH_STATUS)
-        supa_rows.append({
-            "source_depot": t.source, "trip_no": t.trip_no, "drop_no": t.drop,
-            "customer": t.customer, "car_no": t.car_no, "log_date": target,
-            "status": status_now, "location": loc, "recorded_at_th": at,
-        })
-
-    _supabase_log_hourly_status(supa_rows)     # ส่งทีเดียวทั้งชุด
-    _supabase_prune_hourly_log()               # ลบประวัติที่เก่ากว่า 4 วันทิ้ง
 
     # เขียน ChaseLog — batch update แถวเดิม + append แถวใหม่
     chase_written = False
@@ -1899,6 +1713,10 @@ DASHBOARD_HTML = """<!doctype html>
   .c b{display:block;font-size:27px;font-weight:700;line-height:1.15}
   .c span{color:var(--mut);font-size:13px;font-weight:500}
   .c.late b{color:var(--late)} .c.ok b{color:var(--ok)} .c.tr b{color:var(--tr)}
+  .c[data-f]{cursor:pointer;transition:border-color .15s,transform .1s}
+  .c[data-f]:hover{border-color:#2563eb}
+  .c[data-f]:active{transform:scale(.98)}
+  .c[data-f].on{border-color:#2563eb;border-width:2px;box-shadow:0 0 0 1px #2563eb inset}
   .wrap{background:var(--card);border:1px solid var(--line);border-radius:13px;
         overflow:auto;height:calc(100vh - 280px)}
   table{border-collapse:separate;border-spacing:0;width:100%;min-width:1010px}
@@ -2107,8 +1925,10 @@ function todayISO(){
   return thaiNow().toISOString().slice(0,10);
 }
 
-function card(n, label, cls){
-  return '<div class="c '+(cls||'')+'"><b>'+n+'</b><span>'+label+'</span></div>';
+function card(n, label, cls, f){
+  const on = (f && FILTER === f) ? ' on' : '';
+  const attr = f ? ' data-f="'+f+'" title="คลิกเพื่อกรองตาราง"' : '';
+  return '<div class="c '+(cls||'')+on+'"'+attr+'><b>'+n+'</b><span>'+label+'</span></div>';
 }
 
 function esc(s){
@@ -2359,7 +2179,17 @@ function isDone(t){
   return !!(CHASED[key(t)] && CHASED[key(t)].status === 'จบงาน');          // กดจบงานเอง
 }
 
-function keep(t){                     // กรองตามชิปที่เลือก
+// กรองที่เจาะจงสถานะเดียว (จากคลิกการ์ดสรุป) — ต้องเห็นครบตามจำนวนบนการ์ด
+// จึงไม่เอาการ์ดปิดงานแล้ว (isDone) มาบังผลลัพธ์เหมือนมุมมองอื่น
+const STATUS_FILTERS = {
+  arrived:   t => t.status === 'arrived',
+  transit:   t => t.status === 'transit' || t.status === 'early',
+  pending:   t => t.status === 'pending',
+  cancelled: t => t.status === 'cancelled',
+};
+
+function keep(t){                     // กรองตามชิป/การ์ดที่เลือก
+  if(STATUS_FILTERS[FILTER]) return STATUS_FILTERS[FILTER](t);
   // คันที่ปิดงานแล้วเอาออกจากตารางทุกมุมมอง (กดปุ่มใต้ตารางเพื่อดูย้อนหลังได้)
   // เพราะเรียงตามไฟล์ต้นทาง คันที่ยังต้องไล่จะกระจายอยู่ทั่วตาราง ถ้าคันที่ปิดงาน
   // แล้วยังค้างอยู่ด้วยจะหาคันที่ต้องทำจริงยากมาก
@@ -2515,12 +2345,12 @@ async function load(){
     ALL = j.trips || [];
     await loadChased();
     document.getElementById('cards').innerHTML =
-        card(j.total,'ทริปทั้งหมด','')
-      + card(j.arrived,'ส่งเสร็จแล้ว','ok')
-      + card(j.in_transit,'กำลังเดินทาง','tr')
-      + card(j.late,'คาดว่าจะช้า','late')
-      + card(j.pending,'รอออกรถ','')
-      + card(j.cancelled || 0,'ยกเลิก/โหลดเก็บ','');
+        card(j.total,'ทริปทั้งหมด','','all')
+      + card(j.arrived,'ส่งเสร็จแล้ว','ok','arrived')
+      + card(j.in_transit,'กำลังเดินทาง','tr','transit')
+      + card(j.late,'คาดว่าจะช้า','late','late')
+      + card(j.pending,'รอออกรถ','','pending')
+      + card(j.cancelled || 0,'ยกเลิก/โหลดเก็บ','','cancelled');
     document.getElementById('stamp').innerHTML =
       '<span class="dot"></span>อัปเดต ' + String(j.fetched_at).slice(11,16) + ' น.';
     render();
@@ -2581,13 +2411,22 @@ document.getElementById('go').onclick    = load;
 document.getElementById('date').onchange = load;
 document.getElementById('q').oninput     = render;
 
+function setFilter(f){                // ใช้ร่วมกันทั้งชิปด้านบนและการ์ดสรุปตัวเลข
+  FILTER = f;
+  document.querySelectorAll('.chip').forEach(x => x.classList.toggle('on', x.dataset.f === FILTER));
+  document.querySelectorAll('.c[data-f]').forEach(x => x.classList.toggle('on', x.dataset.f === FILTER));
+  render();
+}
+
 document.querySelectorAll('.chip').forEach(b => {
   b.classList.toggle('on', b.dataset.f === FILTER);
-  b.onclick = () => {
-    FILTER = b.dataset.f;
-    document.querySelectorAll('.chip').forEach(x => x.classList.toggle('on', x === b));
-    render();
-  };
+  b.onclick = () => setFilter(b.dataset.f);
+});
+
+// คลิกการ์ดสรุปตัวเลขด้านบน (ทั้งหมด/ส่งเสร็จแล้ว/กำลังเดินทาง/ช้า/รอออกรถ/ยกเลิก) → กรองตารางทันที
+document.addEventListener('click', e => {
+  const c = e.target.closest('.c[data-f]');
+  if(c && c.dataset.f) setFilter(c.dataset.f);
 });
 
 load();
