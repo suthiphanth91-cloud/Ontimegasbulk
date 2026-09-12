@@ -1779,6 +1779,9 @@ DASHBOARD_HTML = """<!doctype html>
   tr.done{opacity:.55}
   tr.done .at{color:var(--ok);font-weight:600}
   .callnow{display:inline-block;margin-left:6px;font-size:12px;color:var(--late);font-weight:600}
+  /* บรรทัดอธิบายว่าทำไม ETA ถึงออกมาแบบนั้น -- โชว์เฉพาะแถวที่ช้า/ผิดปกติ
+     แถวปกติไม่โชว์ เพื่อไม่ให้ตารางรก (เอาเมาส์ชี้ที่ช่อง ETA ก็เห็นได้) */
+  .why{margin-top:5px;font-size:12px;line-height:1.45;color:var(--mut);white-space:normal;max-width:360px}
   .gear{text-decoration:none;font-size:19px;padding:6px 9px;border-radius:9px;
         border:1px solid var(--line);line-height:1}
   .gear:hover{border-color:#2563eb}
@@ -2018,6 +2021,29 @@ function eta(t){                      // ถึงจริงแล้วโช
   if(t.arrive_time) return '<b style="color:var(--ok)">'+esc(t.arrive_time)+'</b>';
   if(t.eta_time)    return '~'+esc(t.eta_time);
   return '<span class="mut">—</span>';
+}
+
+// คำอธิบายเหตุผลของ ETA/สถานะ (ตัวแปร prediction ฝั่ง Python)
+// เดิมค่านี้ส่งมาถึงเบราว์เซอร์อยู่แล้วแต่ไม่เคยถูกแสดง ใช้แค่เช็ค 📞 อย่างเดียว
+// ทำให้เวลา ETA ออกมาแปลกๆ ไม่มีทางรู้เลยว่าเวลาไปโผล่ตรงไหน
+// โชว์เป็นบรรทัดเล็กเฉพาะแถวที่ช้า/ยังไม่ออกรถ/มีคำเตือน ส่วนแถวปกติดูได้จาก
+// tooltip ที่ช่อง ETA แทน
+function why(t){
+  const p = String(t.prediction || '').trim();
+  if(!p) return '';
+  const odd = t.status === 'late' || t.status === 'pending' || /^[⚠📞]/.test(p);
+  return odd ? '<div class="why">' + esc(p) + '</div>' : '';
+}
+
+// คอลัมน์ "ต่าง" -- เดิมใช้เครื่องหมาย + / - ซึ่งอ่านแล้วต้องแปลในหัวอีกที
+// ว่าบวกคือช้าหรือเร็ว แถมเครื่องหมาย - ยังไปคล้ายกับ ~ ที่นำหน้าเวลา ETA
+// จนดูเหมือนเวลาติดลบ เลยเปลี่ยนมาบอกเป็นคำไปเลยว่า "ช้า"/"เร็ว"/"ตรงเวลา"
+function diffText(t){
+  const m = t.diff_minutes;
+  if(m == null) return '<span class="mut">—</span>';
+  if(m > 0)     return '<span style="color:var(--late)">ช้า ' + dur(m) + '</span>';
+  if(m < 0)     return '<span style="color:var(--ok)">เร็ว ' + dur(-m) + '</span>';
+  return '<span style="color:var(--ok)">ตรงเวลา</span>';
 }
 
 function loc(t){
@@ -2280,10 +2306,7 @@ function render(){
   document.getElementById('rows').innerHTML = list.length ? list.map(t => {
     const k    = key(t);
     const call = String(t.prediction||'').startsWith('📞');
-    const diff = t.diff_minutes == null ? '<span class="mut">—</span>'
-      : (t.diff_minutes > 0
-          ? '<span style="color:var(--late)">+'+dur(t.diff_minutes)+'</span>'
-          : '<span style="color:var(--ok)">-'+dur(-t.diff_minutes)+'</span>');
+    const diff = diffText(t);
     const badge = '<span class="badge s-'+esc(t.status)+'">'
                 + (LABEL[t.status]||esc(t.status))+'</span>'
                 + (call ? '<span class="callnow">📞 ถึงเวลาโทร</span>' : '');
@@ -2300,10 +2323,10 @@ function render(){
       + '<td data-l="เวลาส่งมอบ" class="mono">'+esc(t.sched_time)+'</td>'
       + '<td data-l="เลขที่ใบกำกับ" class="mut">'+esc(t.invoice_no)+'</td>'
       + '<td data-l="สถานะ GPS" class="mut">'+esc(t.gps_status)+'</td>'
-      + '<td data-l="ETA / ถึงจริง" class="mono">'+eta(t)+'</td>'
+      + '<td data-l="ETA / ถึงจริง" class="mono" title="'+esc(t.prediction||'')+'">'+eta(t)+'</td>'
       + '<td data-l="ต่าง" class="mono">'+diff+'</td>'
       + '<td data-l="On Time (ชีต)">'+ot(t)+'</td>'
-      + '<td data-l="สถานะ" class="st">'+badge+'</td>'
+      + '<td data-l="สถานะ" class="st">'+badge+why(t)+'</td>'
       + '<td data-l="ตำแหน่งปัจจุบัน" class="loc">'+loc(t)+'</td>'
       + '<td data-l="อัปเดตสถานะ" class="chk">'+pick(t, k)+'</td>'
       + '</tr>';
