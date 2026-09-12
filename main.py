@@ -1782,6 +1782,8 @@ DASHBOARD_HTML = """<!doctype html>
   /* บรรทัดอธิบายว่าทำไม ETA ถึงออกมาแบบนั้น -- โชว์เฉพาะแถวที่ช้า/ผิดปกติ
      แถวปกติไม่โชว์ เพื่อไม่ให้ตารางรก (เอาเมาส์ชี้ที่ช่อง ETA ก็เห็นได้) */
   .why{margin-top:5px;font-size:12px;line-height:1.45;color:var(--mut);white-space:normal;max-width:360px}
+  /* วันที่ต่อท้าย ETA ที่ข้ามไปวันอื่น เช่น ~01:38 (13/09) */
+  .etaday{color:var(--mut);font-size:12px;margin-left:3px}
   .gear{text-decoration:none;font-size:19px;padding:6px 9px;border-radius:9px;
         border:1px solid var(--line);line-height:1}
   .gear:hover{border-color:#2563eb}
@@ -2017,9 +2019,31 @@ function ot(t){                       // ผลตัดสิน On Time ที
        + (m && !pass ? '<div style="font-size:12px;color:var(--mut);margin-top:3px">'+esc(m)+' น.</div>' : '');
 }
 
+// ETA ที่เลยเที่ยงคืนไปแล้วต้องบอกวันที่กำกับด้วย ไม่งั้นเห็น "01:38" เฉยๆ
+// จะนึกว่าตี 1 ของวันนี้ซึ่งผ่านไปแล้ว ทั้งที่หมายถึงตี 1 ของคืนนี้
+//
+// ฝั่ง Python คำนวณด้วยวันที่+เวลาเต็มอยู่แล้ว แต่ส่งมาให้แค่ "HH:MM"
+// (eta_time) จึงคำนวณย้อนกลับว่าข้ามไปกี่วัน จาก (เวลานัด + ต่าง − ETA) ÷ 1440
+// เช่น นัด 21:00 (1260) + ช้า 278 น. − ETA 01:38 (98) = 1440 → ข้ามไป 1 วัน
+function etaDayShift(t){
+  const s = mins(t.sched_time), e = mins(t.eta_time);
+  if(s == null || e == null || t.diff_minutes == null) return 0;
+  return Math.round((s + t.diff_minutes - e) / 1440);
+}
+
+function etaDayLabel(t){                 // 1 → " (13/09)"   0 → ""
+  const shift = etaDayShift(t);
+  if(!shift) return '';
+  const d = new Date(String(t.date || '') + 'T00:00:00');
+  if(isNaN(d.getTime())) return '';
+  d.setDate(d.getDate() + shift);
+  const dd = ('0' + d.getDate()).slice(-2), mm = ('0' + (d.getMonth() + 1)).slice(-2);
+  return '<span class="etaday">(' + dd + '/' + mm + ')</span>';
+}
+
 function eta(t){                      // ถึงจริงแล้วโชว์เวลาจริง ไม่งั้นโชว์ประมาณการ
   if(t.arrive_time) return '<b style="color:var(--ok)">'+esc(t.arrive_time)+'</b>';
-  if(t.eta_time)    return '~'+esc(t.eta_time);
+  if(t.eta_time)    return '~'+esc(t.eta_time)+etaDayLabel(t);
   return '<span class="mut">—</span>';
 }
 
