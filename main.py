@@ -1,10 +1,12 @@
 """
-Gasbulk Track API v2
+Gasbulk Track API v3
 Sources:
-  PTGL Sheet         → ตำแหน่งรถ live  (col A=LicenseNO, E=Lat, F=Lng, M=Location)
+  eZView API (ตรง)   → ตำแหน่งรถ live  (ไม่ได้ตั้ง EZ_POS_USER/PASS หรือเรียกไม่สำเร็จ → อ่านชีต PTGL แบบเดิม)
+  PTGL Sheet         → ตำแหน่งรถสำรอง  (col A=LicenseNO, D=GPSDateTime, E=Lat, F=Lng, M=Location)
   แผนงาน Gasbulk     → ทริปประจำวัน   (col C=วันที่, G=เวลากำหนด, M=ปลายทาง, P=เบอร์รถ)
+  TripDetails (TMS)  → เวลาเข้า-ออกจริง เติมช่อง AB–AF ที่ว่าง (ตั้ง TMS_SHEET_ID ก่อนถึงจะใช้)
   ข้อมูลปลายทาง      → พิกัดปลายทาง   (col A=ชื่อ ตรงกับแผนงาน M, col G=lat,lng)
-  Google Routes API  → ETA จริงพร้อม traffic → รู้ล่วงหน้าว่าจะช้ากี่นาที
+  Routes API / ORS   → ETA จริงพร้อม traffic → รู้ล่วงหน้าว่าจะช้ากี่นาที
 """
 
 from __future__ import annotations
@@ -33,13 +35,37 @@ from pydantic import BaseModel
 
 # ─── CONFIG — ปรับคอลัมน์ที่นี่ถ้า Sheet เปลี่ยน ─────────────────────────────
 
-# Sheet 1: PTGL — ตำแหน่งรถ live
+# Sheet 1: PTGL — ตำแหน่งรถ live (ตัวสำรอง ถ้าดึง eZView API ตรงไม่ได้)
 PTGL_ID    = "1FIXB3TT3b68ho2pc0lrYi4IOuXmCw4_BBDot2kp-XC4"
 PTGL_TAB   = "PTGL"
 PTGL_LICNO = 0   # A  LicenseNO  เช่น "No.465(63-3530)"
+PTGL_GPSDT = 3   # D  GPSDateTime  ← ใช้เช็กว่าพิกัดเก่าหรือยัง
 PTGL_LAT   = 4   # E  Latitude
 PTGL_LNG   = 5   # F  Longitude
+PTGL_SPEED = 6   # G  Speed
 PTGL_LOC   = 12  # M  LocalLocation (ที่อยู่ปัจจุบัน)
+
+# ─── eZView API ตำแหน่งรถ — ดึงตรง ไม่ผ่านชีต PTGL ─────────────────────────
+# ตั้งที่ Vercel → Settings → Environment Variables:
+#   EZ_POS_USER, EZ_POS_PASS  บัญชีเดียวกับที่สคริปต์ getAllVehicleLocations ใช้ (หรือบัญชีแยกที่ขอจาก eZView)
+#   EZ_POS_URL                ลิงก์ API ตำแหน่ง (ลิงก์เดียวกับในสคริปต์ getAllVehicleLocations)
+#                             ไม่ใส่ไว้ในโค้ดเพราะ repo เป็น Public — ถ้า eZView เปิด https แล้ว ใช้ลิงก์ https
+# ยังไม่ได้ตั้ง / เรียกไม่สำเร็จ → ถอยไปอ่านชีต PTGL แบบเดิมอัตโนมัติ หน้าจอไม่ดับ
+EZ_POS_URL     = os.environ.get("EZ_POS_URL", "")
+POS_CACHE_TTL  = 60      # วินาที — ดึงตำแหน่งใหม่ไม่เกินนาทีละครั้ง
+GPS_STALE_MINS = 20      # พิกัดเก่ากว่านี้ = "GPS ไม่อัปเดต" ขึ้นเตือน และไม่ใช้ตัดสินว่าถึงปลายทาง
+NEAR_DEST_KM   = 3.0     # GPS อยู่ห่างลูกค้าไม่เกินนี้ = ถือว่าถึงปลายทางแล้ว (แก้เคส NO.626 ขึ้นช้า 30 ชม.)
+
+# ─── เวลาเข้า-ออกจริงจาก TMS — อ่านแท็บ TripDetails ที่สคริปต์ MLSTMS ดึงลงไว้ ─────
+# ตั้ง TMS_SHEET_ID = ไอดีไฟล์ Google Sheet ที่มีแท็บ TripDetails
+# แล้วแชร์ไฟล์นั้นให้ service account เป็น "ผู้มีสิทธิ์อ่าน" — ไม่ได้ตั้ง = ข้ามส่วนนี้ ทำงานแบบเดิม
+# ใช้เติมเฉพาะช่องที่ว่างในแผนงาน (AB/AD/AE/AF) — ถ้าคนกรอกไว้แล้ว ยึดค่าที่กรอกเสมอ
+TMS_SHEET_ID = os.environ.get("TMS_SHEET_ID", "")
+TMS_TAB      = "TripDetails"
+# ลำดับจุดในทริป TMS (ตามคอมเมนต์ DEPOT_TIMES: Sequence 1 = ลานจอด, 2 = โรงจ่าย)
+# จุดที่ 3 เป็นต้นไป = ลูกค้า (Drop) — ถ้าหน้างานจริงไม่ใช่แบบนี้ แก้ 2 ค่านี้
+TMS_WP_YARD  = 1
+TMS_WP_LOAD  = 2
 
 # Sheet 2a: ไฟล์ต้นทางจริง "แผนงานแก๊สบัลค์ใหม่" — คนหน้างานแก้ไขแผนงานที่ไฟล์นี้โดยตรง
 # ใช้อ่าน "รายการทริป" + "ข้อมูลปลายทาง" เท่านั้น (ยังไม่มีสิทธิ์เขียน แค่ Viewer)
@@ -143,6 +169,8 @@ DONE_KEYWORDS = [
 ]
 
 # คำที่แปลว่างานนี้ไม่ต้องไล่แล้ว (ยกเลิก / ยกไปวันอื่น)
+# เช็กทั้งคอลัมน์สถานะ (AA/AH) และช่องลูกค้าปลายทาง (M) — เคยเจอของจริง: เขียน "โหลดเก็บ"
+# ไว้ในช่องลูกค้า แต่ระบบเช็กแค่ช่องสถานะ เลยยังขึ้น "รอออกรถ + ถึงเวลาโทร"
 CANCEL_KEYWORDS = ["ยกเลิก", "โหลดเก็บ", "cancel"]
 
 TZ_OFFSET     = 7    # UTC+7
@@ -198,7 +226,7 @@ def _token_ok(token: str) -> bool:
 app = FastAPI(
     title="Gasbulk Track API",
     description="ติดตามรถ Gasbulk — รู้ล่วงหน้าว่าจะถึงช้าหรือเร็ว",
-    version="2.0.0",
+    version="3.0.0",
 )
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], allow_headers=["*"]
@@ -240,15 +268,18 @@ class TripOut(BaseModel):
     ontime_min:   str = ""      # AW ช้ากี่นาที (ตามชีต)
     driver:       str = ""      # S  ชื่อ พขร
     phone:        str = ""      # U  เบอร์โทร พขร
-    # เวลาจริงจากชีต (คอลัมน์ AB–AG) — ว่างแปลว่ายังไม่ถึงขั้นนั้น
+    # เวลาจริงจากชีต (คอลัมน์ AB–AG) หรือจาก TMS ถ้าชีตยังว่าง — ว่างแปลว่ายังไม่ถึงขั้นนั้น
     yard_time:    Optional[str]   = None   # AB เข้าลานจอด
     load_out:     Optional[str]   = None   # AD ออกจากโหลด
     depart_time:  Optional[str]   = None   # AE ออกจากคลัง
     arrive_time:  Optional[str]   = None   # AF เข้าปลายทาง (เวลาถึงจริง)
-    # ตำแหน่งปัจจุบัน (จาก PTGL)
+    tms_filled:   bool            = False  # True = มีเวลาบางช่องเติมมาจาก TMS
+    # ตำแหน่งปัจจุบัน (จาก eZView API หรือ PTGL)
     current_lat:  Optional[float] = None
     current_lng:  Optional[float] = None
     current_loc:  Optional[str]   = None
+    gps_time:     Optional[str]   = None   # เวลาของพิกัด "dd/mm HH:MM"
+    gps_stale:    bool            = False  # True = พิกัดเก่าเกิน GPS_STALE_MINS
     # พิกัดปลายทาง (จากชีต "ข้อมูลปลายทาง") — ใช้เปิดเส้นทางใน Google Maps
     dest_lat:     Optional[float] = None
     dest_lng:     Optional[float] = None
@@ -276,6 +307,9 @@ class SummaryResponse(BaseModel):
 
 _sheet_cache: dict[str, tuple[float, list]] = {}
 _eta_cache:   dict[str, tuple[float, int]]  = {}
+_pos_cache:   dict[str, tuple[float, dict]] = {}   # ตำแหน่งจาก eZView API
+_last_good_pos: dict[str, dict] = {}               # ตำแหน่งชุดล่าสุดที่ไม่ว่าง — กันชีต PTGL ว่างชั่วขณะ
+_pos_source = "—"                                  # "eZView API" / "ชีต PTGL" — โชว์ที่ /api/health
 
 def _drop_sheet_cache(sheet_id: str, tab: str) -> None:
     """ล้างแคชในหน่วยความจำของแท็บนั้น — ใช้หลังเขียนชีตเอง กันอ่านซ้ำเจอของเก่า"""
@@ -397,6 +431,20 @@ def _car_key(raw: str) -> str:
     return f"{prefix}{num}"
 
 
+def _plate_key(raw: str) -> str:
+    """ทะเบียนหัวลาก เหลือแต่ตัวเลข ใช้จับคู่กับ TMS ที่บางทีเขียนแค่ทะเบียน
+      'No.626(67-4709)'   → '674709'
+      '67-4709/69-4677'   → '674709'   (หัวลาก/หาง เอาเฉพาะคันแรก)
+      'PTL.411'           → ''         (ไม่มีทะเบียนในข้อความ)"""
+    s = raw or ""
+    m = re.search(r"\(([^)]*)\)", s)
+    if m:
+        s = m.group(1)
+    s = re.split(r"[/,]", s)[0]
+    m = re.search(r"\d{1,3}\s*-\s*\d{3,4}", s)
+    return re.sub(r"\D", "", m.group(0)) if m else ""
+
+
 def _parse_coords(raw: str) -> Optional[tuple[float, float]]:
     """'13.756, 100.501' → (13.756, 100.501)"""
     nums = re.findall(r"[-+]?\d+\.\d+", raw)
@@ -469,6 +517,30 @@ def _cell_dt(raw: str) -> Optional[datetime]:
         return None
 
 
+def _any_dt(raw) -> Optional[datetime]:
+    """เวลาจาก API/ชีต หลายรูปแบบ → datetime เวลาไทย (ไม่มี timezone เหมือน _thai_now)
+      '2026-09-28T10:40:12'       → เวลาไทยตามที่เขียน
+      '2026-09-28T03:40:12Z'      → บวก 7 ชม. (เป็นเวลา UTC)
+      '/Date(1790567013000)/'     → แปลงจาก epoch
+      '28/09/2026 10:40:12'       → ส่งต่อให้ _cell_dt"""
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    m = re.search(r"/Date\((\d+)", s)
+    if m:
+        return datetime.utcfromtimestamp(int(m.group(1)) / 1000) + timedelta(hours=TZ_OFFSET)
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})[T ](\d{1,2}):(\d{2})", s)
+    if m:
+        try:
+            d = datetime(*(int(x) for x in m.groups()))
+        except ValueError:
+            return None
+        if re.search(r"(Z|[+\-]00:?00)$", s):
+            d += timedelta(hours=TZ_OFFSET)
+        return d
+    return _cell_dt(s)
+
+
 def _sched_dt(due_date: Optional[str], hhmm: str) -> Optional[datetime]:
     """รวม 'วันที่ส่งมอบ' (F) กับ 'เวลาส่งมอบ' (G) เป็นกำหนดจริง"""
     if not due_date or not hhmm:
@@ -489,6 +561,17 @@ def _to_mins(t: str) -> Optional[int]:
         return None
 
 
+def _dur(m: int) -> str:
+    """1831 → '30 ชม. 31 น.'   45 → '45 น.'
+    ใช้กับทุกข้อความอธิบาย จะได้หน่วยเดียวกับคอลัมน์ "ต่าง" บนหน้าเว็บ
+    (เคยปนกัน: ข้อความเขียน "1831 นาที" แต่คอลัมน์ต่างเขียน "30 ชม. 31 น.")"""
+    m = abs(int(m))
+    if m < 60:
+        return f"{m} น."
+    h, r = divmod(m, 60)
+    return f"{h} ชม." + (f" {r} น." if r else "")
+
+
 def _thai_now() -> datetime:
     return datetime.utcnow() + timedelta(hours=TZ_OFFSET)
 
@@ -506,6 +589,18 @@ def _mins_to_hhmm(total_mins: int) -> str:
     h, m = divmod(total_mins % 1440, 60)
     return f"{h:02d}:{m:02d}"
 
+
+def _state_text(t: dict) -> str:
+    return (t["gps_status"] + " " + t["status_man"]).lower()
+
+
+def _is_cancelled(t: dict) -> bool:
+    return any(k in _state_text(t) + " " + t["customer"].lower() for k in CANCEL_KEYWORDS)
+
+
+def _is_done(t: dict) -> bool:
+    return any(k in _state_text(t) for k in DONE_KEYWORDS)
+
 # ─── ETA PROVIDERS ───────────────────────────────────────────────────────────
 
 def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
@@ -516,6 +611,19 @@ def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     dl   = radians(lng2 - lng1)
     a    = sin(dp / 2) ** 2 + cos(p1) * cos(p2) * sin(dl / 2) ** 2
     return r * 2 * atan2(sqrt(a), sqrt(1 - a))
+
+
+def _past_depot(pos: Optional[dict], depot: Optional[tuple], dest: Optional[tuple]) -> bool:
+    """รถอยู่ใกล้ลูกค้ามากกว่าคลังชัดเจน = โหลดและออกจากคลังมาแล้ว แม้ชีตยังไม่มีเวลา
+
+    เคยเจอของจริง: NO.626 อยู่พิจิตรแล้ว แต่ช่อง AB ว่าง ระบบเลยคำนวณให้วิ่งกลับคลัง
+    PTT TANK ระยอง (805 น.) + โหลด + วิ่งกลับมาอีก 805 น. → ขึ้น "ช้า 30 ชม." ผิด"""
+    if not (pos and depot and dest):
+        return False
+    to_dest    = _haversine_km(pos["lat"], pos["lng"], dest[0], dest[1])
+    to_depot   = _haversine_km(pos["lat"], pos["lng"], depot[0], depot[1])
+    depot_dest = _haversine_km(depot[0], depot[1], dest[0], dest[1])
+    return to_depot > 20 and to_dest < depot_dest * 0.5
 
 
 def _estimate_minutes(orig_lat, orig_lng, dest_lat, dest_lng) -> int:
@@ -581,7 +689,8 @@ def _get_travel_minutes(
                 "destination": {"location": {"latLng": {"latitude": dest_lat, "longitude": dest_lng}}},
                 "travelMode":  "DRIVE",
                 "routingPreference": "TRAFFIC_AWARE",
-                "departureTime": _thai_now().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                # ไม่ส่ง departureTime = Google ใช้ "ตอนนี้" เอง — เดิมส่งเวลาไทยแต่ติด Z ไว้ท้าย
+                # กลายเป็นคำนวณ traffic ของอีก 7 ชม. ข้างหน้า
             },
             headers={
                 "X-Goog-Api-Key":  api_key,
@@ -604,9 +713,10 @@ def _get_travel_minutes(
 
 # ─── DATA FETCHERS ───────────────────────────────────────────────────────────
 
-def fetch_ptgl() -> dict[str, dict]:
+def _build_pos_map(records) -> dict[str, dict]:
     """
-    คืน dict: คีย์รถ → {lat, lng, location}
+    records = [(LicenseNO, lat, lng, location, GPSDateTime, speed), ...]
+    คืน dict: คีย์รถ → {lat, lng, location, gps_dt, speed}
     ใส่ไว้ 2 คีย์ต่อคัน: แบบมีอักษรนำหน้า ('PTL456') กับแบบเลขล้วน ('456')
 
     แบบมีอักษรนำหน้าเป็นตัวหลัก — กันกรณีคนละคันเลขซ้ำกัน (PTL.456 กับ No.456)
@@ -614,26 +724,31 @@ def fetch_ptgl() -> dict[str, dict]:
     และจะใส่ให้เฉพาะเลขที่ไม่ซ้ำกับคันอื่นเท่านั้น ถ้าซ้ำจะไม่ใส่ ให้จับคู่ด้วย
     อักษรนำหน้าอย่างเดียว ดีกว่าเสี่ยงหยิบผิดคัน
     """
-    rows   = _fetch_sheet(PTGL_ID, PTGL_TAB)
     result: dict[str, dict] = {}
     by_num: dict[str, list[str]] = {}          # เลขล้วน → คีย์เต็มของทุกคันที่ใช้เลขนี้
 
-    for row in rows[1:]:
-        raw = _cell(row, PTGL_LICNO)
+    for raw, lat_raw, lng_raw, loc, dt_raw, speed_raw in records:
+        raw  = str(raw or "").strip()
         ckey = _car_key(raw)
         if not ckey:
             continue
         try:
-            lat = float(_cell(row, PTGL_LAT))
-            lng = float(_cell(row, PTGL_LNG))
-        except ValueError:
+            lat = float(str(lat_raw).strip())
+            lng = float(str(lng_raw).strip())
+        except (TypeError, ValueError):
             continue
-        if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+        if not (-90 <= lat <= 90 and -180 <= lng <= 180) or (lat == 0 and lng == 0):
             continue
+        try:
+            speed = float(str(speed_raw).strip())
+        except (TypeError, ValueError):
+            speed = None
         result[ckey] = {
             "lat":      lat,
             "lng":      lng,
-            "location": _cell(row, PTGL_LOC),
+            "location": str(loc or "").strip(),
+            "gps_dt":   _any_dt(dt_raw),
+            "speed":    speed,
         }
         by_num.setdefault(_extract_car_no(raw), []).append(ckey)
 
@@ -641,6 +756,61 @@ def fetch_ptgl() -> dict[str, dict]:
         if num and len(keys) == 1 and num not in result:
             result[num] = result[keys[0]]
     return result
+
+
+def _fetch_positions_api() -> Optional[dict[str, dict]]:
+    """ดึงตำแหน่งล่าสุดทุกคันจาก eZView API ตรง (endpoint เดียวกับสคริปต์ getAllVehicleLocations)
+    คืน None ถ้ายังไม่ได้ตั้งบัญชี หรือเรียกไม่สำเร็จและไม่มีของเก่าในแคช → ผู้เรียกถอยไปใช้ชีต PTGL"""
+    user, pw = os.environ.get("EZ_POS_USER"), os.environ.get("EZ_POS_PASS")
+    if not user or not pw or not EZ_POS_URL:
+        return None
+    hit = _pos_cache.get("all")
+    if hit and time() - hit[0] < POS_CACHE_TTL:
+        return hit[1]
+    try:
+        resp = httpx.post(EZ_POS_URL, json={}, auth=(user, pw), timeout=6)
+        resp.raise_for_status()
+        body = resp.json()
+        if body.get("A") is not True:                    # A = สำเร็จไหม, B = ข้อความ, C = รายการรถ
+            raise ValueError(f"eZView ตอบไม่สำเร็จ: {body.get('B')}")
+        vehicles = body.get("C") or []
+    except Exception:
+        return hit[1] if hit else None
+    # ฟิลด์ตามสคริปต์เดิม: A=LicenseNO D=GPSDateTime E=Lat F=Lng G=Speed M=LocalLocation
+    data = _build_pos_map(
+        (v.get("A"), v.get("E"), v.get("F"), v.get("M"), v.get("D"), v.get("G"))
+        for v in vehicles if isinstance(v, dict)
+    )
+    if not data:
+        return hit[1] if hit else None
+    _pos_cache["all"] = (time(), data)
+    return data
+
+
+def fetch_ptgl() -> dict[str, dict]:
+    """ตำแหน่งรถปัจจุบัน: ลอง eZView API ตรงก่อน ไม่ได้ค่อยอ่านชีต PTGL
+
+    ชีต PTGL ถูกสคริปต์ล้างก่อนเขียนใหม่ทุกรอบ ถ้าอ่านเจอตอนว่างพอดี จะได้ "ไม่มีรถเลย"
+    แล้วหน้าจอขึ้นไม่พบ GPS ทุกคันนานหลายนาที — จึงเก็บชุดล่าสุดที่ไม่ว่างไว้ใช้แทน"""
+    global _pos_source, _last_good_pos
+    api = _fetch_positions_api()
+    if api:
+        _pos_source = "eZView API"
+        _last_good_pos = api
+        return api
+
+    rows = _fetch_sheet(PTGL_ID, PTGL_TAB)
+    data = _build_pos_map(
+        (_cell(r, PTGL_LICNO), _cell(r, PTGL_LAT), _cell(r, PTGL_LNG),
+         _cell(r, PTGL_LOC), _cell(r, PTGL_GPSDT), _cell(r, PTGL_SPEED))
+        for r in rows[1:]
+    )
+    if data:
+        _pos_source = "ชีต PTGL"
+        _last_good_pos = data
+        return data
+    _pos_source = "ชีต PTGL (ว่าง — ใช้ชุดก่อนหน้า)"
+    return _last_good_pos
 
 
 def fetch_destinations() -> dict[str, tuple[float, float]]:
@@ -694,8 +864,140 @@ def fetch_trips(target_date: str) -> list[dict]:
             "load_out":   _cell_time(_cell(row, PLAN_LOAD_OUT)),   # AD
             "depart":     _cell_time(_cell(row, PLAN_DEPART)),     # AE ออกคลังจริง
             "arrive":     _cell_time(_cell(row, PLAN_ARRIVE)),     # AF ถึงจริง
+            "tms_filled": False,                                   # เติมจาก TMS ด้านล่าง
         })
     return trips
+
+# ─── TMS: เวลาเข้า-ออกจริง ────────────────────────────────────────────────
+
+# คำทั่วไปในชื่อลูกค้าที่ใช้แยกลูกค้าไม่ได้ — ไม่เอามาจับคู่ชื่อ
+_GENERIC_WORDS = {
+    "โรงบรรจุ", "โรงบรรจุก๊าซ", "โรงบรรจุแก๊ส", "คลังก๊าซ", "คลังแก๊ส", "สถานี", "สถานีบริการ",
+    "โรงงาน", "บริษัท", "จำกัด", "มหาชน", "สาขา", "ห้างหุ้นส่วน", "หจก",
+}
+
+
+def _norm_name(s: str) -> str:
+    return re.sub(r"[\s.\-_/(),]+", "", (s or "").lower())
+
+
+def _same_place(customer: str, wp_name: str) -> bool:
+    """ชื่อลูกค้าในแผนงาน กับชื่อจุดใน TMS เป็นที่เดียวกันไหม — สะกดไม่ตรงกันเป๊ะก็จับได้
+      'โรงบรรจุ วชิรบารมี'  กับ  'โรงบรรจุก๊าซ วชิรบารมี (สาขา 2)'  → True (คำ 'วชิรบารมี' ตรง)"""
+    c, w = _norm_name(customer), _norm_name(wp_name)
+    if not c or not w:
+        return False
+    if c in w or w in c:
+        return True
+    tokens = [t for t in re.split(r"[\s/(),.\-]+", customer or "")
+              if len(t) >= 4 and t.lower() not in _GENERIC_WORDS]
+    return any(_norm_name(t) in w for t in tokens)
+
+
+def fetch_tms(target_date: str) -> dict[str, list[dict]]:
+    """แท็บ TripDetails (สคริปต์ MLSTMS ดึงลงไว้) → {'P:<ทะเบียน>' / 'C:<เบอร์รถ>': [ทริป, ...]}
+    เอาเฉพาะทริปที่เปิดวันนั้นหรือเมื่อวาน — ทริปส่งเช้ามักเปิดตั้งแต่คืนก่อน
+    (เช่น NO.626 เข้าลานจอด 22:05 ของเมื่อวาน แล้วส่ง 10:00 วันนี้)
+    อ่านคอลัมน์ตามชื่อหัวตาราง ไม่ใช่ตำแหน่ง — สคริปต์ MLSTMS แทรกคอลัมน์ใหม่ได้โดยไม่พัง"""
+    if not TMS_SHEET_ID:
+        return {}
+    rows = _fetch_sheet(TMS_SHEET_ID, TMS_TAB)
+    if len(rows) < 2:
+        return {}
+    col = {str(h).strip(): i for i, h in enumerate(rows[0])}
+    c_lic, c_open, c_st = col.get("License No"), col.get("Trip Open DateTime"), col.get("Status Name")
+    if c_lic is None or c_open is None:
+        return {}
+
+    day  = datetime.strptime(target_date, "%Y-%m-%d").date()
+    days = {day, day - timedelta(days=1)}
+    wp_cols = []
+    for n in range(1, 21):
+        c_name = col.get(f"WP{n} Name")
+        if c_name is None:
+            break
+        wp_cols.append((n, c_name, col.get(f"WP{n} Actual Arrival"), col.get(f"WP{n} Actual Departure")))
+
+    out: dict[str, list[dict]] = {}
+    for r in rows[1:]:
+        if c_st is not None and _cell(r, c_st).lower() in ("canceled", "cancelled", "deleted"):
+            continue
+        opened = _any_dt(_cell(r, c_open))
+        if opened is None or opened.date() not in days:
+            continue
+        wps: dict[int, dict] = {}
+        for n, cn, ca, cd in wp_cols:
+            name = _cell(r, cn)
+            if not name:
+                continue
+            wps[n] = {
+                "name": name,
+                "arr":  _any_dt(_cell(r, ca)) if ca is not None else None,
+                "dep":  _any_dt(_cell(r, cd)) if cd is not None else None,
+            }
+        trip = {"open": opened, "wps": wps}
+        lic  = _cell(r, c_lic)
+        pk   = _plate_key(lic)
+        if pk:
+            out.setdefault("P:" + pk, []).append(trip)
+        # ใช้เบอร์รถเป็นคีย์ได้เฉพาะเมื่อมีอักษรนำหน้า (No./PTL.) — ถ้าเป็นทะเบียนล้วน
+        # เช่น '67-4709' _car_key จะได้ '67' ซึ่งไม่ใช่เบอร์รถ
+        if re.search(r"[A-Za-z]", re.sub(r"\(.*", "", lic)):
+            out.setdefault("C:" + _car_key(lic), []).append(trip)
+    return out
+
+
+def _enrich_from_tms(trips: list[dict], target_date: str) -> int:
+    """เติมเวลาเข้าลานจอด / ออกจากโหลด / ออกคลัง / ถึงลูกค้า จาก TMS ให้ทริปที่ชีตยังว่าง
+    ยึดค่าที่คนกรอกไว้ในชีตก่อนเสมอ — เติมเฉพาะช่องว่าง คืนจำนวนทริปที่ได้เติม
+    พังตรงไหนก็แค่ไม่เติม ไม่ทำให้หน้าจอหลักล้ม"""
+    try:
+        tms = fetch_tms(target_date)
+    except Exception:
+        return 0
+    if not tms:
+        return 0
+
+    def hm(d: Optional[datetime]) -> Optional[str]:
+        return d.strftime("%H:%M") if d else None
+
+    filled = 0
+    for t in trips:
+        cands = tms.get("P:" + _plate_key(t["plate"])) or tms.get("C:" + t["car_key"]) or []
+        if not cands:
+            continue
+        pick = None
+        # ทริปล่าสุดก่อน — หาจุดลูกค้าที่ชื่อตรงกับแผนงาน (จุดที่ 3 เป็นต้นไป)
+        for tr in sorted(cands, key=lambda x: x["open"], reverse=True):
+            cust = next((w for n, w in sorted(tr["wps"].items())
+                         if n > TMS_WP_LOAD and _same_place(t["customer"], w["name"])), None)
+            if cust:
+                pick = (tr, cust)
+                break
+        # ชื่อไม่ตรงเลย แต่รถคันนี้มีทริปเดียว → เดาจุดลูกค้าจากเลข Drop
+        if pick is None and len(cands) == 1:
+            tr = cands[0]
+            drop_no = int(_extract_car_no(t["drop"]) or 1)
+            pick = (tr, tr["wps"].get(TMS_WP_LOAD + drop_no))
+        if pick is None:
+            continue
+
+        tr, cust = pick
+        yard = tr["wps"].get(TMS_WP_YARD) or {}
+        load = tr["wps"].get(TMS_WP_LOAD) or {}
+        got  = False
+        if not t["yard_time"] and yard.get("arr"):
+            t["yard_time"] = hm(yard["arr"]); got = True
+        if not t["load_out"] and load.get("dep"):
+            t["load_out"] = hm(load["dep"]); got = True
+        if not t["depart"] and load.get("dep"):
+            t["depart"] = hm(load["dep"]); got = True
+        if not t["arrive"] and cust and cust.get("arr"):
+            t["arrive"], t["arrive_dt"] = hm(cust["arr"]), cust["arr"]; got = True
+        if got:
+            t["tms_filled"] = True
+            filled += 1
+    return filled
 
 def _prefetch_routes(trips, api_budget, ptgl_map, dest_map, is_today) -> None:
     """ยิง API เส้นทางของทุกทริปที่ได้สิทธิ์ "พร้อมกัน" แล้วเก็บผลไว้ใน _eta_cache
@@ -714,8 +1016,7 @@ def _prefetch_routes(trips, api_budget, ptgl_map, dest_map, is_today) -> None:
     for t in trips:
         if t["id"] not in api_budget:
             continue
-        state_tx = (t["gps_status"] + " " + t["status_man"]).lower()
-        if t["arrive"] or any(k in state_tx for k in CANCEL_KEYWORDS + DONE_KEYWORDS):
+        if t["arrive"] or _is_cancelled(t) or _is_done(t):
             continue
 
         pos        = ptgl_map.get(t["car_key"])
@@ -728,7 +1029,7 @@ def _prefetch_routes(trips, api_budget, ptgl_map, dest_map, is_today) -> None:
             if key not in _eta_cache:
                 jobs[key] = (a_lat, a_lng, b_lat, b_lng)
 
-        if not t["yard_time"] and pos and depot and dest_coord:
+        if not t["yard_time"] and pos and depot and dest_coord and not _past_depot(pos, depot, dest_coord):
             add(pos["lat"], pos["lng"], depot[0], depot[1])          # รถ → คลัง
             add(depot[0], depot[1], dest_coord[0], dest_coord[1])    # คลัง → ปลายทาง
         elif origin and dest_coord:
@@ -770,6 +1071,9 @@ def get_trips(
     except Exception as e:
         raise HTTPException(502, f"ดึงข้อมูล Google Sheet ไม่ได้: {type(e).__name__}: {e}")
 
+    # เติมเวลาเข้า-ออกจริงจาก TMS ให้ช่องที่ชีตยังว่าง (ต้องทำก่อนเลือกทริปที่ต้องคำนวณ ETA)
+    _enrich_from_tms(trips, target)
+
     # ETA มีความหมายเฉพาะทริปของ "วันนี้" เท่านั้น
     # (พิกัดรถใน PTGL เป็นตำแหน่งปัจจุบัน เอาไปเทียบวันอื่นไม่ได้)
     is_today = target == _today_thai()
@@ -779,9 +1083,7 @@ def get_trips(
     pending_ids = [
         t["id"] for t in sorted(
             (t for t in trips
-             if not any(k in (t["gps_status"] + " " + t["status_man"]).lower()
-                        for k in CANCEL_KEYWORDS + DONE_KEYWORDS)
-             and not t["arrive"]),
+             if not _is_cancelled(t) and not _is_done(t) and not t["arrive"]),
             key=lambda t: _to_mins(t["sched_time"]) or 9999,
         )
     ]
@@ -804,6 +1106,16 @@ def get_trips(
             return e.strftime("%H:%M"), d
         pos         = ptgl_map.get(t["car_key"])
         dest_coord  = dest_map.get(t["customer"])
+        depot       = DEPOTS.get(t["source"])
+
+        # พิกัดเก่าเกินไป (สคริปต์/API ค้าง) — ยังโชว์ได้ แต่ไม่เอาไปตัดสินว่าถึงปลายทาง
+        gps_dt   = pos.get("gps_dt") if pos else None
+        stale    = bool(gps_dt and now_dt - gps_dt > timedelta(minutes=GPS_STALE_MINS))
+        past_dep = _past_depot(pos, depot, dest_coord)
+        near_km  = (_haversine_km(pos["lat"], pos["lng"], dest_coord[0], dest_coord[1])
+                    if pos and dest_coord else None)
+        at_depot = bool(pos and depot and
+                        _haversine_km(pos["lat"], pos["lng"], depot[0], depot[1]) <= NEAR_DEST_KM)
 
         travel_mins   = None
         eta_time_str  = None
@@ -813,33 +1125,32 @@ def get_trips(
 
         # ถ้าไม่พบใน PTGL ให้ลองใช้พิกัดคลังต้นทางแทน (รถยังอยู่คลัง)
         origin = pos or (
-            {"lat": DEPOTS[t["source"]][0], "lng": DEPOTS[t["source"]][1], "location": t["source"]}
-            if t["source"] in DEPOTS else None
+            {"lat": depot[0], "lng": depot[1], "location": t["source"]} if depot else None
         )
 
         actual   = False
-        state_tx = (t["gps_status"] + " " + t["status_man"]).lower()
-        done     = any(k in state_tx for k in DONE_KEYWORDS)
+        done     = _is_done(t)
 
-        if any(k in state_tx for k in CANCEL_KEYWORDS):
-            # ─ ยกเลิก/โหลดเก็บ → ไม่นับเป็นงานค้าง ─
+        if _is_cancelled(t):
+            # ─ ยกเลิก/โหลดเก็บ → ไม่นับเป็นงานค้าง (เช็กช่องลูกค้าด้วย) ─
             status     = "cancelled"
-            prediction = t["status_man"] or t["gps_status"] or "ยกเลิก"
+            prediction = t["status_man"] or t["gps_status"] or t["customer"] or "ยกเลิก"
 
         elif t["arrive"]:
-            # ─ มีเวลาเข้าปลายทางจริง → วัดช้า/เร็วจากของจริง ไม่ใช่ประมาณการ ─
+            # ─ มีเวลาเข้าปลายทางจริง (จากชีต หรือ TMS) → วัดช้า/เร็วจากของจริง ─
             status     = "arrived"
             actual     = True
+            src        = " (เวลาจาก TMS)" if t["tms_filled"] else ""
             if t["arrive_dt"] is not None and sched_dt is not None:
                 diff_min = int((t["arrive_dt"] - sched_dt).total_seconds() // 60)
                 if diff_min > 15:
-                    prediction = f"ถึง {t['arrive']} — ช้ากว่ากำหนด {diff_min} นาที"
+                    prediction = f"ถึง {t['arrive']} — ช้ากว่ากำหนด {_dur(diff_min)}{src}"
                 elif diff_min < -10:
-                    prediction = f"ถึง {t['arrive']} — เร็วกว่ากำหนด {abs(diff_min)} นาที ✓"
+                    prediction = f"ถึง {t['arrive']} — เร็วกว่ากำหนด {_dur(diff_min)} ✓{src}"
                 else:
-                    prediction = f"ถึง {t['arrive']} — ตรงเวลา ✓"
+                    prediction = f"ถึง {t['arrive']} — ตรงเวลา ✓{src}"
             else:
-                prediction = f"ถึงปลายทางแล้ว ({t['arrive']})"
+                prediction = f"ถึงปลายทางแล้ว ({t['arrive']}){src}"
 
         elif done:
             # ─ ชีตบอกว่าส่งเสร็จ แต่ไม่มีเวลาเข้าปลายทาง ─
@@ -851,10 +1162,17 @@ def get_trips(
             status     = "pending"
             prediction = t["gps_status"] or "ไม่มีข้อมูลสถานะ"
 
-        elif not t["yard_time"] and pos and t["source"] in DEPOTS and dest_coord:
-            # ─ ช่วงที่ 1: ยังไม่เข้าลานจอด (AB ว่าง)
+        elif (near_km is not None and near_km <= NEAR_DEST_KM and not stale and not at_depot
+              and (t["yard_time"] or t["load_out"] or t["depart"]
+                   or (sched_dt is not None and now_dt >= sched_dt - timedelta(hours=3)))):
+            # ─ GPS บอกว่ารถอยู่ที่ลูกค้าแล้ว แต่ยังไม่มีเวลาถึงจริง → ถือว่าถึง ─
+            # (ต้องโหลดมาแล้ว หรือใกล้เวลาส่ง กันกรณีรถจอดพักใกล้ลูกค้าก่อนไปโหลด)
+            status     = "arrived"
+            prediction = f"ถึงปลายทางแล้วตาม GPS (ห่างลูกค้า {near_km:.1f} กม.) — รอเวลาถึงจริงจาก TMS"
+
+        elif not t["yard_time"] and pos and depot and dest_coord and not past_dep:
+            # ─ ช่วงที่ 1: ยังไม่เข้าลานจอด (AB ว่าง) และรถยังไม่ได้ผ่านคลังมาแล้ว
             #   คำนวณเส้นทางเต็ม: รถอยู่ตรงไหน → คลังต้นทาง → ปลายทาง ─
-            depot = DEPOTS[t["source"]]
             to_depot = _get_travel_minutes(pos["lat"], pos["lng"], depot[0], depot[1], use_api)
             to_dest  = _get_travel_minutes(depot[0], depot[1],
                                            dest_coord[0], dest_coord[1], use_api)
@@ -865,14 +1183,14 @@ def get_trips(
                 eta_time_str, diff_min = eta_of(travel_mins)
                 depot_eta    = eta_of(to_depot)[0]
                 route        = (f"ถึงคลัง {t['source']} ~{depot_eta} "
-                                f"(ลานจอด {yard_m} + โหลด {load_m} น.) "
-                                f"แล้ววิ่งต่ออีก {to_dest} น.")
+                                f"(ลานจอด {_dur(yard_m)} + โหลด {_dur(load_m)}) "
+                                f"แล้ววิ่งต่ออีก {_dur(to_dest)}")
                 if diff_min > 15:
                     status     = "late"
-                    prediction = f"⚠ คาดว่าจะช้า {diff_min} นาที — {route}"
+                    prediction = f"⚠ คาดว่าจะช้า {_dur(diff_min)} — {route}"
                 elif diff_min < -10:
                     status     = "early"
-                    prediction = f"จะถึงเร็วกว่ากำหนด {abs(diff_min)} นาที ✓ — {route}"
+                    prediction = f"จะถึงเร็วกว่ากำหนด {_dur(diff_min)} ✓ — {route}"
                 else:
                     status     = "transit"
                     prediction = f"น่าจะถึงตรงเวลา — {route}"
@@ -881,14 +1199,15 @@ def get_trips(
                 prediction = f"ยังไม่เข้าคลัง {t['source']}"
 
         elif origin and dest_coord:
-            # ─ ช่วงที่ 2: อยู่คลังแล้วหรือออกเดินทางแล้ว → ETA ถึง "ปลายทาง" ─
+            # ─ ช่วงที่ 2: อยู่คลังแล้ว / ออกเดินทางแล้ว / รถผ่านคลังมาแล้ว → ETA ถึง "ปลายทาง" ─
             travel = _get_travel_minutes(
                 origin["lat"], origin["lng"],
                 dest_coord[0], dest_coord[1],
                 use_api,
             )
             # ยังโหลดไม่เสร็จ (AD ว่าง) → บวกเวลาที่ต้องใช้ในคลังเข้าไปด้วย
-            if travel is not None and not t["load_out"]:
+            # ยกเว้นรถอยู่ใกล้ลูกค้ามากกว่าคลังชัดเจน = โหลดมาแล้ว แค่ชีตยังไม่มีเวลา
+            if travel is not None and not t["load_out"] and not past_dep:
                 yard_m, load_m = _depot_minutes(t["source"], _vehicle_type(t["vtype"]))
                 travel += load_m if t["yard_time"] else yard_m + load_m
 
@@ -898,13 +1217,13 @@ def get_trips(
 
                 if diff_min < -10:
                     status     = "early"
-                    prediction = f"จะถึงเร็วกว่ากำหนด {abs(diff_min)} นาที ✓"
+                    prediction = f"จะถึงเร็วกว่ากำหนด {_dur(diff_min)} ✓"
                 elif diff_min <= 15:
                     status     = "transit"
-                    prediction = f"น่าจะถึงตรงเวลา (ห่างอีก {travel} นาที)"
+                    prediction = f"น่าจะถึงตรงเวลา (ห่างอีก {_dur(travel)})"
                 else:
                     status     = "late"
-                    prediction = f"⚠ คาดว่าจะช้า {diff_min} นาที"
+                    prediction = f"⚠ คาดว่าจะช้า {_dur(diff_min)}"
             else:
                 status     = "transit"
                 prediction = f"กำลังเดินทาง (ยังไม่มี ETA)"
@@ -920,12 +1239,16 @@ def get_trips(
 
         # ─ ยังไม่ออกจากคลัง และเลยเวลาโทรตาม พขร แล้ว → เตือนให้โทร ─
         # เทียบวันที่ด้วย เพราะเวลานัดโทรอาจเป็นของเมื่อวาน เช่น "19/08/2026, 22:00"
+        # ข้อความขึ้นต้นด้วย 📞 เสมอ — หน้าเว็บใช้ตัวนี้เช็กว่า "ต้องไล่ชั่วโมงนี้"
         if (status not in ("arrived", "cancelled") and not t["depart"]
                 and t["call_dt"] is not None and now_dt >= t["call_dt"]):
             late_call = int((now_dt - t["call_dt"]).total_seconds() // 60)
-            prediction = (f"📞 ถึงเวลาโทรตาม พขร (นัดไว้ {t['call_time']}"
-                          + (f", เลยมา {late_call // 60} ชม." if late_call >= 60 else "")
-                          + ") — ") + prediction
+            prediction = (f"📞 ยังไม่ออกจากคลัง — ถึงเวลาโทรตาม พขร (นัดไว้ {t['call_time']}"
+                          + (f", เลยมา {_dur(late_call)}" if late_call >= 60 else "")
+                          + ") · ") + prediction
+
+        if stale and gps_dt is not None and status not in ("cancelled",):
+            prediction += f" · ⚠ GPS ไม่อัปเดต (ล่าสุด {gps_dt:%H:%M})"
 
         results.append(TripOut(
             id           = t["id"],
@@ -948,9 +1271,12 @@ def get_trips(
             load_out     = t["load_out"],
             depart_time  = t["depart"],
             arrive_time  = t["arrive"],
+            tms_filled   = t["tms_filled"],
             current_lat  = pos["lat"]      if pos else None,
             current_lng  = pos["lng"]      if pos else None,
             current_loc  = pos["location"] if pos else None,
+            gps_time     = gps_dt.strftime("%d/%m %H:%M") if gps_dt else None,
+            gps_stale    = stale,
             dest_lat     = dest_coord[0] if dest_coord else None,
             dest_lng     = dest_coord[1] if dest_coord else None,
             travel_mins  = travel_mins,
@@ -989,17 +1315,17 @@ def get_trips(
             cur.travel_mins = total
             cur.eta_time    = e.strftime("%H:%M")
             note = (f"ต่อจาก Drop {trips[prev_i]['drop']} "
-                    f"(ถึง ~{prev.eta_time} + ลงของ {UNLOAD_MINS} น. + วิ่ง {leg} น.)")
+                    f"(ถึง ~{prev.eta_time} + ลงของ {_dur(UNLOAD_MINS)} + วิ่ง {_dur(leg)})")
             if sd is None:
                 cur.prediction = note
                 continue
             cur.diff_minutes = int((e - sd).total_seconds() // 60)
             if cur.diff_minutes > 15:
                 cur.status     = "late"
-                cur.prediction = f"⚠ คาดว่าจะช้า {cur.diff_minutes} นาที — {note}"
+                cur.prediction = f"⚠ คาดว่าจะช้า {_dur(cur.diff_minutes)} — {note}"
             elif cur.diff_minutes < -10:
                 cur.status     = "early"
-                cur.prediction = f"จะถึงเร็วกว่ากำหนด {abs(cur.diff_minutes)} นาที ✓ — {note}"
+                cur.prediction = f"จะถึงเร็วกว่ากำหนด {_dur(cur.diff_minutes)} ✓ — {note}"
             else:
                 cur.status     = "transit"
                 cur.prediction = f"น่าจะถึงตรงเวลา — {note}"
@@ -1028,6 +1354,9 @@ def health():
     return {
         "status": "ok",
         "time_thai": _thai_now().strftime("%Y-%m-%d %H:%M:%S"),
+        "position_source": _pos_source,
+        "has_EZ_POS_USER": bool(os.environ.get("EZ_POS_USER")),
+        "has_TMS_SHEET_ID": bool(TMS_SHEET_ID),
         "sheet_cache_keys": list(_sheet_cache.keys()),
         "eta_cache_size":   len(_eta_cache),
     }
@@ -1042,8 +1371,17 @@ def debug():
     env = os.environ.get("GOOGLE_CREDENTIALS")
     out["has_GOOGLE_CREDENTIALS"]  = bool(env)
     out["has_GOOGLE_ROUTES_KEY"]   = bool(os.environ.get("GOOGLE_ROUTES_KEY"))
+    out["has_EZ_POS_USER"]         = bool(os.environ.get("EZ_POS_USER"))
+    out["has_TMS_SHEET_ID"]        = bool(TMS_SHEET_ID)
 
-    # 2. credentials parse
+    # 2. eZView API ตำแหน่ง (ไม่โชว์รหัสผ่าน โชว์แค่ผล)
+    if os.environ.get("EZ_POS_USER"):
+        _pos_cache.pop("all", None)
+        api = _fetch_positions_api()
+        out["ezview_pos_ok"]   = api is not None
+        out["ezview_pos_cars"] = len({id(v) for v in (api or {}).values()})
+
+    # 3. credentials parse
     try:
         creds = _build_creds()
         out["service_account_email"] = getattr(creds, "service_account_email", "?")
@@ -1051,13 +1389,16 @@ def debug():
         out["creds_error"] = f"{type(e).__name__}: {e}"
         return out
 
-    # 3. เปิดแต่ละ Sheet / แต่ละแท็บ
-    for label, sid, tab in (
+    # 4. เปิดแต่ละ Sheet / แต่ละแท็บ
+    sheets = [
         ("PTGL",   PTGL_ID, PTGL_TAB),
         ("SOURCE", SOURCE_ID, PLAN_TAB),   # ไฟล์ต้นทางจริง — รายการทริป
         ("DEST",   DEST_ID, DEST_TAB),     # พิกัดปลายทาง (ไฟล์เดียวกับ SOURCE)
         ("PLAN",   PLAN_ID, PLAN_TAB),     # Test Report Ontime PTGLG — ไทม์ไลน์/ChaseLog เท่านั้น
-    ):
+    ]
+    if TMS_SHEET_ID:
+        sheets.append(("TMS", TMS_SHEET_ID, TMS_TAB))   # เวลาเข้า-ออกจริงจาก MLSTMS
+    for label, sid, tab in sheets:
         try:
             gc = gspread.authorize(creds)
             sh = gc.open_by_key(sid)
@@ -1444,11 +1785,12 @@ def timeline(
 
 @app.get("/api/match")
 def match(date_str: str = Query(None, alias="date")):
-    """เช็คว่าเบอร์รถ / ชื่อปลายทาง จับคู่กันได้กี่รายการ"""
+    """เช็คว่าเบอร์รถ / ชื่อปลายทาง / ทริป TMS จับคู่กันได้กี่รายการ"""
     target   = date_str or _today_thai()
     ptgl_map = fetch_ptgl()
     dest_map = fetch_destinations()
     trips    = fetch_trips(target)
+    tms_n    = _enrich_from_tms(trips, target)
 
     car_hit  = [t["car_no"]   for t in trips if t["car_key"] in ptgl_map]
     car_miss = [t["car_no"]   for t in trips if t["car_key"] not in ptgl_map]
@@ -1458,10 +1800,14 @@ def match(date_str: str = Query(None, alias="date")):
     return {
         "date":            target,
         "trips":           len(trips),
+        "position_source": _pos_source,
         "car_matched":     len(car_hit),
         "car_unmatched":   sorted(set(car_miss))[:20],
         "dest_matched":    len(dst_hit),
         "dest_unmatched":  sorted(set(dst_miss))[:20],
+        "tms_filled":      tms_n,
+        "tms_not_filled":  sorted({t["car_no"] for t in trips
+                                   if not t["tms_filled"] and not t["arrive"]})[:20],
         "ptgl_keys_sample":  sorted(ptgl_map.keys())[:20],
         "dest_names_sample": sorted(dest_map.keys())[:20],
     }
@@ -1505,7 +1851,10 @@ def logout():
 
 @app.get("/settings", response_class=HTMLResponse, include_in_schema=False)
 def settings_page():
-    return SETTINGS_HTML.replace("__PWSET__", "ตั้งแล้ว ✓" if _app_password() else "ยังไม่ได้ตั้ง")
+    return (SETTINGS_HTML
+            .replace("__PWSET__", "ตั้งแล้ว ✓" if _app_password() else "ยังไม่ได้ตั้ง")
+            .replace("__POSSRC__", "eZView API (ดึงตรง)" if os.environ.get("EZ_POS_USER") and EZ_POS_URL else "ชีต PTGL")
+            .replace("__TMSSRC__", "เปิด (แท็บ TripDetails)" if TMS_SHEET_ID else "ปิด — ยังไม่ได้ตั้ง TMS_SHEET_ID"))
 
 
 LOGIN_HTML = """<!doctype html>
@@ -1621,12 +1970,14 @@ SETTINGS_HTML = """<!doctype html>
   <section>
     <h2>ระบบ</h2>
     <div class="row"><span>รหัสผ่านเข้าระบบ</span><b>__PWSET__</b></div>
+    <div class="row"><span>แหล่งข้อมูลตำแหน่งรถ</span><b>__POSSRC__</b></div>
+    <div class="row"><span>เวลาเข้า-ออกจริงจาก TMS</span><b>__TMSSRC__</b></div>
     <div class="row"><span>แหล่งข้อมูล ETA</span><b>OpenRouteService</b></div>
     <div class="row"><span>เวลาโหลดที่คลัง</span><b>ตามตารางมาตรฐาน</b></div>
     <div class="row"><span>อายุการล็อกอิน</span><b>12 ชั่วโมง</b></div>
     <p style="color:var(--mut);font-size:13px;margin:14px 0 0">
       ค่าเหล่านี้แก้ที่ Vercel → Settings → Environment Variables
-      (APP_PASSWORD, ORS_KEY) หรือในไฟล์ main.py
+      (APP_PASSWORD, ORS_KEY, EZ_POS_USER, EZ_POS_PASS, TMS_SHEET_ID) หรือในไฟล์ main.py
     </p>
   </section>
 
@@ -1740,6 +2091,11 @@ DASHBOARD_HTML = """<!doctype html>
      border:1px solid var(--tr);color:var(--tr);text-decoration:none;
      font-size:11px;white-space:nowrap}
   .routebtn:hover{background:var(--tr);color:#fff}
+  /* พิกัดเก่าเกินกำหนด — บอกให้รู้ว่าตำแหน่งนี้ไม่ใช่ตอนนี้ */
+  .stale{display:inline-block;margin-left:6px;padding:1px 7px;border-radius:999px;
+     background:var(--late-bg);color:var(--late);font-size:11px;font-weight:600;white-space:nowrap}
+  .tms{display:inline-block;margin-left:6px;padding:0 6px;border-radius:999px;
+     border:1px solid var(--line);color:var(--mut);font-size:10.5px;font-weight:600;vertical-align:1px}
   td.cust{max-width:200px;font-weight:500;white-space:normal;overflow:visible;text-overflow:clip;
           word-break:break-word;line-height:1.2}
   tbody tr:nth-child(even){background:var(--pd-bg)}
@@ -2042,7 +2398,8 @@ function etaDayLabel(t){                 // 1 → " (13/09)"   0 → ""
 }
 
 function eta(t){                      // ถึงจริงแล้วโชว์เวลาจริง ไม่งั้นโชว์ประมาณการ
-  if(t.arrive_time) return '<b style="color:var(--ok)">'+esc(t.arrive_time)+'</b>';
+  if(t.arrive_time) return '<b style="color:var(--ok)">'+esc(t.arrive_time)+'</b>'
+    + (t.tms_filled ? '<span class="tms" title="เวลาถึงจริงจาก TMS (ชีตยังไม่ได้กรอก)">TMS</span>' : '');
   if(t.eta_time)    return '~'+esc(t.eta_time)+etaDayLabel(t);
   return '<span class="mut">—</span>';
 }
@@ -2055,7 +2412,7 @@ function eta(t){                      // ถึงจริงแล้วโช
 function why(t){
   const p = String(t.prediction || '').trim();
   if(!p) return '';
-  const odd = t.status === 'late' || t.status === 'pending' || /^[⚠📞]/.test(p);
+  const odd = t.status === 'late' || t.status === 'pending' || /^[⚠📞]/.test(p) || t.gps_stale;
   return odd ? '<div class="why">' + esc(p) + '</div>' : '';
 }
 
@@ -2075,6 +2432,8 @@ function loc(t){
   const url  = 'https://www.google.com/maps?q=' + t.current_lat + ',' + t.current_lng;
   const text = t.current_loc || (t.current_lat.toFixed(5) + ', ' + t.current_lng.toFixed(5));
   let out = '<a href="'+url+'" target="_blank" rel="noopener" style="color:var(--tr)">📍 '+esc(text)+'</a>';
+  // พิกัดเก่าเกินกำหนด (สคริปต์/API ค้าง) — บอกเวลาล่าสุด ไม่ให้เข้าใจผิดว่าเป็นตำแหน่งตอนนี้
+  if(t.gps_stale) out += '<span class="stale" title="เวลาของพิกัดนี้">⚠ GPS ล่าสุด '+esc(t.gps_time||'')+'</span>';
   // ปุ่มดูเส้นทาง: ตำแหน่งรถตอนนี้ → ปลายทาง เปิดใน Google Maps (มีเส้นทาง+ระยะเวลาจริง)
   // ต้องมีพิกัดปลายทางในชีต "ข้อมูลปลายทาง" ถึงจะขึ้นปุ่มนี้
   if(t.dest_lat != null && t.dest_lng != null){
@@ -2333,7 +2692,7 @@ function render(){
     const diff = diffText(t);
     const badge = '<span class="badge s-'+esc(t.status)+'">'
                 + (LABEL[t.status]||esc(t.status))+'</span>'
-                + (call ? '<span class="callnow">📞 ถึงเวลาโทร</span>' : '');
+                + (call ? '<span class="callnow">📞 ยังไม่ออกคลัง · โทรตาม</span>' : '');
     return '<tr class="'+(isChaseDone(k)?'done':'')+'">'
       + '<td data-l="ประจำวันที่" class="mono mut">'+esc(t.date)+'</td>'
       + '<td data-l="คลังต้นทาง">'+esc(t.source)+'</td>'
