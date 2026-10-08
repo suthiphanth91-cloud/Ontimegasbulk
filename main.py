@@ -2085,6 +2085,18 @@ def _row_is_dark(ws, row: int):
         return None
 
 
+def _insert_blank_rows(ws, row: int, n: int) -> None:
+    """แทรกแถวว่าง n แถวที่ตำแหน่ง row โดยสั่ง insertDimension ตรงๆ (inheritFromBefore = รับรูปแบบจากแถวบน)
+    ไม่ใช้ Worksheet.insert_rows เพราะมันตามด้วย values.append ซึ่งตำแหน่งที่ Google ลงขึ้นกับการค้นหา "ตาราง" เดาไม่ได้"""
+    ws.spreadsheet.batch_update({"requests": [{"insertDimension": {
+        "range": {"sheetId": ws.id, "dimension": "ROWS", "startIndex": row - 1, "endIndex": row - 1 + n},
+        "inheritFromBefore": True}}]})
+    try:                                                      # ให้ ws.row_count ตรงกับของจริงหลังแทรก
+        ws._properties["gridProperties"]["rowCount"] += n
+    except Exception:
+        pass
+
+
 def _copy_down(ws, src_row: int, first: int, last: int) -> None:
     """แถวที่แทรกใหม่ (first..last) คัดลอกสูตรของคอลัมน์ที่เป็นสูตรในแถวต้นแบบ (src_row) และดรอปลิสต์ทั้งแถว
     ทำเต็มที่ ถ้า Google ไม่ยอมก็ข้าม ไม่กระทบการเขียนค่า"""
@@ -2165,7 +2177,7 @@ async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = 
             start = f
             if n_new > old:                                   # แถวใหม่มากกว่าเดิม → แทรกเพิ่มท้ายบล็อก (ก่อนแถวสีดำ)
                 inserted = n_new - old
-                ws.insert_rows([[""] * PLAN_LAST_COL] * inserted, row=l + 1, inherit_from_before=True)
+                _insert_blank_rows(ws, l + 1, inserted)
                 _copy_down(ws, l, l + 1, l + inserted)
             elif n_new < old:                                 # น้อยกว่าเดิม → ลบส่วนเกินท้ายบล็อก
                 removed = old - n_new
