@@ -1858,9 +1858,10 @@ def plan_rows(date_str: str = Query(None, alias="date"), fresh: int = Query(0)):
         _drop_sheet_cache(SOURCE_ID, PLAN_TAB)
     try:
         rows = _fetch_sheet(SOURCE_ID, PLAN_TAB)
-    except Exception:
+    except Exception as e:
         if not old:
-            raise
+            # บอกสาเหตุให้อ่านออก แทน 500 เปล่าๆ (ข้อความ error ของ gspread/creds ไม่มีรหัสลับ)
+            raise HTTPException(status_code=502, detail=f"อ่านชีตแผนงานไม่ได้ — {type(e).__name__}: {e}")
         _sheet_cache[key] = old          # อ่านสดไม่ได้ (เช่น quota เต็ม) — ใช้ของเดิมแทนหน้าจอว่าง
         rows = old[1]
     read_ts = _sheet_cache.get(key, (time(), None))[0]
@@ -2265,7 +2266,11 @@ async function load(fresh){
   try{
     const r = await fetch('/api/plan?date=' + encodeURIComponent(date) + (fresh ? '&fresh=1' : ''));
     if(r.status === 401){ location.href = '/login'; return; }
-    if(!r.ok) throw new Error('HTTP ' + r.status);
+    if(!r.ok){
+      let why = '';
+      try{ why = (await r.json()).detail || ''; }catch(x){}
+      throw new Error(why || ('HTTP ' + r.status));
+    }
     DATA = await r.json();
   }catch(e){
     err.textContent = 'โหลดแผนงานไม่สำเร็จ: ' + e.message; err.hidden = false; return;
