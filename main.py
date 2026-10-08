@@ -1903,16 +1903,20 @@ _IMP_DATE_COLS = (2, 5)         # C ประจำวันที่, F วั�
 _IMP_STAMP_COLS = (23, 24, 25)  # X, Y, Z เวลาแผน (P) → dd/mm/yyyy HH:MM:SS
 
 
-def _xl_cell(v, idx: int) -> str:
-    """ค่าจาก Excel → ข้อความรูปแบบเดียวกับที่ชีตแสดง (Google Sheets แปลงกลับเป็นวัน/เวลาเองตอนเขียน)"""
+def _xl_cell(v, idx: int, iso: bool = False) -> str:
+    """ค่าจาก Excel → ข้อความ
+    iso=False: รูปแบบที่คนอ่าน (dd/mm/yyyy) ใช้โชว์ตัวอย่าง
+    iso=True : รูปแบบ yyyy-mm-dd ใช้เขียนลงชีต — Google Sheets แปลงเป็นวันที่ได้ถูกต้องทุกภาษา/โลแคล
+               (ถ้าเขียน 05/10/2026 ชีตที่ตั้งเป็นแบบสหรัฐจะอ่านเป็น 10 พ.ค. แทน 5 ต.ค.)"""
     if v is None:
         return ""
     if isinstance(v, datetime):
+        d_fmt = "%Y-%m-%d" if iso else "%d/%m/%Y"
         if idx in _IMP_DATE_COLS:
-            return v.strftime("%d/%m/%Y")
+            return v.strftime(d_fmt)
         if idx in _IMP_STAMP_COLS or v.hour or v.minute or v.second:
-            return v.strftime("%d/%m/%Y %H:%M:%S")
-        return v.strftime("%d/%m/%Y")
+            return v.strftime(d_fmt + " %H:%M:%S")
+        return v.strftime(d_fmt)
     if hasattr(v, "hour") and hasattr(v, "minute") and not hasattr(v, "year"):   # datetime.time
         return v.strftime("%H:%M:%S")
     if isinstance(v, bool):
@@ -1921,6 +1925,14 @@ def _xl_cell(v, idx: int) -> str:
         return str(int(v)) if v.is_integer() else str(round(v, 4))
     s = str(v).replace("\n", " ").strip()
     return "" if s.startswith("#") else s     # #VALUE! / #N/A จากสูตร = ถือว่าว่าง
+
+
+def _sheet_safe(s: str) -> str:
+    """กันสูตรแฝงในไฟล์ที่อัปโหลด: เขียนด้วย USER_ENTERED ข้อความที่ขึ้นต้นด้วย = + - @ จะถูกชีตตีความเป็นสูตร
+    (เช่น หมายเหตุ "=IMPORTXML(...)") จึงนำหน้าด้วย ' ให้เป็นข้อความธรรมดา ยกเว้นตัวเลขจริง"""
+    if s[:1] in ("=", "+", "@") or (s[:1] == "-" and not re.fullmatch(r"-?[0-9][0-9,]*(\.[0-9]+)?", s)):
+        return "'" + s
+    return s
 
 
 def _parse_dispatch_xlsx(data: bytes) -> dict:
@@ -1943,7 +1955,7 @@ def _parse_dispatch_xlsx(data: bytes) -> dict:
     headers = [str(c or "").replace("\n", " ").strip()
                for c in (grid[hdr] + [None] * 40)[IMPORT_COL_FIRST:IMPORT_COL_FIRST + PLAN_LAST_COL]]
 
-    rows, warnings, seen = [], [], {}
+    rows, sheet_rows, warnings, seen = [], [], [], {}
     uncomputed = 0
     for n, r in enumerate(grid[hdr + 1:], start=hdr + 2):        # n = เลขแถวใน Excel
         cells = (list(r) + [None] * 40)[IMPORT_COL_FIRST:IMPORT_COL_FIRST + PLAN_LAST_COL]
@@ -1953,6 +1965,7 @@ def _parse_dispatch_xlsx(data: bytes) -> dict:
                 uncomputed += 1        # มีข้อมูลแต่สูตรไม่มีค่า (ไฟล์ไม่เคยถูกคำนวณ/บันทึกใน Excel)
             continue
         rows.append(out)
+        sheet_rows.append([_sheet_safe(_xl_cell(v, i, iso=True)) for i, v in enumerate(cells)])
         tag = f"แถว {n} ใน Excel"
         if not out[15]:
             warnings.append(f"{tag}: ยังไม่ใส่เบอร์รถ")
@@ -1967,6 +1980,9 @@ def _parse_dispatch_xlsx(data: bytes) -> dict:
         if key in seen:
             warnings.append(f"{tag}: เลข JOB + Drop ซ้ำกับแถว {seen[key]}")
         seen[key] = n
+    no_load = sum(1 for r in rows if not r[24])
+    if no_load:
+        warnings.append(f"{no_load} แถวยังไม่ใส่เวลาเข้าโหลด (P) — เวลาออกจากฟรีต/เวลาโทรตาม พขร ของแถวนั้นจะว่างด้วย")
     if uncomputed:
         warnings.append(f"มี {uncomputed} แถวที่มีข้อมูลแต่ช่องเลข JOB ว่าง — ถ้าไฟล์เพิ่งแก้ ให้เปิดแล้วกดบันทึกใน Excel ก่อนอัปโหลดใหม่")
 
@@ -1978,8 +1994,8 @@ def _parse_dispatch_xlsx(data: bytes) -> dict:
     date_iso = max(counts, key=counts.get) if counts else None
     if len(counts) > 1:
         warnings.append("ไฟล์มีหลายวันที่ในคอลัมน์ ประจำวันที่: " + ", ".join(sorted(counts)))
-    return {"date": date_iso, "headers": headers, "rows": rows, "warnings": warnings[:40],
-            "warnings_total": len(warnings)}
+    return {"date": date_iso, "headers": headers, "rows": rows, "sheet_rows": sheet_rows,
+            "warnings": warnings[:40], "warnings_total": len(warnings)}
 
 
 def _import_block_reason() -> str:
@@ -1997,6 +2013,7 @@ async def plan_import(file: UploadFile = File(...), commit: int = Form(0), repla
     if len(data) > IMPORT_MAX_BYTES:
         raise HTTPException(status_code=413, detail="ไฟล์ใหญ่เกิน 4MB")
     parsed = _parse_dispatch_xlsx(data)
+    sheet_rows = parsed.pop("sheet_rows")        # ฉบับ ISO สำหรับเขียนลงชีต ไม่ส่งกลับไปหน้าเว็บ
     block = _import_block_reason()
     info = {**parsed, "total": len(parsed["rows"]), "can_commit": not block, "block_reason": block,
             "target": "ชีตทดลอง" if PLAN_PAGE_ID != SOURCE_ID else "ชีตจริง", "existing": None}
@@ -2037,10 +2054,10 @@ async def plan_import(file: UploadFile = File(...), commit: int = Form(0), repla
             col_c = ws.col_values(PLAN_DATE + 1)
         last = max([i + 1 for i, v in enumerate(col_c) if str(v).strip()] + [head + 1])
         start = last + 1
-        need = start + len(parsed["rows"]) - 1
+        need = start + len(sheet_rows) - 1
         if need > ws.row_count:
             ws.add_rows(need - ws.row_count)
-        ws.update(values=parsed["rows"], range_name=f"A{start}", value_input_option="USER_ENTERED")
+        ws.update(values=sheet_rows, range_name=f"A{start}", value_input_option="USER_ENTERED")
     except HTTPException:
         raise
     except Exception as e:
