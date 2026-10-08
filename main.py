@@ -2204,6 +2204,7 @@ PLAN_HTML = """<!doctype html>
   .js{margin-top:3px;font-size:13px;color:var(--mut);display:flex;flex-wrap:wrap;gap:3px 10px;align-items:center}
   .jp{margin-top:5px;font-size:12.5px;color:var(--mut);background:var(--pd-bg);border-radius:8px;padding:5px 9px;line-height:1.5}
   .jp b{color:var(--ink);font-weight:600}
+  .rmk{color:#b45309;font-weight:600}
   .job.cx{background:var(--late-bg)}
   .job.cx .jc{text-decoration:line-through;color:var(--late)}
   .job.cx .jt{color:var(--late)}
@@ -2458,7 +2459,9 @@ function renderCards(rows){
       const c = x.cells;
       const plan = [['ออกฟรีโอ', c[23]], ['เข้าโหลด', c[24]], ['โทรตาม', c[25]]].filter(p => p[1])
         .map(p => p[0] + ' <b>' + shortDT(p[1]) + '</b>').join(' &nbsp;·&nbsp; ');
-      const vol = c[9] ? Number(String(c[9]).replace(/,/g, '')).toLocaleString('en-US') + ' ' + esc(c[10]) : '';
+      // J = น้ำหนักบรรทุก, K = น้ำหนักสุทธิ (กก.) — K มักว่างจนกว่าจะชั่งเสร็จ
+      const kg = v => { const n = Number(String(v).replace(/,/g, '')); return isNaN(n) ? esc(v) : n.toLocaleString('en-US'); };
+      const vol = (c[9] ? kg(c[9]) + ' กก.' : '') + (c[10] ? ' (สุทธิ ' + kg(c[10]) + ')' : '');
       const due = c[5] && dkey(c[5]) !== DATA.date.replace(/-/g, '') ? '<small class="xday">' + esc(c[5]) + '</small>' : '';
       return '<div class="job' + (x.cancelled ? ' cx' : '') + (x.chg ? ' chg' : '') + '">' +
         '<div class="jt">' + esc(c[6] || '--:--') + due + '</div>' +
@@ -2466,7 +2469,9 @@ function renderCards(rows){
         (x.chg ? '<div class="js" style="color:var(--chg-ink)">' + chgTag(x) + '</div>' : '') +
         '<div class="js">' + (c[11] ? '<span class="pill">' + esc(c[11]) + '</span>' : '') +
         (c[4] ? '<span>' + esc(c[4]) + (c[13] ? ' · Drop ' + esc(c[13]) : '') + '</span>' : '') +
-        (vol ? '<span>' + vol + '</span>' : '') + (c[7] ? '<span>' + esc(c[7]) + '</span>' : '') + '</div>' +
+        (vol ? '<span>' + vol + '</span>' : '') + (c[7] ? '<span>' + esc(c[7]) + '</span>' : '') +
+        (c[8] ? '<span>โหลด ' + esc(c[8]) + '</span>' : '') + '</div>' +
+        (c[14] ? '<div class="js"><span class="rmk">หมายเหตุ: ' + esc(c[14]) + '</span></div>' : '') +
         (plan ? '<div class="jp">' + plan + '</div>' : '') + '</div></div>';
     }).join('');
     return '<div class="car-card">' + head + jobs + '</div>';
@@ -2476,8 +2481,8 @@ function renderCards(rows){
 // กลุ่มคอลัมน์ — ปิดกลุ่มที่ไม่ใช้ ตารางจะแคบลงจนไม่ต้องเลื่อนซ้ายขวา
 const GROUPS = [
   {id:'job',  name:'ใบงาน',           cols:[0,1,2,3,4,5,6,7]},
-  {id:'prod', name:'สินค้า / จุดส่ง', cols:[8,9,10,11,12,13]},
-  {id:'car',  name:'รถ / พขร.',       cols:[14,15,16,17,18,19,20,21]},
+  {id:'prod', name:'สินค้า / จุดส่ง', cols:[8,9,10,11,12,13,14]},   // I เลขโหลด … N Drop, O หมายเหตุ
+  {id:'car',  name:'รถ / พขร.',       cols:[15,16,17,18,19,20,21]},
   {id:'plan', name:'แผนเวลา',         cols:[22,23,24,25]},
 ];
 let ON = {job:true, prod:true, car:true, plan:true};
@@ -2512,7 +2517,7 @@ function cell(v, i){
   if(v === '') return '<td></td>';
   if(i === 1)  return '<td class="sk sk2">' + esc(v) + '</td>';
   if(i === 6)  return '<td class="tm">' + esc(v) + '</td>';
-  if(i === 9){ const n = Number(String(v).replace(/,/g, ''));
+  if(i === 9 || i === 10){ const n = Number(String(v).replace(/,/g, ''));
     return '<td class="num">' + (isNaN(n) ? esc(v) : n.toLocaleString('en-US')) + '</td>'; }
   if(i === 11) return '<td><span class="pill">' + esc(v) + '</span></td>';
   if(i === 12) return '<td class="cust" title="' + esc(v) + '">' + esc(v) + '</td>';
