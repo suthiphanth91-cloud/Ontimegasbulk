@@ -2064,14 +2064,25 @@ async def plan_import(file: UploadFile = File(...), commit: int = Form(0), repla
         need = start + len(sheet_rows) - 1
         if need > ws.row_count:
             ws.add_rows(need - ws.row_count)
-        ws.update(values=sheet_rows, range_name=f"A{start}", value_input_option="USER_ENTERED")
+        # คอลัมน์ A (ลำดับ) กับ B (เลข JOB) ในชีตเป็น "สูตร" ที่เติมลงมาถึงแถวว่างแล้ว — ถ้าแถวปลายทางมีสูตรอยู่
+        # ห้ามเขียนค่าทับ ให้เขียนตั้งแต่คอลัมน์ C เป็นต้นไป ปล่อยให้ชีตคำนวณ A–B เอง
+        skip = 0
+        try:
+            pr = ws.get(f"A{start}:B{start}", value_render_option=gspread.utils.ValueRenderOption.formula)
+            head2 = list(pr[0]) if pr else []
+            if len(head2) >= 2 and all(str(v).startswith("=") for v in head2[:2]):
+                skip = 2
+        except Exception:
+            skip = 0
+        ws.update(values=[r[skip:] for r in sheet_rows], range_name=f"{_col_name(skip)}{start}",
+                  value_input_option="USER_ENTERED")
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"เขียนลงชีตไม่สำเร็จ — {type(e).__name__}: {e}")
     _drop_sheet_cache(PLAN_PAGE_ID, PLAN_PAGE_TAB)
     return {**info, "written": len(parsed["rows"]), "removed": removed, "first_row": start,
-            "last_row": start + len(parsed["rows"]) - 1}
+            "last_row": start + len(parsed["rows"]) - 1, "kept_formula_cols": skip}
 
 
 # ─── แก้ไขทีละช่องบนหน้าแผนงาน (ทดลอง) ───────────────────────────────────────────
@@ -2090,6 +2101,7 @@ class PlanEdit(BaseModel):
     value: str = ""     # ค่าใหม่ที่พิมพ์
     key: str = ""       # "เลข JOB|Drop" ของแถวที่เห็น กันแถวเลื่อน
     by: str = ""        # ชื่อผู้แก้ (ไว้บันทึกประวัติ)
+    override: bool = False   # ยืนยันเขียนทับ "สูตร" ในช่องนั้นด้วยค่าที่พิมพ์
 
 
 def _edit_value(col: int, value: str) -> str:
@@ -2149,18 +2161,30 @@ def plan_edit(p: PlanEdit):
             "ช่องนี้มีคนแก้ไปก่อนแล้ว — ยังไม่เขียนทับ", "current": cur[p.col]})
 
     letter = _col_name(p.col)
+    # ช่องที่เป็นสูตร: เขียนทับแล้วสูตรของแถวนั้นหายถาวร จึงไม่เขียนเว้นแต่คนแก้ยืนยัน (override)
+    formula = ""
+    try:
+        fm = ws.get(f"{letter}{p.row}", value_render_option=gspread.utils.ValueRenderOption.formula)
+        formula = str(fm[0][0]) if fm and fm[0] else ""
+    except Exception:
+        formula = ""
+    is_formula = formula.startswith("=")
+    if is_formula and not p.override:
+        return JSONResponse(status_code=423, content={"detail":
+            "ช่องนี้เป็นสูตรในชีต (ค่าถูกคำนวณจากช่องอื่น)", "formula": True, "current": cur[p.col]})
     try:
         ws.update(values=[[new]], range_name=f"{letter}{p.row}", value_input_option="USER_ENTERED")
         got = ws.get(f"{letter}{p.row}")                              # อ่านกลับ = ค่าที่ชีตแสดงจริง
         shown = got[0][0] if got and got[0] else ""
+        fresh_row = (list(ws.row_values(p.row)) + [""] * PLAN_LAST_COL)[:PLAN_LAST_COL]   # ช่องสูตรที่พึ่งช่องนี้คำนวณใหม่แล้ว
     except Exception as e:
         raise HTTPException(502, f"เขียนลงชีตไม่สำเร็จ — {type(e).__name__}: {e}")
 
     hit = _sheet_cache.get(f"{PLAN_PAGE_ID}:{PLAN_PAGE_TAB}")         # แก้แคชในช่องเดียว ไม่ต้องอ่านทั้งชีตใหม่
     if hit and p.row - 1 < len(hit[1]):
         r = hit[1][p.row - 1]
-        r.extend([""] * (p.col + 1 - len(r)))
-        r[p.col] = shown
+        r.extend([""] * (PLAN_LAST_COL - len(r)))
+        r[:PLAN_LAST_COL] = fresh_row
 
     logged = True
     try:                                                              # ประวัติการแก้ไข (ล้มเหลวไม่กระทบการแก้)
@@ -2168,12 +2192,14 @@ def plan_edit(p: PlanEdit):
             lg = sh.worksheet(EDIT_LOG_TAB)
         except gspread.WorksheetNotFound:
             lg = sh.add_worksheet(EDIT_LOG_TAB, rows=2000, cols=8)
-            lg.append_row(["เวลา", "ผู้แก้", "แถว", "คอลัมน์", "ค่าเดิม", "ค่าใหม่", "JOB|Drop"])
+            lg.append_row(["เวลา", "ผู้แก้", "แถว", "คอลัมน์", "ค่าเดิม", "ค่าใหม่", "JOB|Drop", "หมายเหตุ"])
         lg.append_row([_thai_now().strftime("%Y-%m-%d %H:%M:%S"), p.by[:60], p.row, letter,
-                       p.old, shown, cur_key], value_input_option="RAW")
+                       p.old, shown, cur_key, ("เขียนทับสูตร: " + formula[:80]) if is_formula else ""],
+                      value_input_option="RAW")
     except Exception:
         logged = False
-    return {"ok": True, "value": shown, "row": p.row, "col": p.col, "logged": logged}
+    return {"ok": True, "value": shown, "row": p.row, "col": p.col, "cells": fresh_row,
+            "overwrote_formula": is_formula, "logged": logged}
 
 
 @app.get("/plan", response_class=HTMLResponse, include_in_schema=False)
@@ -2803,40 +2829,47 @@ function setEditing(on){
   document.getElementById('edithint').hidden = !on;
 }
 
-function ownEdit(x, i, val){            // แก้เองสำเร็จ → ไม่นับเป็น "เปลี่ยนตั้งแต่ครั้งก่อน" ของตัวเอง
+function ownEdit(x, i, val, cells){    // แก้เองสำเร็จ → ไม่นับเป็น "เปลี่ยนตั้งแต่ครั้งก่อน" ของตัวเอง
   const base = readSeen(DATA.date);
   const oldKey = x.key;
-  x.cells[i] = val;
-  if(i === 12) x.cancelled = /ยกเลิก|โหลดเก็บ|cancel/i.test(val);
+  if(cells && cells.length) x.cells = cells.slice(0, 26);      // ช่องสูตรที่พึ่งช่องนี้ถูกคำนวณใหม่ในชีตแล้ว
+  else x.cells[i] = val;
+  x.cancelled = /ยกเลิก|โหลดเก็บ|cancel/i.test(x.cells[12]);
   const newKey = x.cells[1] ? x.cells[1] + '|' + x.cells[13] : ('r' + x.row);
   if(base){
     if(oldKey !== newKey && base[oldKey]){ base[newKey] = base[oldKey]; delete base[oldKey]; }
-    if(base[newKey]) base[newKey][i] = val;
+    base[newKey] = x.cells.slice();                            // ฐานเทียบของแถวนี้ = ค่าล่าสุดหลังแก้ (รวมช่องสูตรที่เปลี่ยนตาม)
     try{ localStorage.setItem(SEEN_PREFIX + DATA.date, JSON.stringify(base)); }catch(e){}
   }
   computeChanges();
 }
 
-async function saveCell(x, i, old, value){
+async function saveCell(x, i, old, value, override){
   if(value.trim() === String(old).trim()){ render(); return; }
   const td = document.querySelector('td[data-r="' + x.row + '"][data-c="' + i + '"]');
   if(td) td.textContent = 'กำลังบันทึก...';
   try{
     const r = await fetch('/api/plan/edit', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({row: x.row, col: i, old: old, value: value,
-                            key: x.cells[1] ? x.cells[1] + '|' + x.cells[13] : '', by: editorName()})});
+                            key: x.cells[1] ? x.cells[1] + '|' + x.cells[13] : '', by: editorName(),
+                            override: !!override})});
     if(r.status === 401){ location.href = '/login'; return; }
     let j = {};
     try{ j = await r.json(); }catch(e){}
-    if(r.status === 409){                       // มีคนแก้ไปก่อน — ไม่เขียนทับ โชว์ค่าปัจจุบันให้เห็น
+    if(r.status === 423){                       // ช่องนี้เป็นสูตรในชีต — ถามก่อนเขียนทับ
+      if(confirm((j.detail || 'ช่องนี้เป็นสูตร') + ' — ค่าตอนนี้: "' + (j.current || 'ว่าง') + '" — '
+                 + 'ถ้าแก้ตรงนี้ สูตรในช่องนี้ของแถวนี้จะหาย แทนที่ด้วยค่าที่พิมพ์ ต้องการเขียนทับ?')){
+        return saveCell(x, i, old, value, true);
+      }
+    }else if(r.status === 409){                 // มีคนแก้ไปก่อน — ไม่เขียนทับ โชว์ค่าปัจจุบันให้เห็น
       if(j.current !== undefined) x.cells[i] = j.current;
       computeChanges();
       toast((j.detail || 'ชนกับคนอื่น') + ' ค่าตอนนี้: "' + (j.current || 'ว่าง') + '"', true);
     }else if(!r.ok){
       toast(j.detail || ('HTTP ' + r.status), true);
     }else{
-      ownEdit(x, i, j.value);
-      toast('บันทึกแล้ว ✓' + (j.logged ? '' : ' (บันทึกประวัติ EditLog ไม่ได้)'));
+      ownEdit(x, i, j.value, j.cells);
+      toast('บันทึกแล้ว ✓' + (j.overwrote_formula ? ' (เขียนทับสูตร)' : '') + (j.logged ? '' : ' (บันทึกประวัติ EditLog ไม่ได้)'));
     }
   }catch(e){ toast('บันทึกไม่สำเร็จ: ' + e.message, true); }
   render();
@@ -2919,7 +2952,8 @@ async function impCommit(j){
     const r = await impSend(true, replace);
     if(!r) return;
     impBody('<div class="box ok">✓ เขียนแล้ว ' + r.written + ' แถว (แถวที่ ' + r.first_row + '–' + r.last_row + ' ในชีต)' +
-      (r.removed ? ' · ลบงานเดิม ' + r.removed + ' แถว' : '') + '</div>' +
+      (r.removed ? ' · ลบงานเดิม ' + r.removed + ' แถว' : '') +
+      (r.kept_formula_cols ? ' · คอลัมน์ A–B (ลำดับ/เลข JOB) เป็นสูตรในชีต ระบบไม่ได้เขียนทับ ให้ชีตคำนวณเอง' : '') + '</div>' +
       '<p class="mut">ปิดหน้าต่างนี้เพื่อดูผลในหน้าแผนงาน (เปลี่ยนไปวันที่ ' + dmy(r.date) + ' ให้แล้ว)</p>');
     document.getElementById('date').value = r.date; load(true);
   }catch(e){ impBody('<div class="box bad">เขียนไม่สำเร็จ: ' + esc(e.message) + '</div>'); }
