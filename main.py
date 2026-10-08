@@ -1822,6 +1822,10 @@ def dashboard():
 
 PLAN_LAST_COL = 26   # แสดงคอลัมน์ A–Z ของชีตแผนงาน
 PLAN_FRESH_MIN_SECS = 15   # ปุ่มรีเฟรชอ่านชีตสดได้ไม่ถี่กว่านี้ (วินาที)
+# ชีตที่หน้าแผนงาน (/plan) อ่าน — แยกจาก SOURCE_ID ที่หน้าเช็กรถใช้ จะได้ทดลองกับชีต DEMO ได้
+# โดยไม่กระทบหน้าเช็กรถ ตั้ง PLAN_PAGE_ID / PLAN_PAGE_TAB ที่ Vercel (ไม่ตั้ง = ใช้ชีตเดิม)
+PLAN_PAGE_ID  = os.environ.get("PLAN_PAGE_ID")  or SOURCE_ID
+PLAN_PAGE_TAB = os.environ.get("PLAN_PAGE_TAB") or PLAN_TAB
 
 
 def _col_name(i: int) -> str:
@@ -1851,13 +1855,13 @@ def plan_rows(date_str: str = Query(None, alias="date"), fresh: int = Query(0)):
     fresh=1 (ปุ่มรีเฟรช) = ข้ามแคชแล้วอ่านชีตสด แต่ไม่ถี่เกิน PLAN_FRESH_MIN_SECS วินาที
     กันคนกดรัวจนทะลุโควตา Google Sheets (60 ครั้ง/นาที) ซึ่งใช้ร่วมกับหน้าเช็กรถ"""
     target = date_str or _today_thai()
-    key = f"{SOURCE_ID}:{PLAN_TAB}"
+    key = f"{PLAN_PAGE_ID}:{PLAN_PAGE_TAB}"
     old = _sheet_cache.get(key)
     throttled = bool(fresh and old and time() - old[0] < PLAN_FRESH_MIN_SECS)
     if fresh and not throttled:
-        _drop_sheet_cache(SOURCE_ID, PLAN_TAB)
+        _drop_sheet_cache(PLAN_PAGE_ID, PLAN_PAGE_TAB)
     try:
-        rows = _fetch_sheet(SOURCE_ID, PLAN_TAB)
+        rows = _fetch_sheet(PLAN_PAGE_ID, PLAN_PAGE_TAB)
     except Exception as e:
         if not old:
             # บอกสาเหตุให้อ่านออก แทน 500 เปล่าๆ (ข้อความ error ของ gspread/creds ไม่มีรหัสลับ)
@@ -1881,6 +1885,7 @@ def plan_rows(date_str: str = Query(None, alias="date"), fresh: int = Query(0)):
         out.append({"row": i + 1, "cells": cells, "cancelled": cancelled})
     return {"date": target, "fetched_at": _thai_now().strftime("%H:%M:%S"),
             "sheet_read_at": read_at, "throttled": throttled,
+            "alt_source": PLAN_PAGE_ID != SOURCE_ID,      # True = กำลังอ่านชีตทดลอง ไม่ใช่ชีตจริง
             "headers": headers, "total": len(out), "rows": out}
 
 
@@ -2294,6 +2299,7 @@ async function load(fresh){
   }
   // บอกว่าข้อมูลมาจากชีตตอนไหน (ไม่ใช่เวลาที่เปิดหน้า) จะได้รู้ว่าเห็นของล่าสุดหรือยัง
   document.getElementById('stamp').textContent = 'ข้อมูลจากชีตเมื่อ ' + DATA.sheet_read_at +
+    (DATA.alt_source ? ' · 🧪 ชีตทดลอง (DEMO)' : '') +
     (fresh && DATA.throttled ? ' (เพิ่งอ่านสดไปไม่นาน รออีกสักครู่แล้วกดใหม่)' : '');
   computeChanges();
   const sel = document.getElementById('depot'), keep = sel.value;
