@@ -2795,14 +2795,14 @@ PLAN_HTML = """<!doctype html>
   <b id="dlabel" style="font-size:14px"></b>
   <select id="depot"><option value="">ทุกคลัง</option></select>
   <input type="search" id="q" placeholder="ค้นหา รถ / ลูกค้า / ทะเบียน / ออเดอร์">
-  <button id="editBtn" hidden title="แก้ไขข้อมูลทีละช่อง (ดับเบิลคลิกที่ช่อง)">✏️ โหมดแก้ไข</button>
+  <button id="editBtn" hidden title="แก้ไขข้อมูลทีละช่อง (คลิกที่ช่อง)">✏️ โหมดแก้ไข</button>
   <button id="impOpen" title="อัปโหลดใบจัดรถ Excel เพื่อตรวจและนำเข้า">📥 นำเข้า Excel</button>
   <button class="primary" id="go">รีเฟรช</button>
 </div></header>
 <main>
   <div class="cards" id="cards"></div>
   <div class="chgbar" id="edithint" hidden>
-    <span>✏️ <b>กำลังอยู่ในโหมดแก้ไข</b> — ดับเบิลคลิกที่ช่องเพื่อแก้ · Enter = บันทึกลงชีต · Esc = ยกเลิก ·
+    <span>✏️ <b>กำลังอยู่ในโหมดแก้ไข</b> — คลิกที่ช่องเพื่อแก้ · <b>Enter</b> = บันทึกแล้วลงช่องล่าง · <b>Tab</b> = บันทึกแล้วไปช่องขวา · <b>Esc</b> = ยกเลิก ·
       แก้ได้ทุกช่อง A–Z (ช่องที่เป็นสูตรในชีตจะถูกแทนที่ด้วยค่าที่พิมพ์)</span>
   </div>
   <div class="chgbar" id="chgbar" hidden>
@@ -3043,7 +3043,7 @@ document.getElementById('ack').onclick = () => {          // รับทรา�
   if(!DATA) return;
   saveSeen(); computeChanges(); ONLYCHG = false; render();
 };
-// ── แก้ไขทีละช่อง: ดับเบิลคลิก → พิมพ์ → Enter บันทึกลงชีต (เซิร์ฟเวอร์ตรวจชนกันก่อนเขียน) ──
+// ── แก้ไขทีละช่อง: คลิก → พิมพ์ → Enter บันทึกลงชีตแล้วลงช่องล่าง / Tab ไปช่องขวา (เซิร์ฟเวอร์ตรวจชนกันก่อนเขียน) ──
 let EDITING = false;
 
 function toast(msg, bad){
@@ -3089,10 +3089,29 @@ function ownEdit(x, i, val, cells){    // แก้เองสำเร็จ �
   computeChanges();
 }
 
-async function saveCell(x, i, old, value, override){
-  if(value.trim() === String(old).trim()){ render(); return; }
+function advance(x, i, dir){            // เลื่อนไปแก้ช่องถัดไป: down = แถวถัดลงมาคอลัมน์เดิม, right = คอลัมน์ถัดไปแถวเดิม
+  const td = document.querySelector('td[data-r="' + x.row + '"][data-c="' + i + '"]');
+  if(!td) return;
+  let nx = null;
+  if(dir === 'down'){
+    const tr = td.parentElement.nextElementSibling;
+    if(tr) nx = tr.querySelector('td[data-c="' + i + '"]');
+  }else{
+    nx = td.nextElementSibling;
+    while(nx && !nx.dataset.c) nx = nx.nextElementSibling;
+  }
+  if(!nx || !nx.dataset.r) return;
+  const row = DATA.rows.find(r => r.row === Number(nx.dataset.r));
+  if(!row) return;
+  nx.scrollIntoView({block: 'nearest', inline: 'nearest'});
+  startEdit(nx, row, Number(nx.dataset.c));
+}
+
+async function saveCell(x, i, old, value, override, dir){
+  if(value.trim() === String(old).trim()){ render(); if(dir) advance(x, i, dir); return; }
   const td = document.querySelector('td[data-r="' + x.row + '"][data-c="' + i + '"]');
   if(td) td.textContent = 'กำลังบันทึก...';
+  let saved = false;
   try{
     const r = await fetch('/api/plan/edit', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({row: x.row, col: i, old: old, value: value,
@@ -3104,7 +3123,7 @@ async function saveCell(x, i, old, value, override){
     if(r.status === 423){                       // ช่องนี้เป็นสูตรในชีต — ถามก่อนเขียนทับ
       if(confirm((j.detail || 'ช่องนี้เป็นสูตร') + ' — ค่าตอนนี้: "' + (j.current || 'ว่าง') + '" — '
                  + 'ถ้าแก้ตรงนี้ สูตรในช่องนี้ของแถวนี้จะหาย แทนที่ด้วยค่าที่พิมพ์ ต้องการเขียนทับ?')){
-        return saveCell(x, i, old, value, true);
+        return saveCell(x, i, old, value, true, dir);
       }
     }else if(r.status === 409){                 // มีคนแก้ไปก่อน — ไม่เขียนทับ โชว์ค่าปัจจุบันให้เห็น
       if(j.current !== undefined) x.cells[i] = j.current;
@@ -3114,10 +3133,12 @@ async function saveCell(x, i, old, value, override){
       toast(j.detail || ('HTTP ' + r.status), true);
     }else{
       ownEdit(x, i, j.value, j.cells);
+      saved = true;
       toast('บันทึกแล้ว ✓' + (j.overwrote_formula ? ' (เขียนทับสูตร)' : '') + (j.logged ? '' : ' (บันทึกประวัติ EditLog ไม่ได้)'));
     }
   }catch(e){ toast('บันทึกไม่สำเร็จ: ' + e.message, true); }
   render();
+  if(dir && saved) advance(x, i, dir);            // เลื่อนต่อเฉพาะเมื่อบันทึกสำเร็จ ถ้าติดปัญหาให้อยู่ที่เดิมดูข้อความ
 }
 
 let OPTS = null;
@@ -3135,7 +3156,7 @@ async function loadOpts(){              // รายการตัวเลื�
 }
 
 // ตัวแก้ค่าในช่อง (ใช้ทั้งตารางหลักและตารางในหน้าต่างนำเข้า): เลือกอย่างเดียว / พิมพ์ค้นหา / พิมพ์อิสระ
-function openEditor(td, i, old, onSave, onCancel){
+function openEditor(td, i, old, onSave, onCancel, onSkip){
   const strict = OPTS && OPTS.strict[String(i)];            // ต้นทาง/เที่ยววิ่ง/Drop/ประเภทรถ = เลือกอย่างเดียว
   const sug = OPTS && OPTS.suggest[String(i)];              // ปลายทาง/เบอร์รถ/พขร. = พิมพ์ค้นหาแล้วเลือก
   let el, done = false;
@@ -3146,7 +3167,7 @@ function openEditor(td, i, old, onSave, onCancel){
     if(old && list.indexOf(old) < 0) list.unshift(old);     // ค่าเดิมที่ไม่อยู่ในรายการ ยังเห็นและเลือกคืนได้
     el.innerHTML = '<option value="">(ว่าง)</option>' + list.map(v => '<option>' + esc(v) + '</option>').join('');
     el.value = old;
-    el.addEventListener('change', () => finish(() => onSave(el.value)));              // เลือกแล้วบันทึกเลย
+    el.addEventListener('change', () => finish(() => onSave(el.value, 'down')));      // เลือกแล้วบันทึกเลย แล้วเลื่อนลง
     el.addEventListener('keydown', ev => { if(ev.key === 'Escape'){ ev.preventDefault(); finish(onCancel); } });
     el.addEventListener('blur', () => setTimeout(() => finish(onCancel), 250));
   }else{
@@ -3157,10 +3178,11 @@ function openEditor(td, i, old, onSave, onCancel){
     }
     el.addEventListener('keydown', ev => {
       if(ev.key === 'Escape'){ ev.preventDefault(); finish(onCancel); }
-      else if(ev.key === 'Enter'){
+      else if(ev.key === 'Enter' || ev.key === 'Tab'){
         ev.preventDefault();
-        if(sug && sug.length && !el.value.trim()) finish(onCancel);          // ไม่ได้พิมพ์/เลือกอะไร = ไม่เปลี่ยน
-        else finish(() => onSave(el.value));
+        const dir = ev.key === 'Enter' ? 'down' : 'right';                   // Enter = ช่องล่าง, Tab = ช่องขวา
+        if(sug && sug.length && !el.value.trim()) finish(() => (onSkip ? onSkip(dir) : onCancel()));   // ไม่ได้พิมพ์/เลือก = ไม่เปลี่ยน ข้ามไปช่องถัดไป
+        else finish(() => onSave(el.value, dir));
       }
     });
     el.addEventListener('blur', () => finish(onCancel));      // คลิกที่อื่น = ยกเลิก ไม่บันทึกโดยไม่ตั้งใจ
@@ -3171,11 +3193,13 @@ function openEditor(td, i, old, onSave, onCancel){
 
 function startEdit(td, x, i){
   const old = x.cells[i];
-  openEditor(td, i, old, v => saveCell(x, i, old, v), render);
+  openEditor(td, i, old, (v, dir) => saveCell(x, i, old, v, false, dir), render,
+             dir => { render(); advance(x, i, dir); });
 }
 
-document.getElementById('rows').addEventListener('dblclick', e => {
+document.getElementById('rows').addEventListener('click', e => {
   if(!EDITING) return;
+  if(e.target.closest('a')) e.preventDefault();       // คลิกเบอร์โทรในโหมดแก้ไข = แก้ ไม่ใช่โทรออก
   const td = e.target.closest('td[data-r]');
   if(!td || td.querySelector('input')) return;
   const x = DATA.rows.find(r => r.row === Number(td.dataset.r));
@@ -3261,7 +3285,7 @@ function impRender(){
   impBody(
     '<div class="box"><b>วันที่ ' + dmy(j.date) + '</b> · ' + j.total + ' แถวงาน · ปลายทาง: <b>' + esc(j.target) + '</b>' +
     (nedit ? ' · <span class="ied" style="padding:1px 8px;border-radius:6px">แก้แล้ว ' + nedit + ' ช่อง</span>' : '') + '</div>' +
-    '<p class="mut" style="margin:6px 2px;font-size:13px">✏️ ดับเบิลคลิกช่องในตารางเพื่อแก้ก่อนเขียนลงชีต · Enter = ตกลง · Esc = ยกเลิก · ' +
+    '<p class="mut" style="margin:6px 2px;font-size:13px">✏️ คลิกช่องในตารางเพื่อแก้ก่อนเขียนลงชีต · Enter = ตกลง · Esc = ยกเลิก · ' +
     '<b class="bad">ช่องสีแดง = มีปัญหา (เอาเมาส์ชี้ดูสาเหตุ)</b> · ช่องสีเหลือง = ที่คุณแก้</p>' + er + w +
     '<label style="display:block;margin:6px 2px"><input type="checkbox" id="impOnlyBad"' + (IMP.onlyBad ? ' checked' : '') +
     '> ดูเฉพาะแถวที่มีช่องสีแดง (' + nbad + ' แถว)</label>' +
@@ -3282,7 +3306,7 @@ function impSet(r, c, v){                // แก้ช่องในตาร
   impRecheck();
 }
 
-document.getElementById('impBody').addEventListener('dblclick', e => {
+document.getElementById('impBody').addEventListener('click', e => {
   const td = e.target.closest('td[data-ir]');
   if(!td || !IMP || td.querySelector('input,select')) return;
   const r = Number(td.dataset.ir), c = Number(td.dataset.ic);
