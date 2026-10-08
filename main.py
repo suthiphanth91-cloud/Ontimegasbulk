@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import io
 import json
 import os
 import random
@@ -27,7 +28,7 @@ from typing import Optional
 
 import httpx
 import gspread
-from fastapi import FastAPI, Form, HTTPException, Query, Request
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from google.oauth2.service_account import Credentials
@@ -1889,6 +1890,166 @@ def plan_rows(date_str: str = Query(None, alias="date"), fresh: int = Query(0)):
             "headers": headers, "total": len(out), "rows": out}
 
 
+# ─── นำเข้าใบจัดรถจาก Excel → ชีตแผนงาน (ทดลอง) ─────────────────────────────
+# ไฟล์ Excel ใบจัดรถ: ชีต "ข้อมูลการจัดส่ง" คอลัมน์ E–AD (26 ช่อง) = คอลัมน์ A–Z ของชีตแผนงาน Gasbulk
+# พอดี ตัวไฟล์มีสูตรคำนวณ (เลข JOB, พขร., เวลาแผน ฯลฯ) อยู่แล้ว จึงอ่าน "ค่าที่คำนวณแล้ว" มาลงทั้ง 26 ช่อง
+# ปลอดภัยไว้ก่อน: ดูตัวอย่างได้เสมอ แต่เขียนลงชีตได้เมื่อ (1) ตั้ง PLAN_IMPORT_ENABLED=1 และ
+# (2) ชีตปลายทางไม่ใช่ชีตจริง (SOURCE_ID) หรือไฟล์ ChaseLog (PLAN_ID)
+IMPORT_SHEET     = "ข้อมูลการจัดส่ง"
+IMPORT_COL_FIRST = 4            # คอลัมน์ E (นับจาก 0)
+IMPORT_MAX_BYTES = 4 * 1024 * 1024   # Vercel รับ body ได้ราว 4.5MB
+# ตำแหน่งในช่วง A–Z ที่ต้องจัดรูปแบบพิเศษ (นับจาก 0)
+_IMP_DATE_COLS = (2, 5)         # C ประจำวันที่, F วันที่ส่งมอบ → dd/mm/yyyy
+_IMP_STAMP_COLS = (23, 24, 25)  # X, Y, Z เวลาแผน (P) → dd/mm/yyyy HH:MM:SS
+
+
+def _xl_cell(v, idx: int) -> str:
+    """ค่าจาก Excel → ข้อความรูปแบบเดียวกับที่ชีตแสดง (Google Sheets แปลงกลับเป็นวัน/เวลาเองตอนเขียน)"""
+    if v is None:
+        return ""
+    if isinstance(v, datetime):
+        if idx in _IMP_DATE_COLS:
+            return v.strftime("%d/%m/%Y")
+        if idx in _IMP_STAMP_COLS or v.hour or v.minute or v.second:
+            return v.strftime("%d/%m/%Y %H:%M:%S")
+        return v.strftime("%d/%m/%Y")
+    if hasattr(v, "hour") and hasattr(v, "minute") and not hasattr(v, "year"):   # datetime.time
+        return v.strftime("%H:%M:%S")
+    if isinstance(v, bool):
+        return str(v)
+    if isinstance(v, float):
+        return str(int(v)) if v.is_integer() else str(round(v, 4))
+    s = str(v).replace("\n", " ").strip()
+    return "" if s.startswith("#") else s     # #VALUE! / #N/A จากสูตร = ถือว่าว่าง
+
+
+def _parse_dispatch_xlsx(data: bytes) -> dict:
+    """อ่านใบจัดรถ → {date, headers, rows, warnings} ยังไม่เขียนอะไรที่ไหน"""
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"เปิดไฟล์ Excel ไม่ได้ ({type(e).__name__}) — ต้องเป็นไฟล์ .xlsx")
+    if IMPORT_SHEET not in wb.sheetnames:
+        raise HTTPException(status_code=400,
+            detail=f'ไม่พบชีต "{IMPORT_SHEET}" ในไฟล์ (มีชีต: {", ".join(wb.sheetnames)})')
+    grid = [list(r) for r in wb[IMPORT_SHEET].iter_rows(values_only=True)]
+
+    # แถวหัวตาราง = แถวที่คอลัมน์ F เขียนว่า "เลข JOB"
+    hdr = next((i for i, r in enumerate(grid[:12])
+                if len(r) > 5 and str(r[5] or "").replace("\n", " ").strip() == "เลข JOB"), None)
+    if hdr is None:
+        raise HTTPException(status_code=400, detail='หาแถวหัวตาราง (คอลัมน์ F = "เลข JOB") ไม่เจอ — ไฟล์ผิดรูปแบบ?')
+    headers = [str(c or "").replace("\n", " ").strip()
+               for c in (grid[hdr] + [None] * 40)[IMPORT_COL_FIRST:IMPORT_COL_FIRST + PLAN_LAST_COL]]
+
+    rows, warnings, seen = [], [], {}
+    uncomputed = 0
+    for n, r in enumerate(grid[hdr + 1:], start=hdr + 2):        # n = เลขแถวใน Excel
+        cells = (list(r) + [None] * 40)[IMPORT_COL_FIRST:IMPORT_COL_FIRST + PLAN_LAST_COL]
+        out = [_xl_cell(v, i) for i, v in enumerate(cells)]
+        if not out[1]:                 # คอลัมน์ B = เลข JOB ว่าง = แถวว่าง/ไม่มีงาน
+            if out[16] or out[15] or out[12]:
+                uncomputed += 1        # มีข้อมูลแต่สูตรไม่มีค่า (ไฟล์ไม่เคยถูกคำนวณ/บันทึกใน Excel)
+            continue
+        rows.append(out)
+        tag = f"แถว {n} ใน Excel"
+        if not out[15]:
+            warnings.append(f"{tag}: ยังไม่ใส่เบอร์รถ")
+        if not out[12]:
+            warnings.append(f"{tag}: ยังไม่ใส่ปลายทาง")
+        if "Check" in out:
+            warnings.append(f"{tag}: มีช่องที่ Excel ขึ้น \"Check\" (ข้อมูลอ้างอิงไม่พบ เช่น เบอร์รถไม่อยู่ในชีตข้อมูลรถ)")
+        wt = out[9].replace(",", "")
+        if out[16].startswith("08") and wt.replace(".", "", 1).isdigit() and float(wt) > 8000:
+            warnings.append(f"{tag}: น้ำหนัก {int(float(wt)):,} กก. เกิน 8,000 สำหรับรถ 08 Tons")
+        key = (out[1], out[13])
+        if key in seen:
+            warnings.append(f"{tag}: เลข JOB + Drop ซ้ำกับแถว {seen[key]}")
+        seen[key] = n
+    if uncomputed:
+        warnings.append(f"มี {uncomputed} แถวที่มีข้อมูลแต่ช่องเลข JOB ว่าง — ถ้าไฟล์เพิ่งแก้ ให้เปิดแล้วกดบันทึกใน Excel ก่อนอัปโหลดใหม่")
+
+    counts: dict = {}
+    for r in rows:
+        iso = _parse_date(r[2])
+        if iso:
+            counts[iso] = counts.get(iso, 0) + 1
+    date_iso = max(counts, key=counts.get) if counts else None
+    if len(counts) > 1:
+        warnings.append("ไฟล์มีหลายวันที่ในคอลัมน์ ประจำวันที่: " + ", ".join(sorted(counts)))
+    return {"date": date_iso, "headers": headers, "rows": rows, "warnings": warnings[:40],
+            "warnings_total": len(warnings)}
+
+
+def _import_block_reason() -> str:
+    """ว่าง = เขียนได้ ถ้ามีข้อความ = เขียนไม่ได้เพราะอะไร"""
+    if os.environ.get("PLAN_IMPORT_ENABLED") != "1":
+        return "ยังไม่เปิดการเขียนลงชีต (ตั้ง PLAN_IMPORT_ENABLED=1 ที่ Vercel) — ตอนนี้ดูตัวอย่างได้อย่างเดียว"
+    if PLAN_PAGE_ID in (SOURCE_ID, PLAN_ID):
+        return "ชีตปลายทางเป็นชีตจริง — ระบบยอมเขียนเฉพาะชีตทดลอง ตั้ง PLAN_PAGE_ID เป็นชีต DEMO ก่อน"
+    return ""
+
+
+@app.post("/api/plan/import", include_in_schema=False)
+async def plan_import(file: UploadFile = File(...), commit: int = Form(0), replace: int = Form(1)):
+    data = await file.read()
+    if len(data) > IMPORT_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="ไฟล์ใหญ่เกิน 4MB")
+    parsed = _parse_dispatch_xlsx(data)
+    block = _import_block_reason()
+    info = {**parsed, "total": len(parsed["rows"]), "can_commit": not block, "block_reason": block,
+            "target": "ชีตทดลอง" if PLAN_PAGE_ID != SOURCE_ID else "ชีตจริง", "existing": None}
+
+    # ในชีตปลายทางมีงานของวันนี้อยู่แล้วกี่แถว (ถ้าอ่านได้) — เอาไว้เตือนก่อนแทนที่
+    if parsed["date"]:
+        try:
+            sheet = _fetch_sheet(PLAN_PAGE_ID, PLAN_PAGE_TAB)
+            info["existing"] = sum(1 for r in sheet if _parse_date(_cell(r, PLAN_DATE)) == parsed["date"])
+        except Exception:
+            info["existing"] = None
+    info["rows"] = parsed["rows"]
+    if not commit:
+        return info
+
+    # ── เขียนจริง ──
+    if block:
+        raise HTTPException(status_code=403, detail=block)
+    if not parsed["rows"] or not parsed["date"]:
+        raise HTTPException(status_code=400, detail="ไม่มีแถวงาน หรืออ่านวันที่จากไฟล์ไม่ได้ — ไม่เขียนอะไรลงชีต")
+    try:
+        ws = gspread.authorize(_build_creds()).open_by_key(PLAN_PAGE_ID).worksheet(PLAN_PAGE_TAB)
+        col_c = ws.col_values(PLAN_DATE + 1)
+        head = next((i for i, v in enumerate(col_c[:6]) if "วันที่" in v and not _parse_date(v)), 2)
+        removed = 0
+        if replace:
+            # ลบแถวของวันเดียวกัน (ไล่จากล่างขึ้นบน กันเลขแถวเลื่อน) แล้วค่อยลงชุดใหม่
+            hit = [i + 1 for i, v in enumerate(col_c) if i > head and _parse_date(v) == parsed["date"]]
+            blocks: list = []
+            for r in hit:
+                if blocks and r == blocks[-1][1] + 1:
+                    blocks[-1][1] = r
+                else:
+                    blocks.append([r, r])
+            for a, b in reversed(blocks):
+                ws.delete_rows(a, b)
+            removed = len(hit)
+            col_c = ws.col_values(PLAN_DATE + 1)
+        last = max([i + 1 for i, v in enumerate(col_c) if str(v).strip()] + [head + 1])
+        start = last + 1
+        need = start + len(parsed["rows"]) - 1
+        if need > ws.row_count:
+            ws.add_rows(need - ws.row_count)
+        ws.update(values=parsed["rows"], range_name=f"A{start}", value_input_option="USER_ENTERED")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"เขียนลงชีตไม่สำเร็จ — {type(e).__name__}: {e}")
+    _drop_sheet_cache(PLAN_PAGE_ID, PLAN_PAGE_TAB)
+    return {**info, "written": len(parsed["rows"]), "removed": removed, "first_row": start,
+            "last_row": start + len(parsed["rows"]) - 1}
+
+
 @app.get("/plan", response_class=HTMLResponse, include_in_schema=False)
 def plan_page():
     return PLAN_HTML
@@ -2205,6 +2366,23 @@ PLAN_HTML = """<!doctype html>
   .jp{margin-top:5px;font-size:12.5px;color:var(--mut);background:var(--pd-bg);border-radius:8px;padding:5px 9px;line-height:1.5}
   .jp b{color:var(--ink);font-weight:600}
   .rmk{color:#b45309;font-weight:600}
+  /* ── หน้าต่างนำเข้า Excel ── */
+  .imp-back{position:fixed;inset:0;background:rgba(15,23,42,.5);z-index:60;display:flex;
+            align-items:flex-start;justify-content:center;padding:30px 16px;overflow:auto}
+  .imp-back[hidden]{display:none}
+  .imp{background:var(--card);border:1px solid var(--line);border-radius:14px;width:100%;
+       max-width:980px;padding:18px 20px}
+  .imp-h{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+  .imp-h b{font-size:18px}
+  .imp-h button{border:0;background:none;font-size:20px;padding:2px 8px}
+  .imp .box{border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin:10px 0}
+  .imp .ok{color:#16a34a;font-weight:700}
+  .imp .bad{color:var(--late);font-weight:700}
+  .imp ul{margin:6px 0 0;padding-left:20px;font-size:13.5px;max-height:130px;overflow:auto}
+  .imp .tbl{max-height:300px;overflow:auto;border:1px solid var(--line);border-radius:10px}
+  .imp table{font-size:13px;min-width:0;width:100%}
+  .imp button.go{background:#16a34a;border-color:#16a34a;color:#fff}
+  .imp button.go:disabled{background:var(--pd-bg);border-color:var(--line);color:var(--mut);cursor:not-allowed}
   .job.cx{background:var(--late-bg)}
   .job.cx .jc{text-decoration:line-through;color:var(--late)}
   .job.cx .jt{color:var(--late)}
@@ -2242,6 +2420,7 @@ PLAN_HTML = """<!doctype html>
   <input type="search" id="q" placeholder="ค้นหา รถ / ลูกค้า / ทะเบียน / ออเดอร์">
   <span class="vlabel">มุมมอง:</span>
   <span class="seg"><button id="vCard">การ์ดรายคัน</button><button id="vTable">ตาราง A–Z</button></span>
+  <button id="impOpen" title="อัปโหลดใบจัดรถ Excel เพื่อตรวจและนำเข้า">📥 นำเข้า Excel</button>
   <button class="primary" id="go">รีเฟรช</button>
 </div></header>
 <main>
@@ -2260,6 +2439,15 @@ PLAN_HTML = """<!doctype html>
   <div id="cardView" hidden></div>
   <p class="mut" style="font-size:13px">ข้อมูลจากชีต "แผนงาน Gasbulk" คอลัมน์ A–Z (อ่านอย่างเดียว) &middot; สีแดง = ยกเลิก/โหลดเก็บ</p>
 </main>
+
+<div class="imp-back" id="impBack" hidden><div class="imp">
+  <div class="imp-h"><b>📥 นำเข้าใบจัดรถจาก Excel</b><button id="impClose" title="ปิด">✕</button></div>
+  <p class="mut" style="margin:0 0 8px;font-size:14px">
+    เลือกไฟล์ใบจัดรถ (.xlsx) ระบบอ่านชีต "ข้อมูลการจัดส่ง" คอลัมน์ E–AD แล้วแสดงตัวอย่างให้ตรวจก่อน
+    <b>ยังไม่เขียนอะไรลงชีตจนกว่าคุณจะกดยืนยัน</b></p>
+  <input type="file" id="impFile" accept=".xlsx">
+  <div id="impBody"></div>
+</div></div>
 <script>
 const SRC_COL = 11;   // L คลังต้นทาง
 let DATA = null;
@@ -2542,6 +2730,70 @@ document.getElementById('ack').onclick = () => {          // รับทรา�
   if(!DATA) return;
   saveSeen(); computeChanges(); ONLYCHG = false; render();
 };
+// ── นำเข้าใบจัดรถจาก Excel: อัปโหลด → ดูตัวอย่าง/คำเตือน → ยืนยันถึงเขียนลงชีต ──
+let IMPFILE = null;
+function impBody(html){ document.getElementById('impBody').innerHTML = html; }
+function dmy(iso){ return iso ? iso.slice(8,10) + '/' + iso.slice(5,7) + '/' + iso.slice(0,4) : '?'; }
+
+async function impSend(commit, replace){
+  const fd = new FormData();
+  fd.append('file', IMPFILE);
+  fd.append('commit', commit ? '1' : '0');
+  fd.append('replace', replace ? '1' : '0');
+  const r = await fetch('/api/plan/import', {method:'POST', body: fd});
+  if(r.status === 401){ location.href = '/login'; return null; }
+  let j = null;
+  try{ j = await r.json(); }catch(e){}
+  if(!r.ok) throw new Error((j && j.detail) || ('HTTP ' + r.status));
+  return j;
+}
+
+async function impPreview(){
+  impBody('<p class="mut">กำลังอ่านไฟล์...</p>');
+  try{
+    const j = await impSend(false, true);
+    if(j) impShow(j);
+  }catch(e){ impBody('<div class="box bad">อ่านไฟล์ไม่ได้: ' + esc(e.message) + '</div>'); }
+}
+
+function impShow(j){
+  const w = j.warnings.length
+    ? '<div class="box"><b class="bad">⚠ ควรตรวจ ' + j.warnings_total + ' เรื่อง</b><ul>' +
+      j.warnings.map(x => '<li>' + esc(x) + '</li>').join('') + '</ul></div>'
+    : '<div class="box ok">✓ ไม่พบปัญหาที่ระบบตรวจได้ (เบอร์รถ/ปลายทางครบ, น้ำหนัก, Drop ซ้ำ)</div>';
+  const rows = j.rows.map(c => '<tr><td>' + esc(c[6]) + '</td><td>' + esc(c[12]) + '</td><td>' + esc(c[15]) +
+    '</td><td>' + esc(c[9]) + '</td><td>' + esc(c[11]) + '</td><td>' + esc(c[13]) + '</td><td>' + esc(c[18]) + '</td></tr>').join('');
+  const ex = '<label><input type="checkbox" id="impReplace" checked> ' + (j.existing
+    ? 'แทนที่งานเดิมของวันที่ ' + dmy(j.date) + ' (ชีตมีอยู่แล้ว ' + j.existing + ' แถว จะถูกลบก่อนลงชุดใหม่)'
+    : 'ลบงานเดิมของวันที่ ' + dmy(j.date) + ' ก่อนลงชุดใหม่ (ถ้ามี)') + '</label>';
+  impBody(
+    '<div class="box"><b>วันที่ ' + dmy(j.date) + '</b> · ' + j.total + ' แถวงาน · ปลายทาง: <b>' + esc(j.target) + '</b></div>' + w +
+    '<div class="tbl"><table><thead><tr><th>เวลาส่ง</th><th>ปลายทาง</th><th>เบอร์รถ</th><th>น้ำหนัก</th><th>ต้นทาง</th><th>Drop</th><th>พขร.1</th></tr></thead><tbody>' +
+    rows + '</tbody></table></div><div class="box">' + ex + '</div>' +
+    (j.can_commit ? '' : '<div class="box bad">เขียนลงชีตไม่ได้ตอนนี้: ' + esc(j.block_reason) + '</div>') +
+    '<button class="go" id="impGo"' + (j.can_commit && j.total ? '' : ' disabled') + '>เขียน ' + j.total + ' แถวลงชีต</button>');
+  document.getElementById('impGo').onclick = () => impCommit(j);
+}
+
+async function impCommit(j){
+  const replace = document.getElementById('impReplace').checked;
+  if(!confirm('เขียน ' + j.total + ' แถวของวันที่ ' + dmy(j.date) + ' ลง' + j.target +
+              (replace ? ' และลบงานเดิมของวันนั้นก่อน' : '') + ' — ยืนยัน?')) return;
+  const btn = document.getElementById('impGo'); btn.disabled = true; btn.textContent = 'กำลังเขียนลงชีต...';
+  try{
+    const r = await impSend(true, replace);
+    if(!r) return;
+    impBody('<div class="box ok">✓ เขียนแล้ว ' + r.written + ' แถว (แถวที่ ' + r.first_row + '–' + r.last_row + ' ในชีต)' +
+      (r.removed ? ' · ลบงานเดิม ' + r.removed + ' แถว' : '') + '</div>' +
+      '<p class="mut">ปิดหน้าต่างนี้เพื่อดูผลในหน้าแผนงาน (เปลี่ยนไปวันที่ ' + dmy(r.date) + ' ให้แล้ว)</p>');
+    document.getElementById('date').value = r.date; load(true);
+  }catch(e){ impBody('<div class="box bad">เขียนไม่สำเร็จ: ' + esc(e.message) + '</div>'); }
+}
+
+document.getElementById('impOpen').onclick = () => { document.getElementById('impBack').hidden = false; };
+document.getElementById('impClose').onclick = () => { document.getElementById('impBack').hidden = true; };
+document.getElementById('impFile').onchange = e => { IMPFILE = e.target.files[0] || null; if(IMPFILE) impPreview(); };
+
 document.getElementById('vCard').onclick = () => setView('card');
 document.getElementById('vTable').onclick = () => setView('table');
 buildChips();
