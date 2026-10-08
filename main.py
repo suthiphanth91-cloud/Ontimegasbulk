@@ -2068,6 +2068,42 @@ def _array_cols(ws, head: int) -> set:
     return out
 
 
+def _row_is_dark(ws, row: int):
+    """แถวนี้พื้นหลังสีเข้ม (แถวสีดำคั่นระหว่างวัน) ไหม — อ่านสีพื้นของช่อง A–Z; อ่านไม่ได้ = None"""
+    try:
+        meta = ws.spreadsheet.fetch_sheet_metadata(params={
+            "ranges": [f"'{ws.title}'!A{row}:Z{row}"], "includeGridData": "true",
+            "fields": "sheets.data.rowData.values.effectiveFormat.backgroundColor"})
+        vals = meta["sheets"][0]["data"][0]["rowData"][0]["values"]
+        lums = []
+        for v in vals:
+            bg = (v.get("effectiveFormat") or {}).get("backgroundColor")
+            lums.append(1.0 if not bg else (bg.get("red", 0) + bg.get("green", 0) + bg.get("blue", 0)) / 3)
+        lums.sort()
+        return bool(lums) and lums[len(lums) // 2] < 0.35        # ช่องส่วนใหญ่ในแถวเป็นสีเข้ม
+    except Exception:
+        return None
+
+
+def _copy_down(ws, src_row: int, first: int, last: int) -> None:
+    """แถวที่แทรกใหม่ (first..last) คัดลอกสูตรของคอลัมน์ที่เป็นสูตรในแถวต้นแบบ (src_row) และดรอปลิสต์ทั้งแถว
+    ทำเต็มที่ ถ้า Google ไม่ยอมก็ข้าม ไม่กระทบการเขียนค่า"""
+    try:
+        top = ws.get(f"A{src_row}:Z{src_row}", value_render_option=gspread.utils.ValueRenderOption.formula) or [[]]
+        cols = [c for c, v in enumerate(list(top[0])[:PLAN_LAST_COL]) if str(v).startswith("=")]
+
+        def rng(r0: int, r1: int, c0: int, c1: int) -> dict:
+            return {"sheetId": ws.id, "startRowIndex": r0 - 1, "endRowIndex": r1,
+                    "startColumnIndex": c0, "endColumnIndex": c1}
+        reqs = [{"copyPaste": {"source": rng(src_row, src_row, c, c + 1), "destination": rng(first, last, c, c + 1),
+                               "pasteType": "PASTE_FORMULA"}} for c in cols]
+        reqs.append({"copyPaste": {"source": rng(src_row, src_row, 0, PLAN_LAST_COL),
+                                   "destination": rng(first, last, 0, PLAN_LAST_COL), "pasteType": "PASTE_DATA_VALIDATION"}})
+        ws.spreadsheet.batch_update({"requests": reqs})
+    except Exception:
+        pass
+
+
 @app.post("/api/plan/import", include_in_schema=False)
 async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = Form(""),
                       commit: int = Form(0), replace: int = Form(1)):
@@ -2117,23 +2153,36 @@ async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = 
         ws = gspread.authorize(_build_creds()).open_by_key(PLAN_PAGE_ID).worksheet(PLAN_PAGE_TAB)
         col_c = ws.col_values(PLAN_DATE + 1)
         head = _head_index(col_c)
-        removed = 0
-        if replace:
-            # ลบแถวของวันเดียวกัน (ไล่จากล่างขึ้นบน กันเลขแถวเลื่อน) แล้วค่อยลงชุดใหม่
-            hit = [i + 1 for i, v in enumerate(col_c) if i > head and _parse_date(v) == rv["date"]]
-            blocks: list = []
-            for r in hit:
-                if blocks and r == blocks[-1][1] + 1:
-                    blocks[-1][1] = r
-                else:
-                    blocks.append([r, r])
-            for a, b in reversed(blocks):
-                ws.delete_rows(a, b)
-            removed = len(hit)
-            col_c = ws.col_values(PLAN_DATE + 1)
-        last = max([i + 1 for i, v in enumerate(col_c) if str(v).strip()] + [head + 1])
-        start = last + 1
-        need = start + len(sheet_rows) - 1
+        n_new = len(sheet_rows)
+        removed = inserted = 0
+        hit = [i + 1 for i, v in enumerate(col_c) if i > head and _parse_date(v) == rv["date"]]   # แถวของวันนี้ (อ้างอิงคอลัมน์ C)
+        if hit and replace:
+            f, l = hit[0], hit[-1]
+            if len(hit) != l - f + 1:
+                raise HTTPException(status_code=409, detail=f"แถวของวันที่ {rv['date']} ในชีตกระจายหลายช่วง (แถว {f}–{l} มีวันอื่นคั่น) "
+                                    "ระบบไม่แทนที่ให้เพราะอาจทับข้อมูลวันอื่น — แก้ในชีตให้เป็นช่วงเดียวก่อน")
+            old = l - f + 1
+            start = f
+            if n_new > old:                                   # แถวใหม่มากกว่าเดิม → แทรกเพิ่มท้ายบล็อก (ก่อนแถวสีดำ)
+                inserted = n_new - old
+                ws.insert_rows([[""] * PLAN_LAST_COL] * inserted, row=l + 1, inherit_from_before=True)
+                _copy_down(ws, l, l + 1, l + inserted)
+            elif n_new < old:                                 # น้อยกว่าเดิม → ลบส่วนเกินท้ายบล็อก
+                removed = old - n_new
+                ws.delete_rows(f + n_new, l)
+            note = f"แทนที่บล็อกวันที่ {rv['date']} ที่ตำแหน่งเดิม (แถว {f}) แถวสีดำคั่นวันไม่ถูกแตะ"
+        else:
+            last = max([i + 1 for i, v in enumerate(col_c) if str(v).strip()] + [head + 1])
+            dark = _row_is_dark(ws, last + 1)                  # แถวถัดจากวันสุดท้ายเป็นแถวสีดำคั่นวันไหม
+            start = last + 2 if dark is not False else last + 1   # อ่านสีไม่ได้ = ถือว่าเป็นแถวสีดำ (ข้ามไว้ก่อนดีกว่าทับ)
+            last_day = max((d for d in (_parse_date(v) for v in col_c[head + 1:]) if d), default=None)
+            note = (f"วันที่ {rv['date']} ต่อท้ายวันสุดท้ายในชีต (แถว {start}) โดยข้ามแถวสีดำ" if start > last + 1
+                    else f"วันที่ {rv['date']} ต่อท้ายวันสุดท้ายในชีต (แถว {start})")
+            if last_day and rv["date"] < last_day:
+                note += f" — ระวัง: ในชีตมีวันที่ใหม่กว่า ({last_day}) อยู่แล้ว ระบบไม่ได้แทรกตามลำดับวัน"
+            if hit and not replace:
+                note += " — ไม่ได้ติ๊กแทนที่ จึงมีแถวของวันนี้ซ้ำ 2 ชุดในชีต"
+        need = start + n_new - 1
         if need > ws.row_count:
             ws.add_rows(need - ws.row_count)
         # ห้ามเขียนทับสูตรในชีต: ตรวจ "ทุกช่อง" ของช่วงที่จะเขียน (A–Z × ทุกแถวปลายทาง) ถ้าช่องไหนเป็นสูตร
@@ -2168,8 +2217,8 @@ async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = 
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"เขียนลงชีตไม่สำเร็จ — {type(e).__name__}: {e}")
     _drop_sheet_cache(PLAN_PAGE_ID, PLAN_PAGE_TAB)
-    return {**info, "written": len(sheet_rows), "removed": removed, "first_row": start,
-            "last_row": start + len(sheet_rows) - 1, "kept_formula_cols": kept_cols}
+    return {**info, "written": len(sheet_rows), "removed": removed, "inserted": inserted, "first_row": start,
+            "last_row": start + len(sheet_rows) - 1, "kept_formula_cols": kept_cols, "note": note}
 
 
 # ─── แก้ไขทีละช่องบนหน้าแผนงาน (ทดลอง) ───────────────────────────────────────────
@@ -3194,8 +3243,8 @@ function impRender(){
   }).join('') + '</tr>').join('');
   const nedit = Object.keys(IMP.edited).length;
   const ex = '<label><input type="checkbox" id="impReplace"' + (IMP.replace ? ' checked' : '') + '> ' + (j.existing
-    ? 'แทนที่งานเดิมของวันที่ ' + dmy(j.date) + ' (ชีตมีอยู่แล้ว ' + j.existing + ' แถว จะถูกลบก่อนลงชุดใหม่)'
-    : 'ลบงานเดิมของวันที่ ' + dmy(j.date) + ' ก่อนลงชุดใหม่ (ถ้ามี)') + '</label>';
+    ? 'แทนที่งานเดิมของวันที่ ' + dmy(j.date) + ' (ชีตมีอยู่แล้ว ' + j.existing + ' แถว) ที่ตำแหน่งเดิม ไม่แตะแถวสีดำคั่นวัน'
+    : 'วันที่ ' + dmy(j.date) + ' ยังไม่มีในชีต จะลงต่อท้ายวันสุดท้าย ข้ามแถวสีดำ') + '</label>';
   const ok = j.can_commit && j.total && !nerr;
   impBody(
     '<div class="box"><b>วันที่ ' + dmy(j.date) + '</b> · ' + j.total + ' แถวงาน · ปลายทาง: <b>' + esc(j.target) + '</b>' +
@@ -3237,9 +3286,9 @@ async function impCommit(){
     const r = await impSend({rows: IMP.rows, commit: true, replace: replace});
     if(!r) return;
     impBody('<div class="box ok">✓ เขียนแล้ว ' + r.written + ' แถว (แถวที่ ' + r.first_row + '–' + r.last_row + ' ในชีต)' +
-      (r.removed ? ' · ลบงานเดิม ' + r.removed + ' แถว' : '') +
+      (r.removed ? ' · ลบแถวส่วนเกิน ' + r.removed + ' แถว' : '') + (r.inserted ? ' · แทรกเพิ่ม ' + r.inserted + ' แถว' : '') +
       (r.kept_formula_cols && r.kept_formula_cols.length ? ' · ช่องที่เป็นสูตรในคอลัมน์ ' + r.kept_formula_cols.join(', ') + ' ระบบไม่ได้เขียนทับ ให้ชีตคำนวณเอง' : '') + '</div>' +
-      '<p class="mut">ปิดหน้าต่างนี้เพื่อดูผลในหน้าแผนงาน (เปลี่ยนไปวันที่ ' + dmy(r.date) + ' ให้แล้ว)</p>');
+      '<p class="mut">' + esc(r.note || '') + '</p><p class="mut">ปิดหน้าต่างนี้เพื่อดูผลในหน้าแผนงาน (เปลี่ยนไปวันที่ ' + dmy(r.date) + ' ให้แล้ว)</p>');
     document.getElementById('date').value = r.date; load(true);
   }catch(e){ impBody('<div class="box bad">เขียนไม่สำเร็จ: ' + esc(e.message) + '</div>'); }
 }
