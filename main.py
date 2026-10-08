@@ -2131,7 +2131,94 @@ def _edit_value(col: int, value: str) -> str:
         if not re.fullmatch(r"[0-9]+(\.[0-9]+)?", n):
             raise HTTPException(400, "น้ำหนักต้องเป็นตัวเลข เช่น 8000")
         return n
+    allowed = _plan_options()["strict"].get(str(col))
+    if allowed is not None and v not in allowed:        # ช่องเลือกอย่างเดียว: กันพิมพ์ผิดแม้ข้ามหน้าเว็บมาเรียกตรง
+        raise HTTPException(400, "ช่องนี้ต้องเลือกจากรายการ: " + ", ".join(allowed[:15]) + (" …" if len(allowed) > 15 else ""))
     return _sheet_safe(v[:500])
+
+
+# รายการให้เลือกตอนแก้ไข — อ่านจากไฟล์ (ไฟล์แผนงานก่อน แล้วไฟล์ต้นทาง) แคช 10 นาที
+#   ต้นทาง  ← แท็บ "List" คอลัมน์ A          เบอร์รถ ← แท็บ "ข้อมูลรถ" คอลัมน์ B
+#   พขร.    ← แท็บ "ข้อมูลพขร." คอลัมน์ C (ไม่นับคนที่มีวันพ้นสภาพ)
+#   ปลายทาง ← แท็บ "ข้อมูลสาขา" หรือ "ข้อมูลปลายทาง" คอลัมน์ A
+# ช่อง "เลือกอย่างเดียว" (strict) = ต้นทาง/เที่ยววิ่ง/Drop/ประเภทรถ, ช่อง "พิมพ์ค้นหา" (suggest) = ปลายทาง/เบอร์รถ/พขร.
+# ถ้าอ่านแท็บไม่ได้ ใช้รายการสำรองด้านล่างแทน (ต้นทางสำรองตรงกับชีต List ในไฟล์ Excel ใบจัดรถ)
+PLAN_DEPOT_FALLBACK = ["SC BPK", "IRPC", "BSRC", "PTT TANK", "PTT KK", "PTT NSW", "PTT SRT",
+                       "PTT  LP", "ATL พิจิตร", "ATL อุบลราชธานี", "UAC"]
+_FIXED_STRICT = {
+    "4":  ["เที่ยว 1", "เที่ยว 2", "เที่ยว 3"],      # E เที่ยววิ่ง
+    "13": ["1", "2", "3", "4", "5"],                  # N Drop
+    "16": ["08 Tons", "10 Tons", "Trailer"],          # Q ประเภทรถ
+}
+_SUGGEST_COLS = (12, 15, 18, 19)       # M ปลายทาง, P เบอร์รถ, S พขร.1, T พขร.2
+_OPTS_TTL = 600
+_opts_cache: tuple = (0.0, None)
+
+
+def _first_tab_values(tabs, col: int, ok=None):
+    """อ่านคอลัมน์ col ของแท็บแรกที่อ่านได้ (ลองไฟล์แผนงานแล้วไฟล์ต้นทาง) → (รายการไม่ซ้ำเรียงตามไฟล์, ที่มา)"""
+    seen_ids = []
+    for sid, label in ((PLAN_PAGE_ID, "ไฟล์แผนงาน"), (SOURCE_ID, "ไฟล์ต้นทาง")):
+        if sid in seen_ids:
+            continue
+        seen_ids.append(sid)
+        for tab in tabs:
+            try:
+                rows = _fetch_sheet(sid, tab)
+            except Exception:
+                continue
+            vals: list = []
+            for r in rows[1:]:
+                v = _cell(r, col)
+                if v and (ok is None or ok(r)) and v not in vals:
+                    vals.append(v)
+            if vals:
+                return vals, f"{tab} ({label})"
+    return [], ""
+
+
+def _plan_options() -> dict:
+    global _opts_cache
+    ts, hit = _opts_cache
+    if hit is not None and time() - ts < _OPTS_TTL:
+        return hit
+    src: dict = {}
+    origins, src["ต้นทาง"] = _first_tab_values(["List"], 0)
+    cars, src["เบอร์รถ"] = _first_tab_values(["ข้อมูลรถ"], 1, ok=lambda r: _cell(r, 1) != "เบอร์รถ")
+    drivers, src["พขร."] = _first_tab_values(["ข้อมูลพขร."], 2, ok=lambda r: not _cell(r, 6) and _cell(r, 2) != "ชื่อ-สกุล")
+    dests, src["ปลายทาง"] = _first_tab_values(["ข้อมูลสาขา", DEST_TAB], 0, ok=lambda r: _cell(r, 0) not in ("ปลางทาง", "ปลายทาง"))
+    if not origins:
+        origins, src["ต้นทาง"] = list(PLAN_DEPOT_FALLBACK), "รายการสำรองในระบบ"
+    for d in DEPOTS:                    # คลังที่ระบบรู้จัก ต้องเลือกได้เสมอ
+        if d not in origins:
+            origins.append(d)
+
+    seen: dict = {c: {} for c in _SUGGEST_COLS}       # ค่าที่มีอยู่แล้วในแผนงาน (เรียงตามที่พบบ่อย) เติมท้ายรายการ
+    try:
+        rows = _fetch_sheet(PLAN_PAGE_ID, PLAN_PAGE_TAB)
+        for r in rows[_plan_header_row(rows) + 1:]:
+            for c in _SUGGEST_COLS:
+                v = _cell(r, c)
+                if v:
+                    seen[c][v] = seen[c].get(v, 0) + 1
+    except Exception:
+        pass
+    def merged(base: list, c: int) -> list:
+        extra = [v for v, _ in sorted(seen[c].items(), key=lambda kv: (-kv[1], kv[0])) if v not in base]
+        return (base + extra)[:3000]
+    result = {
+        "strict": {**_FIXED_STRICT, "11": origins},
+        "suggest": {"12": merged(dests, 12), "15": merged(cars, 15), "18": merged(drivers, 18), "19": merged(drivers, 19)},
+        "from": src,
+    }
+    _opts_cache = (time(), result)
+    return result
+
+
+@app.get("/api/plan/options", include_in_schema=False)
+def plan_options():
+    """รายการตัวเลือกของช่อง: strict = ต้องเลือกจากรายการ, suggest = ค้นหา/พิมพ์ชื่อใหม่ได้ ('from' = อ่านมาจากแท็บไหน)"""
+    return _plan_options()
 
 
 @app.post("/api/plan/edit", include_in_schema=False)
@@ -2822,6 +2909,7 @@ function editorName(){                  // ชื่อผู้แก้ ไว
 function setEditing(on){
   if(on && !editorName()) return;       // ต้องบอกชื่อก่อนถึงเปิดโหมดแก้ไขได้
   EDITING = on;
+  if(on) loadOpts();                    // โหลดรายการตัวเลือกล่วงหน้า
   const b = document.getElementById('editBtn');
   b.classList.toggle('on', on);
   b.textContent = on ? '✏️ กำลังแก้ไข (กดเพื่อปิด)' : '✏️ โหมดแก้ไข';
@@ -2875,18 +2963,53 @@ async function saveCell(x, i, old, value, override){
   render();
 }
 
+let OPTS = null;
+async function loadOpts(){              // รายการตัวเลือกของช่อง (อ่านจากไฟล์ต้นทางฝั่งเซิร์ฟเวอร์)
+  if(OPTS) return;
+  try{
+    const r = await fetch('/api/plan/options');
+    if(!r.ok) return;
+    OPTS = await r.json();
+    let box = document.getElementById('dls');
+    if(!box){ box = document.createElement('div'); box.id = 'dls'; box.hidden = true; document.body.appendChild(box); }
+    box.innerHTML = Object.keys(OPTS.suggest).map(c => '<datalist id="dl' + c + '">' +
+      OPTS.suggest[c].map(v => '<option value="' + esc(v) + '"></option>').join('') + '</datalist>').join('');
+  }catch(e){}
+}
+
 function startEdit(td, x, i){
   const old = x.cells[i];
-  const inp = document.createElement('input');
-  inp.className = 'cellin'; inp.value = old;
-  td.textContent = ''; td.appendChild(inp); inp.focus(); inp.select();
-  let done = false;
+  const strict = OPTS && OPTS.strict[String(i)];            // ต้นทาง/เที่ยววิ่ง/Drop/ประเภทรถ = เลือกอย่างเดียว
+  const sug = OPTS && OPTS.suggest[String(i)];              // ปลายทาง/เบอร์รถ/พขร. = พิมพ์ค้นหาแล้วเลือก
+  let el, done = false;
   const finish = fn => { if(done) return; done = true; fn(); };
-  inp.addEventListener('keydown', ev => {
-    if(ev.key === 'Escape'){ ev.preventDefault(); finish(render); }
-    else if(ev.key === 'Enter'){ ev.preventDefault(); finish(() => saveCell(x, i, old, inp.value)); }
-  });
-  inp.addEventListener('blur', () => finish(render));      // คลิกที่อื่น = ยกเลิก ไม่บันทึกโดยไม่ตั้งใจ
+  if(strict){
+    el = document.createElement('select'); el.className = 'cellin';
+    const list = strict.slice();
+    if(old && list.indexOf(old) < 0) list.unshift(old);     // ค่าเดิมที่ไม่อยู่ในรายการ ยังเห็นและเลือกคืนได้
+    el.innerHTML = '<option value="">(ว่าง)</option>' + list.map(v => '<option>' + esc(v) + '</option>').join('');
+    el.value = old;
+    el.addEventListener('change', () => finish(() => saveCell(x, i, old, el.value)));   // เลือกแล้วบันทึกเลย
+    el.addEventListener('keydown', ev => { if(ev.key === 'Escape'){ ev.preventDefault(); finish(render); } });
+    el.addEventListener('blur', () => setTimeout(() => finish(render), 250));
+  }else{
+    el = document.createElement('input'); el.className = 'cellin'; el.value = old;
+    if(sug && sug.length){
+      el.setAttribute('list', 'dl' + i);
+      el.value = ''; el.placeholder = old || 'พิมพ์เพื่อค้นหา';   // ล้างไว้ก่อน รายการถึงจะเด้งครบ ไม่ถูกกรองด้วยค่าเดิม
+    }
+    el.addEventListener('keydown', ev => {
+      if(ev.key === 'Escape'){ ev.preventDefault(); finish(render); }
+      else if(ev.key === 'Enter'){
+        ev.preventDefault();
+        if(sug && sug.length && !el.value.trim()) finish(render);           // ไม่ได้พิมพ์/เลือกอะไร = ไม่เปลี่ยน
+        else finish(() => saveCell(x, i, old, el.value));
+      }
+    });
+    el.addEventListener('blur', () => finish(render));        // คลิกที่อื่น = ยกเลิก ไม่บันทึกโดยไม่ตั้งใจ
+  }
+  td.textContent = ''; td.appendChild(el); el.focus();
+  if(el.select && el.tagName === 'INPUT') el.select();
 }
 
 document.getElementById('rows').addEventListener('dblclick', e => {
@@ -2894,7 +3017,7 @@ document.getElementById('rows').addEventListener('dblclick', e => {
   const td = e.target.closest('td[data-r]');
   if(!td || td.querySelector('input')) return;
   const x = DATA.rows.find(r => r.row === Number(td.dataset.r));
-  if(x) startEdit(td, x, Number(td.dataset.c));
+  if(x) (OPTS ? Promise.resolve() : loadOpts()).then(() => startEdit(td, x, Number(td.dataset.c)));
 });
 document.getElementById('editBtn').onclick = () => setEditing(!EDITING);
 
