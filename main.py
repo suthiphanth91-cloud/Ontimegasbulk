@@ -2116,9 +2116,21 @@ PLAN_HTML = """<!doctype html>
   input[type=search]{min-width:190px}
   button{cursor:pointer;font-weight:600}
   button.primary{background:#2563eb;border-color:#2563eb;color:#fff}
-  a.nav{text-decoration:none;font-weight:600;color:var(--ink);padding:7px 11px;border-radius:9px;
-        border:1px solid var(--line)}
-  a.nav:hover{border-color:#2563eb;color:#2563eb}
+  /* เมนูหลักด้านซ้าย — จอเล็กย้ายขึ้นเป็นแถบแนวนอนด้านบน */
+  body{padding-left:148px}
+  .side{position:fixed;left:0;top:0;bottom:0;width:148px;background:var(--card);
+        border-right:1px solid var(--line);padding:14px 10px;display:flex;flex-direction:column;
+        gap:6px;z-index:20}
+  .side .menu{display:flex;align-items:center;gap:9px;text-decoration:none;font-weight:700;
+              font-size:15px;color:var(--ink);padding:11px 12px;border-radius:10px}
+  .side .menu:hover{background:var(--tr-bg)}
+  .side .menu.on{background:#2563eb;color:#fff}
+  @media (max-width:820px){
+    body{padding-left:0}
+    .side{position:static;width:auto;flex-direction:row;border-right:0;
+          border-bottom:1px solid var(--line);padding:8px 10px}
+    .side .menu{flex:1;justify-content:center;padding:9px 8px}
+  }
   main{padding:16px}
   .mut{color:var(--mut)}
   .cards{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px}
@@ -2208,6 +2220,10 @@ PLAN_HTML = """<!doctype html>
 </style>
 </head>
 <body>
+<aside class="side">
+  <a class="menu" href="/">🚛 เช็กรถ</a>
+  <a class="menu on" href="/plan">📋 แผนงาน</a>
+</aside>
 <header><div class="bar">
   <h1>📋 แผนงาน</h1>
   <span class="mut" id="stamp"></span>
@@ -2221,7 +2237,6 @@ PLAN_HTML = """<!doctype html>
   <span class="vlabel">มุมมอง:</span>
   <span class="seg"><button id="vCard">การ์ดรายคัน</button><button id="vTable">ตาราง A–Z</button></span>
   <button class="primary" id="go">รีเฟรช</button>
-  <a class="nav" href="/">🚛 ตารางเช็กรถ</a>
 </div></header>
 <main>
   <div class="cards" id="cards"></div>
@@ -2647,6 +2662,21 @@ DASHBOARD_HTML = """<!doctype html>
   .why{margin-top:5px;font-size:12px;line-height:1.45;color:var(--mut);white-space:normal;max-width:360px}
   /* วันที่ต่อท้าย ETA ที่ข้ามไปวันอื่น เช่น ~01:38 (13/09) */
   .etaday{color:var(--mut);font-size:12px;margin-left:3px}
+  /* เมนูหลักด้านซ้าย — จอเล็กย้ายขึ้นเป็นแถบแนวนอนด้านบน */
+  body{padding-left:148px}
+  .side{position:fixed;left:0;top:0;bottom:0;width:148px;background:var(--card);
+        border-right:1px solid var(--line);padding:14px 10px;display:flex;flex-direction:column;
+        gap:6px;z-index:20}
+  .side .menu{display:flex;align-items:center;gap:9px;text-decoration:none;font-weight:700;
+              font-size:15px;color:var(--ink);padding:11px 12px;border-radius:10px}
+  .side .menu:hover{background:var(--tr-bg)}
+  .side .menu.on{background:#2563eb;color:#fff}
+  @media (max-width:820px){
+    body{padding-left:0}
+    .side{position:static;width:auto;flex-direction:row;border-right:0;
+          border-bottom:1px solid var(--line);padding:8px 10px}
+    .side .menu{flex:1;justify-content:center;padding:9px 8px}
+  }
   .gear{text-decoration:none;font-size:19px;padding:6px 9px;border-radius:9px;
         border:1px solid var(--line);line-height:1}
   .gear:hover{border-color:#2563eb}
@@ -2721,6 +2751,10 @@ DASHBOARD_HTML = """<!doctype html>
 </style>
 </head>
 <body>
+<aside class="side">
+  <a class="menu on" href="/">🚛 เช็กรถ</a>
+  <a class="menu" href="/plan">📋 แผนงาน</a>
+</aside>
 <header>
   <div class="bar">
     <h1>🚛 Gasbulk Track</h1>
@@ -2732,7 +2766,6 @@ DASHBOARD_HTML = """<!doctype html>
     <button class="save-now" id="saveNow" title="ส่งสถานะที่เลือกไว้ลง Sheet ทันที (ปกติรอ 20 นาที)" hidden>
       💾 บันทึกลง Sheet (<span id="pendCount">0</span>)
     </button>
-    <a class="gear" href="/plan" title="แผนงาน">📋</a>
     <a class="gear" href="/settings" title="ตั้งค่า">⚙️</a>
   </div>
 </header>
