@@ -1905,20 +1905,17 @@ _IMP_DATE_COLS = (2, 5)         # C ประจำวันที่, F วั�
 _IMP_STAMP_COLS = (23, 24, 25)  # X, Y, Z เวลาแผน (P) → dd/mm/yyyy HH:MM:SS
 
 
-def _xl_cell(v, idx: int, iso: bool = False) -> str:
-    """ค่าจาก Excel → ข้อความ
-    iso=False: รูปแบบที่คนอ่าน (dd/mm/yyyy) ใช้โชว์ตัวอย่าง
-    iso=True : รูปแบบ yyyy-mm-dd ใช้เขียนลงชีต — Google Sheets แปลงเป็นวันที่ได้ถูกต้องทุกภาษา/โลแคล
-               (ถ้าเขียน 05/10/2026 ชีตที่ตั้งเป็นแบบสหรัฐจะอ่านเป็น 10 พ.ค. แทน 5 ต.ค.)"""
+def _xl_cell(v, idx: int) -> str:
+    """ค่าจาก Excel → ข้อความรูปแบบที่คนอ่าน (dd/mm/yyyy) ใช้โชว์ในตัวอย่าง; ตอนเขียนลงชีตจะถูกแปลงเป็น ISO
+    โดย _edit_value (กันชีตที่ตั้งโลแคลแบบสหรัฐอ่านวัน/เดือนสลับกัน)"""
     if v is None:
         return ""
     if isinstance(v, datetime):
-        d_fmt = "%Y-%m-%d" if iso else "%d/%m/%Y"
         if idx in _IMP_DATE_COLS:
-            return v.strftime(d_fmt)
+            return v.strftime("%d/%m/%Y")
         if idx in _IMP_STAMP_COLS or v.hour or v.minute or v.second:
-            return v.strftime(d_fmt + " %H:%M:%S")
-        return v.strftime(d_fmt)
+            return v.strftime("%d/%m/%Y %H:%M:%S")
+        return v.strftime("%d/%m/%Y")
     if hasattr(v, "hour") and hasattr(v, "minute") and not hasattr(v, "year"):   # datetime.time
         return v.strftime("%H:%M:%S")
     if isinstance(v, bool):
@@ -1938,7 +1935,7 @@ def _sheet_safe(s: str) -> str:
 
 
 def _parse_dispatch_xlsx(data: bytes) -> dict:
-    """อ่านใบจัดรถ → {date, headers, rows, warnings} ยังไม่เขียนอะไรที่ไหน"""
+    """อ่านใบจัดรถ → {headers, rows, notes} (rows เป็นข้อความรูปแบบที่คนอ่าน) ยังไม่ตรวจและไม่เขียนอะไรที่ไหน"""
     try:
         import openpyxl
         wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
@@ -1957,9 +1954,8 @@ def _parse_dispatch_xlsx(data: bytes) -> dict:
     headers = [str(c or "").replace("\n", " ").strip()
                for c in (grid[hdr] + [None] * 40)[IMPORT_COL_FIRST:IMPORT_COL_FIRST + PLAN_LAST_COL]]
 
-    rows, sheet_rows, warnings, seen = [], [], [], {}
-    uncomputed = 0
-    for n, r in enumerate(grid[hdr + 1:], start=hdr + 2):        # n = เลขแถวใน Excel
+    rows, uncomputed = [], 0
+    for r in grid[hdr + 1:]:
         cells = (list(r) + [None] * 40)[IMPORT_COL_FIRST:IMPORT_COL_FIRST + PLAN_LAST_COL]
         out = [_xl_cell(v, i) for i, v in enumerate(cells)]
         if not out[1]:                 # คอลัมน์ B = เลข JOB ว่าง = แถวว่าง/ไม่มีงาน
@@ -1967,27 +1963,54 @@ def _parse_dispatch_xlsx(data: bytes) -> dict:
                 uncomputed += 1        # มีข้อมูลแต่สูตรไม่มีค่า (ไฟล์ไม่เคยถูกคำนวณ/บันทึกใน Excel)
             continue
         rows.append(out)
-        sheet_rows.append([_sheet_safe(_xl_cell(v, i, iso=True)) for i, v in enumerate(cells)])
-        tag = f"แถว {n} ใน Excel"
+    notes = []
+    if uncomputed:
+        notes.append(f"มี {uncomputed} แถวที่มีข้อมูลแต่ช่องเลข JOB ว่าง — ถ้าไฟล์เพิ่งแก้ ให้เปิดแล้วกดบันทึกใน Excel ก่อนอัปโหลดใหม่")
+    return {"headers": headers, "rows": rows, "notes": notes}
+
+
+def _review_rows(rows: list, notes=None) -> dict:
+    """ตรวจชุดแถวที่จะนำเข้า (มาจากไฟล์ หรือที่แก้แล้วในหน้าต่างนำเข้า)
+    คืน rows ที่จัดรูปแล้ว, sheet_rows (ค่าที่จะเขียนลงชีต), errors (ช่องที่ผิด — ห้ามเขียนจนกว่าจะแก้),
+    warnings (ควรตรวจ แต่เขียนได้), date (วันที่ส่วนใหญ่ของชุด)"""
+    rows = [[("" if v is None else str(v)) for v in (list(r) + [""] * PLAN_LAST_COL)[:PLAN_LAST_COL]] for r in rows]
+    sheet_rows, errors, warnings, seen, marks = [], [], list(notes or []), {}, []
+    first_date = None
+    for n, out in enumerate(rows, start=1):
+        conv = []
+        for c, v in enumerate(out):
+            try:
+                conv.append(_edit_value(c, v))        # กติกาเดียวกับการแก้ทีละช่อง (วันที่/เวลา/น้ำหนัก/รายการเลือก)
+            except HTTPException as e:
+                errors.append({"r": n - 1, "c": c, "msg": str(e.detail)})
+                conv.append("")
+        sheet_rows.append(conv)
+        tag = f"แถวที่ {n}"
+
+        def flag(c: int, msg: str, listed: bool = True) -> None:
+            marks.append({"r": n - 1, "c": c, "msg": msg})      # ช่องนี้ต้องทำสีแดงในตาราง
+            if listed:
+                warnings.append(f"{tag}: {msg}")
+
         if not out[15]:
-            warnings.append(f"{tag}: ยังไม่ใส่เบอร์รถ")
+            flag(15, "ยังไม่ใส่เบอร์รถ")
         if not out[12]:
-            warnings.append(f"{tag}: ยังไม่ใส่ปลายทาง")
-        if "Check" in out:
-            warnings.append(f"{tag}: มีช่องที่ Excel ขึ้น \"Check\" (ข้อมูลอ้างอิงไม่พบ เช่น เบอร์รถไม่อยู่ในชีตข้อมูลรถ)")
+            flag(12, "ยังไม่ใส่ปลายทาง")
+        for c, v in enumerate(out):
+            if v == "Check":
+                flag(c, 'Excel ขึ้น "Check" (ข้อมูลอ้างอิงไม่พบ เช่น เบอร์รถไม่อยู่ในชีตข้อมูลรถ)')
         wt = out[9].replace(",", "")
         if out[16].startswith("08") and wt.replace(".", "", 1).isdigit() and float(wt) > 8000:
-            warnings.append(f"{tag}: น้ำหนัก {int(float(wt)):,} กก. เกิน 8,000 สำหรับรถ 08 Tons")
+            flag(9, f"น้ำหนัก {int(float(wt)):,} กก. เกิน 8,000 สำหรับรถ 08 Tons")
         key = (out[1], out[13])
-        if key in seen:
-            warnings.append(f"{tag}: เลข JOB + Drop ซ้ำกับแถว {seen[key]}")
+        if out[1] and key in seen:
+            flag(13, f"เลข JOB + Drop ซ้ำกับแถวที่ {seen[key]}")
         seen[key] = n
+        if not out[24]:
+            flag(24, "ยังไม่ใส่เวลาเข้าโหลด (P) — เวลาออกจากฟรีต/เวลาโทรตาม พขร จะว่างด้วย", listed=False)
     no_load = sum(1 for r in rows if not r[24])
     if no_load:
         warnings.append(f"{no_load} แถวยังไม่ใส่เวลาเข้าโหลด (P) — เวลาออกจากฟรีต/เวลาโทรตาม พขร ของแถวนั้นจะว่างด้วย")
-    if uncomputed:
-        warnings.append(f"มี {uncomputed} แถวที่มีข้อมูลแต่ช่องเลข JOB ว่าง — ถ้าไฟล์เพิ่งแก้ ให้เปิดแล้วกดบันทึกใน Excel ก่อนอัปโหลดใหม่")
-
     counts: dict = {}
     for r in rows:
         iso = _parse_date(r[2])
@@ -1995,16 +2018,26 @@ def _parse_dispatch_xlsx(data: bytes) -> dict:
             counts[iso] = counts.get(iso, 0) + 1
     date_iso = max(counts, key=counts.get) if counts else None
     if len(counts) > 1:
-        warnings.append("ไฟล์มีหลายวันที่ในคอลัมน์ ประจำวันที่: " + ", ".join(sorted(counts)))
-    return {"date": date_iso, "headers": headers, "rows": rows, "sheet_rows": sheet_rows,
-            "warnings": warnings[:40], "warnings_total": len(warnings)}
+        warnings.append("มีหลายวันที่ในคอลัมน์ ประจำวันที่: " + ", ".join(sorted(counts)))
+        for i, r in enumerate(rows):                  # แถวที่วันที่ไม่ตรงกับวันส่วนใหญ่ของชุด
+            if _parse_date(r[2]) != date_iso:
+                marks.append({"r": i, "c": 2, "msg": f"วันที่ไม่ตรงกับวันส่วนใหญ่ของไฟล์ ({date_iso})"})
+    return {"rows": rows, "sheet_rows": sheet_rows, "errors": errors[:200], "errors_total": len(errors),
+            "marks": marks[:1500], "warnings": warnings[:40], "warnings_total": len(warnings), "date": date_iso}
+
+
+def _flag_on(name: str) -> bool:
+    """สวิตช์เปิด = 1/true/yes/on (ไม่สนตัวพิมพ์เล็กใหญ่ ตัดช่องว่าง/ขึ้นบรรทัดใหม่/เครื่องหมายคำพูดที่ติดมาตอนวางค่า)"""
+    return os.environ.get(name, "").strip().strip("\"'").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _write_block_reason(flag: str) -> str:
     """ว่าง = เขียนได้ ถ้ามีข้อความ = เขียนไม่ได้เพราะอะไร
     flag = ชื่อสวิตช์ที่ต้องเปิด (PLAN_IMPORT_ENABLED สำหรับนำเข้า, PLAN_EDIT_ENABLED สำหรับแก้ทีละช่อง)"""
-    if os.environ.get(flag) != "1":
-        return f"ยังไม่เปิดการเขียนลงชีต (ตั้ง {flag}=1 ที่ Vercel) — ตอนนี้ดูได้อย่างเดียว"
+    if not _flag_on(flag):
+        seen = os.environ.get(flag)           # สวิตช์พวกนี้ไม่ใช่ความลับ โชว์ค่าที่เห็นจริงเพื่อไล่หาว่าตั้งผิดตรงไหน
+        hint = " [ระบบไม่เห็นตัวแปรนี้เลย — ตั้งแล้วต้อง Redeploy]" if seen is None else f" [ระบบเห็นค่า {seen!r} — ต้องเป็น 1]"
+        return f"ยังไม่เปิดการเขียนลงชีต (ตั้ง {flag}=1 ที่ Vercel){hint} — ตอนนี้ดูได้อย่างเดียว"
     if PLAN_PAGE_ID in (SOURCE_ID, PLAN_ID):
         return "ชีตปลายทางเป็นชีตจริง — ระบบยอมเขียนเฉพาะชีตทดลอง ตั้ง PLAN_PAGE_ID เป็นชีต DEMO ก่อน"
     return ""
@@ -2015,32 +2048,50 @@ def _import_block_reason() -> str:
 
 
 @app.post("/api/plan/import", include_in_schema=False)
-async def plan_import(file: UploadFile = File(...), commit: int = Form(0), replace: int = Form(1)):
-    data = await file.read()
-    if len(data) > IMPORT_MAX_BYTES:
-        raise HTTPException(status_code=413, detail="ไฟล์ใหญ่เกิน 4MB")
-    parsed = _parse_dispatch_xlsx(data)
-    sheet_rows = parsed.pop("sheet_rows")        # ฉบับ ISO สำหรับเขียนลงชีต ไม่ส่งกลับไปหน้าเว็บ
+async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = Form(""),
+                      commit: int = Form(0), replace: int = Form(1)):
+    """ครั้งแรกส่ง file (อ่านใบจัดรถ) ครั้งต่อไปส่ง rows_json (แถวที่แก้ในหน้าต่างนำเข้า) เพื่อตรวจซ้ำ/เขียนจริง"""
+    headers = None
+    if rows_json:
+        try:
+            rows_in = json.loads(rows_json)
+            assert isinstance(rows_in, list) and len(rows_in) <= 2000 and all(isinstance(r, list) for r in rows_in)
+        except Exception:
+            raise HTTPException(status_code=400, detail="ข้อมูลแถวที่ส่งมาไม่ถูกต้อง")
+        notes: list = []
+    else:
+        if file is None:
+            raise HTTPException(status_code=400, detail="ไม่ได้แนบไฟล์")
+        data = await file.read()
+        if len(data) > IMPORT_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="ไฟล์ใหญ่เกิน 4MB")
+        parsed = _parse_dispatch_xlsx(data)
+        rows_in, headers, notes = parsed["rows"], parsed["headers"], parsed["notes"]
+    rv = _review_rows(rows_in, notes)
+    sheet_rows = rv.pop("sheet_rows")
     block = _import_block_reason()
-    info = {**parsed, "total": len(parsed["rows"]), "can_commit": not block, "block_reason": block,
+    info = {**rv, "headers": headers, "total": len(rv["rows"]), "can_commit": not block, "block_reason": block,
             "target": "ชีตทดลอง" if PLAN_PAGE_ID != SOURCE_ID else "ชีตจริง", "existing": None}
 
     # ในชีตปลายทางมีงานของวันนี้อยู่แล้วกี่แถว (ถ้าอ่านได้) — เอาไว้เตือนก่อนแทนที่
-    if parsed["date"]:
+    if rv["date"]:
         try:
             sheet = _fetch_sheet(PLAN_PAGE_ID, PLAN_PAGE_TAB)
-            info["existing"] = sum(1 for r in sheet if _parse_date(_cell(r, PLAN_DATE)) == parsed["date"])
+            info["existing"] = sum(1 for r in sheet if _parse_date(_cell(r, PLAN_DATE)) == rv["date"])
         except Exception:
             info["existing"] = None
-    info["rows"] = parsed["rows"]
     if not commit:
         return info
 
     # ── เขียนจริง ──
     if block:
         raise HTTPException(status_code=403, detail=block)
-    if not parsed["rows"] or not parsed["date"]:
-        raise HTTPException(status_code=400, detail="ไม่มีแถวงาน หรืออ่านวันที่จากไฟล์ไม่ได้ — ไม่เขียนอะไรลงชีต")
+    if rv["errors_total"]:
+        e0 = rv["errors"][0]
+        raise HTTPException(status_code=400, detail=f"ยังมี {rv['errors_total']} ช่องที่ไม่ถูกต้อง (เช่น แถวที่ {e0['r'] + 1} "
+                            f"คอลัมน์ {_col_name(e0['c'])}: {e0['msg']}) — แก้ในตารางก่อนเขียนลงชีต")
+    if not rv["rows"] or not rv["date"]:
+        raise HTTPException(status_code=400, detail="ไม่มีแถวงาน หรืออ่านวันที่ไม่ได้ — ไม่เขียนอะไรลงชีต")
     try:
         ws = gspread.authorize(_build_creds()).open_by_key(PLAN_PAGE_ID).worksheet(PLAN_PAGE_TAB)
         col_c = ws.col_values(PLAN_DATE + 1)
@@ -2048,7 +2099,7 @@ async def plan_import(file: UploadFile = File(...), commit: int = Form(0), repla
         removed = 0
         if replace:
             # ลบแถวของวันเดียวกัน (ไล่จากล่างขึ้นบน กันเลขแถวเลื่อน) แล้วค่อยลงชุดใหม่
-            hit = [i + 1 for i, v in enumerate(col_c) if i > head and _parse_date(v) == parsed["date"]]
+            hit = [i + 1 for i, v in enumerate(col_c) if i > head and _parse_date(v) == rv["date"]]
             blocks: list = []
             for r in hit:
                 if blocks and r == blocks[-1][1] + 1:
@@ -2081,8 +2132,8 @@ async def plan_import(file: UploadFile = File(...), commit: int = Form(0), repla
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"เขียนลงชีตไม่สำเร็จ — {type(e).__name__}: {e}")
     _drop_sheet_cache(PLAN_PAGE_ID, PLAN_PAGE_TAB)
-    return {**info, "written": len(parsed["rows"]), "removed": removed, "first_row": start,
-            "last_row": start + len(parsed["rows"]) - 1, "kept_formula_cols": skip}
+    return {**info, "written": len(sheet_rows), "removed": removed, "first_row": start,
+            "last_row": start + len(sheet_rows) - 1, "kept_formula_cols": skip}
 
 
 # ─── แก้ไขทีละช่องบนหน้าแผนงาน (ทดลอง) ───────────────────────────────────────────
@@ -2594,7 +2645,7 @@ PLAN_HTML = """<!doctype html>
             align-items:flex-start;justify-content:center;padding:30px 16px;overflow:auto}
   .imp-back[hidden]{display:none}
   .imp{background:var(--card);border:1px solid var(--line);border-radius:14px;width:100%;
-       max-width:980px;padding:18px 20px}
+       max-width:1240px;padding:18px 20px}
   .imp-h{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
   .imp-h b{font-size:18px}
   .imp-h button{border:0;background:none;font-size:20px;padding:2px 8px}
@@ -2602,8 +2653,16 @@ PLAN_HTML = """<!doctype html>
   .imp .ok{color:#16a34a;font-weight:700}
   .imp .bad{color:var(--late);font-weight:700}
   .imp ul{margin:6px 0 0;padding-left:20px;font-size:13.5px;max-height:130px;overflow:auto}
-  .imp .tbl{max-height:300px;overflow:auto;border:1px solid var(--line);border-radius:10px}
+  .imp .tbl{max-height:420px;overflow:auto;border:1px solid var(--line);border-radius:10px}
   .imp table{font-size:13px;min-width:0;width:100%}
+  .imp th,.imp td{padding:6px 9px}
+  .imp thead th{position:sticky;top:0;background:var(--card);z-index:1}
+  .imp td[data-ir]{cursor:cell}
+  .imp td[data-ir]:hover{outline:2px solid #2563eb;outline-offset:-2px}
+  .imp td.ied{background:var(--cc-bg);font-weight:700}
+  .imp td.ierr{background:#fca5a5;color:#7f1d1d;outline:2px solid var(--late);outline-offset:-2px;font-weight:700}
+  .imp td.iwarn{background:#fee2e2;color:#991b1b;outline:2px dashed #ef4444;outline-offset:-2px}
+  .imp td.rn{color:var(--mut);font-size:11.5px}
   .imp button.go{background:#16a34a;border-color:#16a34a;color:#fff}
   .imp button.go:disabled{background:var(--pd-bg);border-color:var(--line);color:var(--mut);cursor:not-allowed}
   td.tm .mut{font-weight:500;font-size:12.5px}
@@ -2665,8 +2724,8 @@ PLAN_HTML = """<!doctype html>
 <div class="imp-back" id="impBack" hidden><div class="imp">
   <div class="imp-h"><b>📥 นำเข้าใบจัดรถจาก Excel</b><button id="impClose" title="ปิด">✕</button></div>
   <p class="mut" style="margin:0 0 8px;font-size:14px">
-    เลือกไฟล์ใบจัดรถ (.xlsx) ระบบอ่านชีต "ข้อมูลการจัดส่ง" คอลัมน์ E–AD แล้วแสดงตัวอย่างให้ตรวจก่อน
-    <b>ยังไม่เขียนอะไรลงชีตจนกว่าคุณจะกดยืนยัน</b></p>
+    เลือกไฟล์ใบจัดรถ (.xlsx) ระบบอ่านชีต "ข้อมูลการจัดส่ง" คอลัมน์ E–AD แล้วแสดงเป็นตาราง
+    <b>แก้ข้อมูลในตารางนี้ได้เลยก่อนนำเข้า</b> ยังไม่เขียนอะไรลงชีตจนกว่าคุณจะกดยืนยัน</p>
   <input type="file" id="impFile" accept=".xlsx">
   <div id="impBody"></div>
 </div></div>
@@ -2977,8 +3036,8 @@ async function loadOpts(){              // รายการตัวเลื�
   }catch(e){}
 }
 
-function startEdit(td, x, i){
-  const old = x.cells[i];
+// ตัวแก้ค่าในช่อง (ใช้ทั้งตารางหลักและตารางในหน้าต่างนำเข้า): เลือกอย่างเดียว / พิมพ์ค้นหา / พิมพ์อิสระ
+function openEditor(td, i, old, onSave, onCancel){
   const strict = OPTS && OPTS.strict[String(i)];            // ต้นทาง/เที่ยววิ่ง/Drop/ประเภทรถ = เลือกอย่างเดียว
   const sug = OPTS && OPTS.suggest[String(i)];              // ปลายทาง/เบอร์รถ/พขร. = พิมพ์ค้นหาแล้วเลือก
   let el, done = false;
@@ -2989,9 +3048,9 @@ function startEdit(td, x, i){
     if(old && list.indexOf(old) < 0) list.unshift(old);     // ค่าเดิมที่ไม่อยู่ในรายการ ยังเห็นและเลือกคืนได้
     el.innerHTML = '<option value="">(ว่าง)</option>' + list.map(v => '<option>' + esc(v) + '</option>').join('');
     el.value = old;
-    el.addEventListener('change', () => finish(() => saveCell(x, i, old, el.value)));   // เลือกแล้วบันทึกเลย
-    el.addEventListener('keydown', ev => { if(ev.key === 'Escape'){ ev.preventDefault(); finish(render); } });
-    el.addEventListener('blur', () => setTimeout(() => finish(render), 250));
+    el.addEventListener('change', () => finish(() => onSave(el.value)));              // เลือกแล้วบันทึกเลย
+    el.addEventListener('keydown', ev => { if(ev.key === 'Escape'){ ev.preventDefault(); finish(onCancel); } });
+    el.addEventListener('blur', () => setTimeout(() => finish(onCancel), 250));
   }else{
     el = document.createElement('input'); el.className = 'cellin'; el.value = old;
     if(sug && sug.length){
@@ -2999,17 +3058,22 @@ function startEdit(td, x, i){
       el.value = ''; el.placeholder = old || 'พิมพ์เพื่อค้นหา';   // ล้างไว้ก่อน รายการถึงจะเด้งครบ ไม่ถูกกรองด้วยค่าเดิม
     }
     el.addEventListener('keydown', ev => {
-      if(ev.key === 'Escape'){ ev.preventDefault(); finish(render); }
+      if(ev.key === 'Escape'){ ev.preventDefault(); finish(onCancel); }
       else if(ev.key === 'Enter'){
         ev.preventDefault();
-        if(sug && sug.length && !el.value.trim()) finish(render);           // ไม่ได้พิมพ์/เลือกอะไร = ไม่เปลี่ยน
-        else finish(() => saveCell(x, i, old, el.value));
+        if(sug && sug.length && !el.value.trim()) finish(onCancel);          // ไม่ได้พิมพ์/เลือกอะไร = ไม่เปลี่ยน
+        else finish(() => onSave(el.value));
       }
     });
-    el.addEventListener('blur', () => finish(render));        // คลิกที่อื่น = ยกเลิก ไม่บันทึกโดยไม่ตั้งใจ
+    el.addEventListener('blur', () => finish(onCancel));      // คลิกที่อื่น = ยกเลิก ไม่บันทึกโดยไม่ตั้งใจ
   }
   td.textContent = ''; td.appendChild(el); el.focus();
   if(el.select && el.tagName === 'INPUT') el.select();
+}
+
+function startEdit(td, x, i){
+  const old = x.cells[i];
+  openEditor(td, i, old, v => saveCell(x, i, old, v), render);
 }
 
 document.getElementById('rows').addEventListener('dblclick', e => {
@@ -3021,16 +3085,18 @@ document.getElementById('rows').addEventListener('dblclick', e => {
 });
 document.getElementById('editBtn').onclick = () => setEditing(!EDITING);
 
-// ── นำเข้าใบจัดรถจาก Excel: อัปโหลด → ดูตัวอย่าง/คำเตือน → ยืนยันถึงเขียนลงชีต ──
+// ── นำเข้าใบจัดรถจาก Excel: อัปโหลด → ตรวจ/แก้ในตาราง → ยืนยันถึงเขียนลงชีต ──
 let IMPFILE = null;
+let IMP = null;                          // {rows, headers, errs, edited, info, replace}
+const COLS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
 function impBody(html){ document.getElementById('impBody').innerHTML = html; }
 function dmy(iso){ return iso ? iso.slice(8,10) + '/' + iso.slice(5,7) + '/' + iso.slice(0,4) : '?'; }
 
-async function impSend(commit, replace){
+async function impSend(o){               // o = {rows?, commit?, replace?}  ไม่มี rows = ส่งไฟล์ที่เลือก
   const fd = new FormData();
-  fd.append('file', IMPFILE);
-  fd.append('commit', commit ? '1' : '0');
-  fd.append('replace', replace ? '1' : '0');
+  if(o.rows) fd.append('rows_json', JSON.stringify(o.rows)); else fd.append('file', IMPFILE);
+  fd.append('commit', o.commit ? '1' : '0');
+  fd.append('replace', o.replace ? '1' : '0');
   const r = await fetch('/api/plan/import', {method:'POST', body: fd});
   if(r.status === 401){ location.href = '/login'; return null; }
   let j = null;
@@ -3039,40 +3105,99 @@ async function impSend(commit, replace){
   return j;
 }
 
-async function impPreview(){
+function impMarkErrors(j){
+  IMP.errs = {}; IMP.warns = {};
+  (j.errors || []).forEach(e => { IMP.errs[e.r + ',' + e.c] = e.msg; });          // ผิดรูปแบบ: ห้ามเขียนจนกว่าจะแก้
+  (j.marks || []).forEach(m => { const k = m.r + ',' + m.c; IMP.warns[k] = IMP.warns[k] ? IMP.warns[k] + ' / ' + m.msg : m.msg; });
+}
+function impBadRows(){                   // แถวที่มีช่องแดงอย่างน้อย 1 ช่อง
+  const set = {};
+  Object.keys(IMP.errs).concat(Object.keys(IMP.warns)).forEach(k => { set[k.split(',')[0]] = 1; });
+  return set;
+}
+
+async function impPreview(){             // อ่านไฟล์ครั้งแรก
   impBody('<p class="mut">กำลังอ่านไฟล์...</p>');
   try{
-    const j = await impSend(false, true);
-    if(j) impShow(j);
+    await loadOpts();                    // รายการเลือก (ต้นทาง/ปลายทาง/รถ ฯลฯ) ไว้ใช้ตอนแก้ในตาราง
+    const j = await impSend({});
+    if(!j) return;
+    IMP = {rows: j.rows, headers: j.headers, edited: {}, errs: {}, warns: {}, info: j, replace: true, onlyBad: false};
+    impMarkErrors(j);
+    impRender();
   }catch(e){ impBody('<div class="box bad">อ่านไฟล์ไม่ได้: ' + esc(e.message) + '</div>'); }
 }
 
-function impShow(j){
-  const w = j.warnings.length
-    ? '<div class="box"><b class="bad">⚠ ควรตรวจ ' + j.warnings_total + ' เรื่อง</b><ul>' +
-      j.warnings.map(x => '<li>' + esc(x) + '</li>').join('') + '</ul></div>'
-    : '<div class="box ok">✓ ไม่พบปัญหาที่ระบบตรวจได้ (เบอร์รถ/ปลายทางครบ, น้ำหนัก, Drop ซ้ำ)</div>';
-  const rows = j.rows.map(c => '<tr><td>' + esc(c[6]) + '</td><td>' + esc(c[12]) + '</td><td>' + esc(c[15]) +
-    '</td><td>' + esc(c[9]) + '</td><td>' + esc(c[11]) + '</td><td>' + esc(c[13]) + '</td><td>' + esc(c[18]) + '</td></tr>').join('');
-  const ex = '<label><input type="checkbox" id="impReplace" checked> ' + (j.existing
-    ? 'แทนที่งานเดิมของวันที่ ' + dmy(j.date) + ' (ชีตมีอยู่แล้ว ' + j.existing + ' แถว จะถูกลบก่อนลงชุดใหม่)'
-    : 'ลบงานเดิมของวันที่ ' + dmy(j.date) + ' ก่อนลงชุดใหม่ (ถ้ามี)') + '</label>';
-  impBody(
-    '<div class="box"><b>วันที่ ' + dmy(j.date) + '</b> · ' + j.total + ' แถวงาน · ปลายทาง: <b>' + esc(j.target) + '</b></div>' + w +
-    '<div class="tbl"><table><thead><tr><th>เวลาส่ง</th><th>ปลายทาง</th><th>เบอร์รถ</th><th>น้ำหนัก</th><th>ต้นทาง</th><th>Drop</th><th>พขร.1</th></tr></thead><tbody>' +
-    rows + '</tbody></table></div><div class="box">' + ex + '</div>' +
-    (j.can_commit ? '' : '<div class="box bad">เขียนลงชีตไม่ได้ตอนนี้: ' + esc(j.block_reason) + '</div>') +
-    '<button class="go" id="impGo"' + (j.can_commit && j.total ? '' : ' disabled') + '>เขียน ' + j.total + ' แถวลงชีต</button>');
-  document.getElementById('impGo').onclick = () => impCommit(j);
+async function impRecheck(){             // ตรวจซ้ำหลังแก้ (ส่งแถวที่แก้ไปให้เซิร์ฟเวอร์ตรวจด้วยกติกาเดียวกับตอนเขียน)
+  try{
+    const j = await impSend({rows: IMP.rows});
+    if(j){ IMP.info = j; IMP.rows = j.rows; impMarkErrors(j); }
+  }catch(e){ toast('ตรวจซ้ำไม่สำเร็จ: ' + e.message, true); }
+  impRender();
 }
 
-async function impCommit(j){
-  const replace = document.getElementById('impReplace').checked;
+function impRender(){
+  const j = IMP.info, nerr = j.errors_total || 0;
+  const oldTbl = document.querySelector('#impBody .tbl');
+  const sx = oldTbl ? oldTbl.scrollLeft : 0, sy = oldTbl ? oldTbl.scrollTop : 0;
+  const w = j.warnings.length
+    ? '<div class="box"><b class="bad">⚠ ควรตรวจ ' + j.warnings_total + ' เรื่อง (เขียนลงชีตได้ แต่ควรดูก่อน)</b><ul>' +
+      j.warnings.map(x => '<li>' + esc(x) + '</li>').join('') + '</ul></div>'
+    : '<div class="box ok">✓ ไม่พบเรื่องที่ควรตรวจ</div>';
+  const er = nerr
+    ? '<div class="box"><b class="bad">✖ มี ' + nerr + ' ช่องที่ไม่ถูกต้อง (ช่องสีแดงในตาราง เอาเมาส์ชี้ดูสาเหตุ) — ต้องแก้ก่อนเขียนลงชีต</b></div>' : '';
+  const head = '<tr><th>#</th>' + IMP.headers.map((h, c) => '<th><small>' + COLS[c] + '</small>' + esc(h) + '</th>').join('') + '</tr>';
+  const bad = impBadRows(), nbad = Object.keys(bad).length;
+  const body = IMP.rows.map((r, ri) => (IMP.onlyBad && !bad[ri]) ? '' : '<tr><td class="rn">' + (ri + 1) + '</td>' + r.map((v, c) => {
+    const k = ri + ',' + c;
+    const cls = IMP.errs[k] ? ' class="ierr" title="' + esc(IMP.errs[k]) + '"'
+      : IMP.warns[k] ? ' class="iwarn" title="' + esc(IMP.warns[k]) + '"'
+      : IMP.edited[k] ? ' class="ied"' : '';
+    return '<td data-ir="' + ri + '" data-ic="' + c + '"' + cls + '>' + esc(v) + '</td>';
+  }).join('') + '</tr>').join('');
+  const nedit = Object.keys(IMP.edited).length;
+  const ex = '<label><input type="checkbox" id="impReplace"' + (IMP.replace ? ' checked' : '') + '> ' + (j.existing
+    ? 'แทนที่งานเดิมของวันที่ ' + dmy(j.date) + ' (ชีตมีอยู่แล้ว ' + j.existing + ' แถว จะถูกลบก่อนลงชุดใหม่)'
+    : 'ลบงานเดิมของวันที่ ' + dmy(j.date) + ' ก่อนลงชุดใหม่ (ถ้ามี)') + '</label>';
+  const ok = j.can_commit && j.total && !nerr;
+  impBody(
+    '<div class="box"><b>วันที่ ' + dmy(j.date) + '</b> · ' + j.total + ' แถวงาน · ปลายทาง: <b>' + esc(j.target) + '</b>' +
+    (nedit ? ' · <span class="ied" style="padding:1px 8px;border-radius:6px">แก้แล้ว ' + nedit + ' ช่อง</span>' : '') + '</div>' +
+    '<p class="mut" style="margin:6px 2px;font-size:13px">✏️ ดับเบิลคลิกช่องในตารางเพื่อแก้ก่อนเขียนลงชีต · Enter = ตกลง · Esc = ยกเลิก · ' +
+    '<b class="bad">ช่องสีแดง = มีปัญหา (เอาเมาส์ชี้ดูสาเหตุ)</b> · ช่องสีเหลือง = ที่คุณแก้</p>' + er + w +
+    '<label style="display:block;margin:6px 2px"><input type="checkbox" id="impOnlyBad"' + (IMP.onlyBad ? ' checked' : '') +
+    '> ดูเฉพาะแถวที่มีช่องสีแดง (' + nbad + ' แถว)</label>' +
+    '<div class="tbl"><table><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div>' +
+    '<div class="box">' + ex + '</div>' +
+    (j.can_commit ? '' : '<div class="box bad">เขียนลงชีตไม่ได้ตอนนี้: ' + esc(j.block_reason) + '</div>') +
+    '<button class="go" id="impGo"' + (ok ? '' : ' disabled') + '>เขียน ' + j.total + ' แถวลงชีต</button>');
+  const t = document.querySelector('#impBody .tbl');
+  if(t){ t.scrollLeft = sx; t.scrollTop = sy; }
+  document.getElementById('impReplace').onchange = e => { IMP.replace = e.target.checked; };
+  document.getElementById('impOnlyBad').onchange = e => { IMP.onlyBad = e.target.checked; impRender(); };
+  document.getElementById('impGo').onclick = impCommit;
+}
+
+function impSet(r, c, v){                // แก้ช่องในตารางนำเข้า แล้วตรวจซ้ำ
+  if(v === IMP.rows[r][c]){ impRender(); return; }
+  IMP.rows[r][c] = v; IMP.edited[r + ',' + c] = 1;
+  impRecheck();
+}
+
+document.getElementById('impBody').addEventListener('dblclick', e => {
+  const td = e.target.closest('td[data-ir]');
+  if(!td || !IMP || td.querySelector('input,select')) return;
+  const r = Number(td.dataset.ir), c = Number(td.dataset.ic);
+  openEditor(td, c, IMP.rows[r][c], v => impSet(r, c, v), impRender);
+});
+
+async function impCommit(){
+  const j = IMP.info, replace = IMP.replace;
   if(!confirm('เขียน ' + j.total + ' แถวของวันที่ ' + dmy(j.date) + ' ลง' + j.target +
               (replace ? ' และลบงานเดิมของวันนั้นก่อน' : '') + ' — ยืนยัน?')) return;
   const btn = document.getElementById('impGo'); btn.disabled = true; btn.textContent = 'กำลังเขียนลงชีต...';
   try{
-    const r = await impSend(true, replace);
+    const r = await impSend({rows: IMP.rows, commit: true, replace: replace});
     if(!r) return;
     impBody('<div class="box ok">✓ เขียนแล้ว ' + r.written + ' แถว (แถวที่ ' + r.first_row + '–' + r.last_row + ' ในชีต)' +
       (r.removed ? ' · ลบงานเดิม ' + r.removed + ' แถว' : '') +
