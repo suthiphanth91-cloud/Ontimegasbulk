@@ -2358,31 +2358,6 @@ PLAN_HTML = """<!doctype html>
   .job.chg{background:var(--chg-bg);box-shadow:inset 4px 0 0 #f59e0b}
   tbody tr.chg td{background:var(--chg-bg)}
   td[data-cc]{background:var(--cc-bg) !important;font-weight:700}
-  /* ── มุมมองการ์ดรายคัน ── */
-  .vlabel{font-size:14px;font-weight:700;color:var(--ink)}
-  .seg{display:inline-flex;border:2px solid #2563eb;border-radius:10px;overflow:hidden}
-  .seg button{border:0;border-radius:0;padding:9px 18px;font-size:15px;font-weight:700;
-              color:var(--ink);background:var(--card)}
-  .seg button + button{border-left:2px solid #2563eb}
-  .seg button:hover{background:var(--tr-bg)}
-  .seg button.on{background:#2563eb;color:#fff}
-  #cardView{display:grid;grid-template-columns:repeat(auto-fill,minmax(370px,1fr));gap:14px;align-items:start}
-  #cardView[hidden]{display:none}
-  .car-card{background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden}
-  .ch{padding:12px 16px;border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline}
-  .ch .cn{font-size:21px;font-weight:700;color:#7c3aed}
-  .ch .cm{font-size:13px;color:var(--mut)}
-  .ch .dr{flex-basis:100%;font-size:14px}
-  .job{display:flex;gap:14px;padding:11px 16px;border-bottom:1px solid var(--line)}
-  .job:last-child{border-bottom:0}
-  .jt{flex:0 0 62px;font-size:19px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.2}
-  .jt small{display:block;font-size:11.5px;font-weight:500;color:var(--mut)}
-  .jb{flex:1;min-width:0}
-  .jc{font-weight:700;font-size:15.5px;line-height:1.3}
-  .js{margin-top:3px;font-size:13px;color:var(--mut);display:flex;flex-wrap:wrap;gap:3px 10px;align-items:center}
-  .jp{margin-top:5px;font-size:12.5px;color:var(--mut);background:var(--pd-bg);border-radius:8px;padding:5px 9px;line-height:1.5}
-  .jp b{color:var(--ink);font-weight:600}
-  .rmk{color:#b45309;font-weight:600}
   /* ── หน้าต่างนำเข้า Excel ── */
   .imp-back{position:fixed;inset:0;background:rgba(15,23,42,.5);z-index:60;display:flex;
             align-items:flex-start;justify-content:center;padding:30px 16px;overflow:auto}
@@ -2400,9 +2375,6 @@ PLAN_HTML = """<!doctype html>
   .imp table{font-size:13px;min-width:0;width:100%}
   .imp button.go{background:#16a34a;border-color:#16a34a;color:#fff}
   .imp button.go:disabled{background:var(--pd-bg);border-color:var(--line);color:var(--mut);cursor:not-allowed}
-  .job.cx{background:var(--late-bg)}
-  .job.cx .jc{text-decoration:line-through;color:var(--late)}
-  .job.cx .jt{color:var(--late)}
   td.tm .mut{font-weight:500;font-size:12.5px}
   td.tm .xday{font-weight:700;font-size:12.5px;color:#d97706}
   a.tel{color:#16a34a;text-decoration:none;font-weight:600}
@@ -2435,8 +2407,6 @@ PLAN_HTML = """<!doctype html>
   <b id="dlabel" style="font-size:14px"></b>
   <select id="depot"><option value="">ทุกคลัง</option></select>
   <input type="search" id="q" placeholder="ค้นหา รถ / ลูกค้า / ทะเบียน / ออเดอร์">
-  <span class="vlabel">มุมมอง:</span>
-  <span class="seg"><button id="vCard">การ์ดรายคัน</button><button id="vTable">ตาราง A–Z</button></span>
   <button id="impOpen" title="อัปโหลดใบจัดรถ Excel เพื่อตรวจและนำเข้า">📥 นำเข้า Excel</button>
   <button class="primary" id="go">รีเฟรช</button>
 </div></header>
@@ -2453,7 +2423,6 @@ PLAN_HTML = """<!doctype html>
     <thead id="head"></thead>
     <tbody id="rows"></tbody>
   </table></div>
-  <div id="cardView" hidden></div>
   <p class="mut" style="font-size:13px">ข้อมูลจากชีต "แผนงาน Gasbulk" คอลัมน์ A–Z (อ่านอย่างเดียว) &middot; สีแดง = ยกเลิก/โหลดเก็บ</p>
 </main>
 
@@ -2529,14 +2498,6 @@ function render(){
     '<div class="c"><b>' + rows.length + '</b><span>แถวแผนงาน</span></div>' +
     '<div class="c"><b>' + (rows.length - cx) + '</b><span>ใช้งานจริง</span></div>' +
     '<div class="c"><b style="color:var(--late)">' + cx + '</b><span>ยกเลิก/โหลดเก็บ</span></div>';
-  const card = VIEW === 'card';
-  document.querySelector('.wrap').hidden = card;
-  document.getElementById('chips').hidden = card;
-  document.getElementById('cardView').hidden = !card;
-  document.getElementById('vCard').classList.toggle('on', card);
-  document.getElementById('vTable').classList.toggle('on', !card);
-  if(card){ renderCards(rows); return; }
-
   // เลือกเฉพาะคอลัมน์ในกลุ่มที่เปิดอยู่ (B = เลข JOB ตรึงไว้เสมอ)
   const shown = [];
   GROUPS.forEach(g => { if(ON[g.id]) g.cols.forEach(i => shown.push(i)); });
@@ -2621,66 +2582,6 @@ function updateBar(){
   document.getElementById('chgtxt').textContent = '🔔 เปลี่ยนตั้งแต่ครั้งก่อนที่คุณดู: ใหม่ ' + n +
     ' · แก้ไข ' + e + (GONE ? ' · หายไป ' + GONE : '') + ' แถว';
   document.getElementById('onlychg').checked = ONLYCHG;
-}
-
-let VIEW = 'card';
-try{ VIEW = localStorage.getItem('gb_plan_view') || 'card'; }catch(e){}
-function setView(v){
-  VIEW = v;
-  try{ localStorage.setItem('gb_plan_view', v); }catch(e){}
-  render();
-}
-
-function dkey(s){                       // "06/10/2026" → "20261006" ใช้เรียงลำดับ
-  const p = String(s || '').split('/');
-  return p.length === 3 ? p[2] + p[1].padStart(2,'0') + p[0].padStart(2,'0') : '';
-}
-function jobKey(x){ return dkey(x.cells[5]) + (x.cells[6] || '99:99').padStart(5,'0'); }
-
-// มุมมองการ์ด: 1 คัน = 1 การ์ด เรียงงานในคันนั้นตามเวลาส่ง เรียงการ์ดตามงานแรกของคัน
-function renderCards(rows){
-  const cars = new Map();
-  rows.forEach(x => {
-    const k = x.cells[15] || 'ไม่ระบุรถ';
-    if(!cars.has(k)) cars.set(k, []);
-    cars.get(k).push(x);
-  });
-  const list = [...cars.entries()].map(([car, items]) => {
-    items.sort((a, b) => jobKey(a).localeCompare(jobKey(b)));
-    return {car, items};
-  }).sort((a, b) => jobKey(a.items[0]).localeCompare(jobKey(b.items[0])));
-
-  document.getElementById('cardView').innerHTML = list.length ? list.map(g => {
-    const f = g.items.find(x => x.cells[15]) || g.items[0];       // ข้อมูลรถ/คนขับ เอาจากงานที่มีค่า
-    const withVal = i => (g.items.find(x => x.cells[i]) || f).cells[i];
-    const tels = [withVal(20), withVal(21)].filter(Boolean).map(t =>
-      '<a class="tel" href="tel:' + String(t).replace(/[^0-9+]/g, '') + '">📞 ' + esc(t) + '</a>').join(' ');
-    const names = [withVal(18), withVal(19)].filter(Boolean).map(esc).join(' / ');
-    const head = '<div class="ch"><span class="cn">' + esc(g.car) + '</span>' +
-      '<span class="cm">' + [withVal(16), withVal(17)].filter(Boolean).map(esc).join(' · ') + '</span>' +
-      '<span class="cm">' + g.items.length + ' งาน</span>' +
-      (names || tels ? '<div class="dr">' + names + (names && tels ? ' &nbsp; ' : '') + tels + '</div>' : '') + '</div>';
-    const jobs = g.items.map(x => {
-      const c = x.cells;
-      const plan = [['ออกฟรีโอ', c[23]], ['เข้าโหลด', c[24]], ['โทรตาม', c[25]]].filter(p => p[1])
-        .map(p => p[0] + ' <b>' + shortDT(p[1]) + '</b>').join(' &nbsp;·&nbsp; ');
-      // J = น้ำหนักบรรทุก, K = น้ำหนักสุทธิ (กก.) — K มักว่างจนกว่าจะชั่งเสร็จ
-      const kg = v => { const n = Number(String(v).replace(/,/g, '')); return isNaN(n) ? esc(v) : n.toLocaleString('en-US'); };
-      const vol = (c[9] ? kg(c[9]) + ' กก.' : '') + (c[10] ? ' (สุทธิ ' + kg(c[10]) + ')' : '');
-      const due = c[5] && dkey(c[5]) !== DATA.date.replace(/-/g, '') ? '<small class="xday">' + esc(c[5]) + '</small>' : '';
-      return '<div class="job' + (x.cancelled ? ' cx' : '') + (x.chg ? ' chg' : '') + '">' +
-        '<div class="jt">' + esc(c[6] || '--:--') + due + '</div>' +
-        '<div class="jb"><div class="jc">' + esc(c[12] || '(ไม่ระบุลูกค้า)') + '</div>' +
-        (x.chg ? '<div class="js" style="color:var(--chg-ink)">' + chgTag(x) + '</div>' : '') +
-        '<div class="js">' + (c[11] ? '<span class="pill">' + esc(c[11]) + '</span>' : '') +
-        (c[4] ? '<span>' + esc(c[4]) + (c[13] ? ' · Drop ' + esc(c[13]) : '') + '</span>' : '') +
-        (vol ? '<span>' + vol + '</span>' : '') + (c[7] ? '<span>' + esc(c[7]) + '</span>' : '') +
-        (c[8] ? '<span>โหลด ' + esc(c[8]) + '</span>' : '') + '</div>' +
-        (c[14] ? '<div class="js"><span class="rmk">หมายเหตุ: ' + esc(c[14]) + '</span></div>' : '') +
-        (plan ? '<div class="jp">' + plan + '</div>' : '') + '</div></div>';
-    }).join('');
-    return '<div class="car-card">' + head + jobs + '</div>';
-  }).join('') : '<div class="empty">ไม่มีแผนงานของวันที่เลือก (หรือถูกกรองด้วยคลัง/คำค้นหา)</div>';
 }
 
 // กลุ่มคอลัมน์ — ปิดกลุ่มที่ไม่ใช้ ตารางจะแคบลงจนไม่ต้องเลื่อนซ้ายขวา
@@ -2811,8 +2712,6 @@ document.getElementById('impOpen').onclick = () => { document.getElementById('im
 document.getElementById('impClose').onclick = () => { document.getElementById('impBack').hidden = true; };
 document.getElementById('impFile').onchange = e => { IMPFILE = e.target.files[0] || null; if(IMPFILE) impPreview(); };
 
-document.getElementById('vCard').onclick = () => setView('card');
-document.getElementById('vTable').onclick = () => setView('table');
 buildChips();
 load();
 </script>
