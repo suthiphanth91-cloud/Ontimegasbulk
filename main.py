@@ -2047,6 +2047,27 @@ def _import_block_reason() -> str:
     return _write_block_reason("PLAN_IMPORT_ENABLED")
 
 
+def _head_index(col_c: list) -> int:
+    """แถวหัวตาราง (นับจาก 0) จากคอลัมน์ C — ไม่เจอใช้แถวที่ 3 ตามชีตจริง"""
+    return next((i for i, v in enumerate(col_c[:6]) if "วันที่" in v and not _parse_date(v)), 2)
+
+
+def _array_cols(ws, head: int) -> set:
+    """คอลัมน์ A–Z ที่ชีตเติมลงมาด้วยสูตรอาร์เรย์ (ARRAYFORMULA) จากแถวบน — ช่องล่างๆ ดูเหมือนว่างเปล่า
+    แต่เขียนทับแล้วสูตรอาร์เรย์พัง (#REF!) จึงห้ามเขียนทั้งคอลัมน์"""
+    try:
+        top = ws.get(f"A1:Z{head + 4}", value_render_option=gspread.utils.ValueRenderOption.formula)
+    except Exception:
+        return set()
+    out: set = set()
+    for row in top or []:
+        for c, v in enumerate(list(row)[:PLAN_LAST_COL]):
+            u = str(v).upper()
+            if u.startswith("=") and "ARRAYFORMULA(" in u:
+                out.add(c)
+    return out
+
+
 @app.post("/api/plan/import", include_in_schema=False)
 async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = Form(""),
                       commit: int = Form(0), replace: int = Form(1)):
@@ -2095,7 +2116,7 @@ async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = 
     try:
         ws = gspread.authorize(_build_creds()).open_by_key(PLAN_PAGE_ID).worksheet(PLAN_PAGE_TAB)
         col_c = ws.col_values(PLAN_DATE + 1)
-        head = next((i for i, v in enumerate(col_c[:6]) if "วันที่" in v and not _parse_date(v)), 2)
+        head = _head_index(col_c)
         removed = 0
         if replace:
             # ลบแถวของวันเดียวกัน (ไล่จากล่างขึ้นบน กันเลขแถวเลื่อน) แล้วค่อยลงชุดใหม่
@@ -2115,25 +2136,40 @@ async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = 
         need = start + len(sheet_rows) - 1
         if need > ws.row_count:
             ws.add_rows(need - ws.row_count)
-        # คอลัมน์ A (ลำดับ) กับ B (เลข JOB) ในชีตเป็น "สูตร" ที่เติมลงมาถึงแถวว่างแล้ว — ถ้าแถวปลายทางมีสูตรอยู่
-        # ห้ามเขียนค่าทับ ให้เขียนตั้งแต่คอลัมน์ C เป็นต้นไป ปล่อยให้ชีตคำนวณ A–B เอง
-        skip = 0
+        # ห้ามเขียนทับสูตรในชีต: ตรวจ "ทุกช่อง" ของช่วงที่จะเขียน (A–Z × ทุกแถวปลายทาง) ถ้าช่องไหนเป็นสูตร
+        # หรืออยู่ในคอลัมน์ที่เติมด้วย ARRAYFORMULA ให้ส่ง None (Google Sheets API ข้ามช่องที่เป็น null ไม่แตะ)
+        end = start + len(sheet_rows) - 1
+        arr = _array_cols(ws, head)
         try:
-            pr = ws.get(f"A{start}:B{start}", value_render_option=gspread.utils.ValueRenderOption.formula)
-            head2 = list(pr[0]) if pr else []
-            if len(head2) >= 2 and all(str(v).startswith("=") for v in head2[:2]):
-                skip = 2
+            fm = ws.get(f"A{start}:Z{end}", value_render_option=gspread.utils.ValueRenderOption.formula) or []
         except Exception:
-            skip = 0
-        ws.update(values=[r[skip:] for r in sheet_rows], range_name=f"{_col_name(skip)}{start}",
-                  value_input_option="USER_ENTERED")
+            fm = []
+
+        def has_formula(ri: int, c: int) -> bool:
+            try:
+                return str(fm[ri][c]).startswith("=")
+            except IndexError:
+                return False
+
+        values, kept = [], set()
+        for ri, r in enumerate(sheet_rows):
+            out_row = []
+            for c in range(PLAN_LAST_COL):
+                if c in arr or has_formula(ri, c):
+                    out_row.append(None)
+                    kept.add(c)
+                else:
+                    out_row.append(r[c])
+            values.append(out_row)
+        ws.update(values=values, range_name=f"A{start}", value_input_option="USER_ENTERED")
+        kept_cols = "".join(_col_name(c) + " " for c in sorted(kept)).split()
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"เขียนลงชีตไม่สำเร็จ — {type(e).__name__}: {e}")
     _drop_sheet_cache(PLAN_PAGE_ID, PLAN_PAGE_TAB)
     return {**info, "written": len(sheet_rows), "removed": removed, "first_row": start,
-            "last_row": start + len(sheet_rows) - 1, "kept_formula_cols": skip}
+            "last_row": start + len(sheet_rows) - 1, "kept_formula_cols": kept_cols}
 
 
 # ─── แก้ไขทีละช่องบนหน้าแผนงาน (ทดลอง) ───────────────────────────────────────────
@@ -2302,7 +2338,12 @@ def plan_edit(p: PlanEdit):
         formula = str(fm[0][0]) if fm and fm[0] else ""
     except Exception:
         formula = ""
-    is_formula = formula.startswith("=")
+    in_array = False
+    try:
+        in_array = p.col in _array_cols(ws, _head_index(ws.col_values(PLAN_DATE + 1)))
+    except Exception:
+        in_array = False
+    is_formula = formula.startswith("=") or in_array
     if is_formula and not p.override:
         return JSONResponse(status_code=423, content={"detail":
             "ช่องนี้เป็นสูตรในชีต (ค่าถูกคำนวณจากช่องอื่น)", "formula": True, "current": cur[p.col]})
@@ -2328,7 +2369,7 @@ def plan_edit(p: PlanEdit):
             lg = sh.add_worksheet(EDIT_LOG_TAB, rows=2000, cols=8)
             lg.append_row(["เวลา", "ผู้แก้", "แถว", "คอลัมน์", "ค่าเดิม", "ค่าใหม่", "JOB|Drop", "หมายเหตุ"])
         lg.append_row([_thai_now().strftime("%Y-%m-%d %H:%M:%S"), p.by[:60], p.row, letter,
-                       p.old, shown, cur_key, ("เขียนทับสูตร: " + formula[:80]) if is_formula else ""],
+                       p.old, shown, cur_key, ("เขียนทับสูตร: " + (formula[:80] or "ARRAYFORMULA ของคอลัมน์")) if is_formula else ""],
                       value_input_option="RAW")
     except Exception:
         logged = False
@@ -3197,7 +3238,7 @@ async function impCommit(){
     if(!r) return;
     impBody('<div class="box ok">✓ เขียนแล้ว ' + r.written + ' แถว (แถวที่ ' + r.first_row + '–' + r.last_row + ' ในชีต)' +
       (r.removed ? ' · ลบงานเดิม ' + r.removed + ' แถว' : '') +
-      (r.kept_formula_cols ? ' · คอลัมน์ A–B (ลำดับ/เลข JOB) เป็นสูตรในชีต ระบบไม่ได้เขียนทับ ให้ชีตคำนวณเอง' : '') + '</div>' +
+      (r.kept_formula_cols && r.kept_formula_cols.length ? ' · ช่องที่เป็นสูตรในคอลัมน์ ' + r.kept_formula_cols.join(', ') + ' ระบบไม่ได้เขียนทับ ให้ชีตคำนวณเอง' : '') + '</div>' +
       '<p class="mut">ปิดหน้าต่างนี้เพื่อดูผลในหน้าแผนงาน (เปลี่ยนไปวันที่ ' + dmy(r.date) + ' ให้แล้ว)</p>');
     document.getElementById('date').value = r.date; load(true);
   }catch(e){ impBody('<div class="box bad">เขียนไม่สำเร็จ: ' + esc(e.message) + '</div>'); }
