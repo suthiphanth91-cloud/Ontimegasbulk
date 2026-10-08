@@ -69,7 +69,8 @@ TMS_WP_LOAD  = 2
 
 # Sheet 2a: ไฟล์ต้นทางจริง "แผนงานแก๊สบัลค์ใหม่" — คนหน้างานแก้ไขแผนงานที่ไฟล์นี้โดยตรง
 # ใช้อ่าน "รายการทริป" + "ข้อมูลปลายทาง" เท่านั้น (ยังไม่มีสิทธิ์เขียน แค่ Viewer)
-SOURCE_ID    = "1bwBmxGy1mlnAEIUm5ZNNV71tud3NCyPZlHesIwP4tUs"
+# ตั้ง Environment Variable "SOURCE_ID" เพื่อชี้ไปไฟล์ชีตทดลองได้ (ไม่ตั้ง = ใช้ไฟล์จริงเหมือนเดิม)
+SOURCE_ID    = os.environ.get("SOURCE_ID", "1bwBmxGy1mlnAEIUm5ZNNV71tud3NCyPZlHesIwP4tUs")
 
 # Sheet 2b: ไฟล์ปลายทางที่ระบบเขียนลง — แท็บรายวัน (dd.mm.yyyy) + ChaseLog + Master
 # ไม่ได้ใช้อ่านรายการทริปแล้ว (ย้ายไปอ่านจาก SOURCE_ID ตรง ๆ)
@@ -1819,6 +1820,74 @@ def dashboard():
     return DASHBOARD_HTML.replace("__NOPASS__", warn)
 
 
+PLAN_LAST_COL = 26   # แสดงคอลัมน์ A–Z ของชีตแผนงาน
+PLAN_FRESH_MIN_SECS = 15   # ปุ่มรีเฟรชอ่านชีตสดได้ไม่ถี่กว่านี้ (วินาที)
+
+
+def _col_name(i: int) -> str:
+    """0→A ... 25→Z (ใช้แสดงเหนือหัวตาราง ให้ตรงกับตัวอักษรคอลัมน์ในชีต)"""
+    return chr(ord("A") + i)
+
+
+def _plan_header_row(rows: list[list]) -> int:
+    """หาแถวหัวตาราง — ในชีตจริงแถว 1 เป็นป้าย Formula/Manual แถว 2 ว่าง หัวจริงอยู่แถว 3
+    แถว 1 กับแถว 3 มีช่องเต็มพอกัน จึงนับจำนวนช่องไม่ได้ ใช้หัวคอลัมน์วันที่ ("ประจำวันที่")
+    เป็นตัวระบุแทน แล้วค่อยถอยไปใช้แถวที่ช่องเยอะสุดถ้าไม่เจอ"""
+    for i, row in enumerate(rows[:6]):
+        if "วันที่" in _cell(row, PLAN_DATE) and not _parse_date(_cell(row, PLAN_DATE)):
+            return i
+    best, best_n = 0, -1
+    for i, row in enumerate(rows[:6]):
+        n = sum(1 for c in row[:PLAN_LAST_COL] if str(c).strip())
+        if n > best_n:
+            best, best_n = i, n
+    return best
+
+
+@app.get("/api/plan", include_in_schema=False)
+def plan_rows(date_str: str = Query(None, alias="date"), fresh: int = Query(0)):
+    """แผนงานของวันที่ระบุ คอลัมน์ A–Z ตามชีต "แผนงาน Gasbulk" (อ่านอย่างเดียว)
+
+    fresh=1 (ปุ่มรีเฟรช) = ข้ามแคชแล้วอ่านชีตสด แต่ไม่ถี่เกิน PLAN_FRESH_MIN_SECS วินาที
+    กันคนกดรัวจนทะลุโควตา Google Sheets (60 ครั้ง/นาที) ซึ่งใช้ร่วมกับหน้าเช็กรถ"""
+    target = date_str or _today_thai()
+    key = f"{SOURCE_ID}:{PLAN_TAB}"
+    old = _sheet_cache.get(key)
+    throttled = bool(fresh and old and time() - old[0] < PLAN_FRESH_MIN_SECS)
+    if fresh and not throttled:
+        _drop_sheet_cache(SOURCE_ID, PLAN_TAB)
+    try:
+        rows = _fetch_sheet(SOURCE_ID, PLAN_TAB)
+    except Exception:
+        if not old:
+            raise
+        _sheet_cache[key] = old          # อ่านสดไม่ได้ (เช่น quota เต็ม) — ใช้ของเดิมแทนหน้าจอว่าง
+        rows = old[1]
+    read_ts = _sheet_cache.get(key, (time(), None))[0]
+    read_at = datetime.fromtimestamp(read_ts, timezone(timedelta(hours=TZ_OFFSET))).strftime("%H:%M:%S")
+    h = _plan_header_row(rows)
+    headers = [{"col": _col_name(i), "name": _cell(rows[h], i) if rows else ""}
+               for i in range(PLAN_LAST_COL)]
+    out = []
+    for i in range(h + 1, len(rows)):
+        row = rows[i]
+        if _parse_date(_cell(row, PLAN_DATE)) != target:
+            continue
+        cells = [_cell(row, c) for c in range(PLAN_LAST_COL)]
+        # สถานะ AA อยู่นอกช่วง A–Z จึงอ่านจากแถวเต็ม ไม่ใช่จาก cells
+        flag = (_cell(row, PLAN_STATUS) + " " + _cell(row, PLAN_DEST)).lower()
+        cancelled = any(k in flag for k in CANCEL_KEYWORDS)
+        out.append({"row": i + 1, "cells": cells, "cancelled": cancelled})
+    return {"date": target, "fetched_at": _thai_now().strftime("%H:%M:%S"),
+            "sheet_read_at": read_at, "throttled": throttled,
+            "headers": headers, "total": len(out), "rows": out}
+
+
+@app.get("/plan", response_class=HTMLResponse, include_in_schema=False)
+def plan_page():
+    return PLAN_HTML
+
+
 @app.get("/login", response_class=HTMLResponse, include_in_schema=False)
 def login_page(error: str = ""):
     if not _app_password():
@@ -2013,6 +2082,439 @@ SETTINGS_HTML = """<!doctype html>
     document.getElementById('done').textContent = 'บันทึกแล้ว ✓';
     setTimeout(() => document.getElementById('done').textContent = '', 2000);
   };
+</script>
+</body></html>
+"""
+
+
+PLAN_HTML = """<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>แผนงาน — Gasbulk Track</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{--bg:#f1f5f9;--card:#fff;--line:#e2e8f0;--ink:#0f172a;--mut:#64748b;
+        --late:#dc2626;--late-bg:#fef2f2;--pd-bg:#f8fafc;--tr-bg:#eff6ff;
+        --chg-bg:#fffbeb;--chg-line:#fcd34d;--chg-ink:#92400e;--cc-bg:#fde68a}
+  @media (prefers-color-scheme:dark){
+    :root{--bg:#0b1220;--card:#131c2e;--line:#243044;--ink:#e8eef8;--mut:#93a3b8;
+          --late-bg:#3b1418;--pd-bg:#1a2434;--tr-bg:#0f2340;
+          --chg-bg:#2b2410;--chg-line:#92400e;--chg-ink:#fcd34d;--cc-bg:#5b4a14}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:'Noto Sans Thai',system-ui,-apple-system,sans-serif;font-size:15px}
+  header{background:var(--card);border-bottom:1px solid var(--line);padding:14px 18px;
+         position:sticky;top:0;z-index:10}
+  .bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+  h1{font-size:19px;margin:0;font-weight:700}
+  .grow{flex:1}
+  input,select,button{font-family:inherit;font-size:14px;padding:8px 12px;border-radius:9px;
+        border:1px solid var(--line);background:var(--card);color:var(--ink)}
+  input[type=search]{min-width:190px}
+  button{cursor:pointer;font-weight:600}
+  button.primary{background:#2563eb;border-color:#2563eb;color:#fff}
+  a.nav{text-decoration:none;font-weight:600;color:var(--ink);padding:7px 11px;border-radius:9px;
+        border:1px solid var(--line)}
+  a.nav:hover{border-color:#2563eb;color:#2563eb}
+  main{padding:16px}
+  .mut{color:var(--mut)}
+  .cards{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px}
+  .c{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 16px;min-width:120px}
+  .c b{display:block;font-size:24px;line-height:1.1}
+  .c span{font-size:12.5px;color:var(--mut)}
+  .wrap{background:var(--card);border:1px solid var(--line);border-radius:12px;
+        overflow:auto;max-height:calc(100vh - 250px)}
+  table{border-collapse:separate;border-spacing:0;width:100%;font-size:14px}
+  th,td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+  thead th{position:sticky;background:var(--card);z-index:2;font-weight:600}
+  thead tr.g th{top:0;text-align:center;font-size:12.5px;letter-spacing:.2px;color:#fff;padding:0 12px;height:28px}
+  thead tr.h th{top:28px;border-bottom:2px solid var(--line)}
+  thead th small{display:block;font-weight:500;color:var(--mut);font-size:11px}
+  .g-job{background:#2563eb}.g-prod{background:#0891b2}.g-car{background:#7c3aed}.g-plan{background:#d97706}
+  tbody tr:nth-child(even) td{background:var(--pd-bg)}
+  tbody tr:hover td{background:var(--tr-bg)}
+  tr.cx td{background:var(--late-bg) !important;color:var(--late)}
+  tr.cx td.cust{text-decoration:line-through}
+  /* ตรึงคอลัมน์ "แถว" กับ "เลข JOB" ไว้ซ้าย เลื่อนขวาแล้วยังรู้ว่าเป็นงานไหน */
+  th.sk,td.sk{position:sticky;background:var(--card);z-index:1}
+  thead th.sk{z-index:3}
+  th.sk1,td.sk1{left:0;min-width:52px}
+  th.sk2,td.sk2{left:52px;border-right:2px solid var(--line)}
+  td.rn{color:var(--mut);font-size:12px}
+  td.tm{font-weight:700;font-variant-numeric:tabular-nums}
+  td.cust{font-weight:600;max-width:280px;overflow:hidden;text-overflow:ellipsis}
+  td.car{font-weight:700;color:#7c3aed}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  td.pt{font-size:13px;color:var(--mut)}
+  .pill{display:inline-block;padding:2px 10px;border-radius:999px;background:var(--tr-bg);
+        color:#2563eb;font-weight:600;font-size:12.5px}
+  /* ── แถวที่เปลี่ยนตั้งแต่ครั้งก่อนที่ดู ── */
+  .chgbar{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;background:var(--chg-bg);
+          border:1px solid var(--chg-line);color:var(--chg-ink);border-radius:12px;
+          padding:10px 14px;margin-bottom:12px;font-weight:600}
+  .chgbar[hidden]{display:none}
+  .chgbar label{font-weight:600;cursor:pointer}
+  .chgbar button{border-color:var(--chg-line);color:var(--chg-ink);padding:6px 12px}
+  .tag{display:inline-block;background:#f59e0b;color:#fff;border-radius:6px;padding:1px 8px;
+       font-size:12px;font-weight:700;margin-right:6px}
+  .job.chg{background:var(--chg-bg);box-shadow:inset 4px 0 0 #f59e0b}
+  tbody tr.chg td{background:var(--chg-bg)}
+  td[data-cc]{background:var(--cc-bg) !important;font-weight:700}
+  /* ── มุมมองการ์ดรายคัน ── */
+  .vlabel{font-size:14px;font-weight:700;color:var(--ink)}
+  .seg{display:inline-flex;border:2px solid #2563eb;border-radius:10px;overflow:hidden}
+  .seg button{border:0;border-radius:0;padding:9px 18px;font-size:15px;font-weight:700;
+              color:var(--ink);background:var(--card)}
+  .seg button + button{border-left:2px solid #2563eb}
+  .seg button:hover{background:var(--tr-bg)}
+  .seg button.on{background:#2563eb;color:#fff}
+  #cardView{display:grid;grid-template-columns:repeat(auto-fill,minmax(370px,1fr));gap:14px;align-items:start}
+  #cardView[hidden]{display:none}
+  .car-card{background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  .ch{padding:12px 16px;border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline}
+  .ch .cn{font-size:21px;font-weight:700;color:#7c3aed}
+  .ch .cm{font-size:13px;color:var(--mut)}
+  .ch .dr{flex-basis:100%;font-size:14px}
+  .job{display:flex;gap:14px;padding:11px 16px;border-bottom:1px solid var(--line)}
+  .job:last-child{border-bottom:0}
+  .jt{flex:0 0 62px;font-size:19px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.2}
+  .jt small{display:block;font-size:11.5px;font-weight:500;color:var(--mut)}
+  .jb{flex:1;min-width:0}
+  .jc{font-weight:700;font-size:15.5px;line-height:1.3}
+  .js{margin-top:3px;font-size:13px;color:var(--mut);display:flex;flex-wrap:wrap;gap:3px 10px;align-items:center}
+  .jp{margin-top:5px;font-size:12.5px;color:var(--mut);background:var(--pd-bg);border-radius:8px;padding:5px 9px;line-height:1.5}
+  .jp b{color:var(--ink);font-weight:600}
+  .job.cx{background:var(--late-bg)}
+  .job.cx .jc{text-decoration:line-through;color:var(--late)}
+  .job.cx .jt{color:var(--late)}
+  td.tm .mut{font-weight:500;font-size:12.5px}
+  td.tm .xday{font-weight:700;font-size:12.5px;color:#d97706}
+  a.tel{color:#16a34a;text-decoration:none;font-weight:600}
+  a.tel:hover{text-decoration:underline}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;align-items:center}
+  .chips[hidden]{display:none}
+  .chip{padding:6px 14px;border-radius:999px;border:1px solid var(--line);background:var(--card);
+        color:var(--mut);cursor:pointer;font-size:13px;font-weight:600}
+  .chip.on{color:#fff;border-color:transparent}
+  .chip[data-g=job].on{background:#2563eb}.chip[data-g=prod].on{background:#0891b2}
+  .chip[data-g=car].on{background:#7c3aed}.chip[data-g=plan].on{background:#d97706}
+  .empty{padding:48px;text-align:center;color:var(--mut)}
+  .warn{background:var(--late-bg);color:var(--late);padding:10px 14px;border-radius:10px;margin-bottom:12px}
+  @media (max-width:820px){header{padding:11px 12px}main{padding:12px}
+    input[type=search],input[type=date]{flex:1 1 130px;min-width:0}}
+</style>
+</head>
+<body>
+<header><div class="bar">
+  <h1>📋 แผนงาน</h1>
+  <span class="mut" id="stamp"></span>
+  <span class="grow"></span>
+  <button id="prev" title="วันก่อนหน้า">&lsaquo;</button>
+  <input type="date" id="date">
+  <button id="next" title="วันถัดไป">&rsaquo;</button>
+  <b id="dlabel" style="font-size:14px"></b>
+  <select id="depot"><option value="">ทุกคลัง</option></select>
+  <input type="search" id="q" placeholder="ค้นหา รถ / ลูกค้า / ทะเบียน / ออเดอร์">
+  <span class="vlabel">มุมมอง:</span>
+  <span class="seg"><button id="vCard">การ์ดรายคัน</button><button id="vTable">ตาราง A–Z</button></span>
+  <button class="primary" id="go">รีเฟรช</button>
+  <a class="nav" href="/">🚛 ตารางเช็กรถ</a>
+</div></header>
+<main>
+  <div class="cards" id="cards"></div>
+  <div class="chgbar" id="chgbar" hidden>
+    <span id="chgtxt"></span>
+    <label><input type="checkbox" id="onlychg"> ดูเฉพาะที่เปลี่ยน</label>
+    <button id="ack">รับทราบทั้งหมด</button>
+  </div>
+  <div class="chips" id="chips"><span class="mut" style="font-size:13px">แสดงคอลัมน์:</span></div>
+  <div id="err" class="warn" hidden></div>
+  <div class="wrap"><table>
+    <thead id="head"></thead>
+    <tbody id="rows"></tbody>
+  </table></div>
+  <div id="cardView" hidden></div>
+  <p class="mut" style="font-size:13px">ข้อมูลจากชีต "แผนงาน Gasbulk" คอลัมน์ A–Z (อ่านอย่างเดียว) &middot; สีแดง = ยกเลิก/โหลดเก็บ</p>
+</main>
+<script>
+const SRC_COL = 11;   // L คลังต้นทาง
+let DATA = null;
+
+function esc(s){
+  return String(s == null ? '' : s).replace(/[&<>"]/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+function todayISO(){ return new Date(Date.now() + 7*3600*1000).toISOString().slice(0,10); }
+function shift(iso, n){
+  const d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0,10);
+}
+
+async function load(fresh){
+  const date = document.getElementById('date').value || todayISO();
+  const btn = document.getElementById('go');
+  if(fresh){ btn.disabled = true; btn.textContent = 'กำลังอ่านชีต...'; }
+  // ช่องวันที่ของเบราว์เซอร์อาจโชว์เป็น เดือน/วัน/ปี จึงบอกวันที่แบบไทยกำกับอีกที กันอ่านสลับ
+  const wd = ['อาทิตย์','จันทร์','อังคาร','พุธ','พฤหัสบดี','ศุกร์','เสาร์'];
+  const dd = new Date(date + 'T00:00:00Z');
+  document.getElementById('dlabel').textContent = isNaN(dd) ? '' :
+    'วัน' + wd[dd.getUTCDay()] + ' ' + date.slice(8,10) + '/' + date.slice(5,7) + '/' + date.slice(0,4);
+  const err = document.getElementById('err'); err.hidden = true;
+  try{
+    const r = await fetch('/api/plan?date=' + encodeURIComponent(date) + (fresh ? '&fresh=1' : ''));
+    if(r.status === 401){ location.href = '/login'; return; }
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    DATA = await r.json();
+  }catch(e){
+    err.textContent = 'โหลดแผนงานไม่สำเร็จ: ' + e.message; err.hidden = false; return;
+  }finally{
+    btn.disabled = false; btn.textContent = 'รีเฟรช';
+  }
+  // บอกว่าข้อมูลมาจากชีตตอนไหน (ไม่ใช่เวลาที่เปิดหน้า) จะได้รู้ว่าเห็นของล่าสุดหรือยัง
+  document.getElementById('stamp').textContent = 'ข้อมูลจากชีตเมื่อ ' + DATA.sheet_read_at +
+    (fresh && DATA.throttled ? ' (เพิ่งอ่านสดไปไม่นาน รออีกสักครู่แล้วกดใหม่)' : '');
+  computeChanges();
+  const sel = document.getElementById('depot'), keep = sel.value;
+  const depots = [...new Set(DATA.rows.map(x => x.cells[SRC_COL]).filter(Boolean))].sort();
+  sel.innerHTML = '<option value="">ทุกคลัง</option>' +
+    depots.map(d => '<option>' + esc(d) + '</option>').join('');
+  sel.value = depots.includes(keep) ? keep : '';
+  render();
+}
+
+function render(){
+  if(!DATA) return;
+  const q = document.getElementById('q').value.trim().toLowerCase();
+  const depot = document.getElementById('depot').value;
+  updateBar();
+  const rows = DATA.rows.filter(x =>
+    (!depot || x.cells[SRC_COL] === depot) && (!ONLYCHG || x.chg) &&
+    (!q || x.cells.join(' ').toLowerCase().includes(q)));
+  const cx = rows.filter(x => x.cancelled).length;
+  document.getElementById('cards').innerHTML =
+    '<div class="c"><b>' + rows.length + '</b><span>แถวแผนงาน</span></div>' +
+    '<div class="c"><b>' + (rows.length - cx) + '</b><span>ใช้งานจริง</span></div>' +
+    '<div class="c"><b style="color:var(--late)">' + cx + '</b><span>ยกเลิก/โหลดเก็บ</span></div>';
+  const card = VIEW === 'card';
+  document.querySelector('.wrap').hidden = card;
+  document.getElementById('chips').hidden = card;
+  document.getElementById('cardView').hidden = !card;
+  document.getElementById('vCard').classList.toggle('on', card);
+  document.getElementById('vTable').classList.toggle('on', !card);
+  if(card){ renderCards(rows); return; }
+
+  // เลือกเฉพาะคอลัมน์ในกลุ่มที่เปิดอยู่ (B = เลข JOB ตรึงไว้เสมอ)
+  const shown = [];
+  GROUPS.forEach(g => { if(ON[g.id]) g.cols.forEach(i => shown.push(i)); });
+  let band = '<th class="sk sk1" rowspan="2">แถว</th>';
+  GROUPS.forEach(g => {
+    if(!ON[g.id]) return;
+    band += '<th class="g-' + g.id + '" colspan="' + g.cols.length + '">' + g.name + '</th>';
+  });
+  document.getElementById('head').innerHTML = '<tr class="g">' + band + '</tr><tr class="h">' +
+    shown.map(i => '<th' + (i === 1 ? ' class="sk sk2"' : '') + '><small>' + DATA.headers[i].col +
+      '</small>' + esc(DATA.headers[i].name) + '</th>').join('') + '</tr>';
+  document.getElementById('rows').innerHTML = rows.length
+    ? rows.map(x => '<tr class="' + (x.cancelled ? 'cx ' : '') + (x.chg ? 'chg' : '') + '"><td class="sk sk1 rn">' +
+        x.row + (x.chg ? '<br><span class="tag">' + (x.chg.type === 'new' ? 'ใหม่' : 'แก้') + '</span>' : '') + '</td>' +
+        shown.map(i => {
+          const h = cell(x.cells[i], i);
+          return x.chg && x.chg.cols.includes(i)
+            ? h.replace('<td', '<td data-cc="1" title="' + esc('เดิม: ' + (x.chg.old[i] || 'ว่าง')) + '"') : h;
+        }).join('') + '</tr>').join('')
+    : '<tr><td colspan="30" class="empty">ไม่มีแผนงานของวันที่เลือก</td></tr>';
+}
+
+// ── เทียบกับที่เห็นครั้งก่อน (เก็บในเบราว์เซอร์ของแต่ละคน ไม่เขียนลงชีต) ──
+// ข้ามคอลัมน์ A (ลำดับ) เพราะเป็นสูตรรันเลข แทรกแถวทีเดียวเลขเลื่อนทั้งตาราง จะขึ้นว่าแก้ทุกแถว
+const SEEN_PREFIX = 'gb_plan_seen_';
+let ONLYCHG = false, GONE = 0;
+
+function rowKeys(rows){                 // คีย์แถว = เลข JOB + Drop (JOB เดียวกันมีหลาย Drop) ถ้าซ้ำ/ว่างใช้เลขแถวในชีต
+  const used = {};
+  return rows.map(x => {
+    let k = x.cells[1] ? x.cells[1] + '|' + x.cells[13] : ('r' + x.row);
+    if(used[k]){ k = k + '#' + x.row; }
+    used[k] = 1;
+    return k;
+  });
+}
+function readSeen(date){
+  try{ return JSON.parse(localStorage.getItem(SEEN_PREFIX + date)); }catch(e){ return null; }
+}
+function saveSeen(){                    // จำค่าที่เห็นตอนนี้ไว้เป็นฐานเทียบครั้งหน้า
+  const snap = {};
+  DATA.rows.forEach(x => { snap[x.key] = x.cells; });
+  try{
+    localStorage.setItem(SEEN_PREFIX + DATA.date, JSON.stringify(snap));
+    // เก็บไว้ไม่เกิน 10 วัน กันเต็มโควตาเบราว์เซอร์
+    const ks = Object.keys(localStorage).filter(k => k.indexOf(SEEN_PREFIX) === 0).sort();
+    while(ks.length > 10){ localStorage.removeItem(ks.shift()); }
+  }catch(e){}
+}
+function computeChanges(){
+  const keys = rowKeys(DATA.rows);
+  DATA.rows.forEach((x, i) => { x.key = keys[i]; x.chg = null; });
+  GONE = 0;
+  const base = readSeen(DATA.date);
+  if(!base){ saveSeen(); return; }          // ครั้งแรกของวันนี้ = จำไว้เฉยๆ ไม่ขึ้นว่ามีอะไรเปลี่ยน
+  const seen = {};
+  DATA.rows.forEach(x => {
+    seen[x.key] = 1;
+    const old = base[x.key];
+    if(!old){ x.chg = {type:'new', cols:[], old:{}}; return; }
+    const cols = [], oldv = {};
+    x.cells.forEach((c, i) => { if(i > 0 && c !== (old[i] || '')){ cols.push(i); oldv[i] = old[i] || ''; } });
+    if(cols.length) x.chg = {type:'edit', cols, old: oldv};
+  });
+  GONE = Object.keys(base).filter(k => !seen[k]).length;
+}
+function chgName(i){ return DATA.headers[i].name || DATA.headers[i].col; }
+function chgTag(x){                     // ป้ายบอกว่าแถวนี้ใหม่/แก้อะไร พร้อมค่าเดิม → ค่าใหม่
+  if(!x.chg) return '';
+  if(x.chg.type === 'new') return '<span class="tag">ใหม่</span>';
+  const shown = x.chg.cols.slice(0, 4).map(i =>
+    esc(chgName(i)) + ' "' + esc(x.chg.old[i] || 'ว่าง') + '" → "' + esc(x.cells[i] || 'ว่าง') + '"');
+  const more = x.chg.cols.length > 4 ? ' และอีก ' + (x.chg.cols.length - 4) + ' ช่อง' : '';
+  return '<span class="tag">แก้</span><span>' + shown.join(' · ') + more + '</span>';
+}
+function updateBar(){
+  const n = DATA.rows.filter(x => x.chg && x.chg.type === 'new').length;
+  const e = DATA.rows.filter(x => x.chg && x.chg.type === 'edit').length;
+  const bar = document.getElementById('chgbar');
+  bar.hidden = !(n || e || GONE);
+  if(bar.hidden) ONLYCHG = false;
+  document.getElementById('chgtxt').textContent = '🔔 เปลี่ยนตั้งแต่ครั้งก่อนที่คุณดู: ใหม่ ' + n +
+    ' · แก้ไข ' + e + (GONE ? ' · หายไป ' + GONE : '') + ' แถว';
+  document.getElementById('onlychg').checked = ONLYCHG;
+}
+
+let VIEW = 'card';
+try{ VIEW = localStorage.getItem('gb_plan_view') || 'card'; }catch(e){}
+function setView(v){
+  VIEW = v;
+  try{ localStorage.setItem('gb_plan_view', v); }catch(e){}
+  render();
+}
+
+function dkey(s){                       // "06/10/2026" → "20261006" ใช้เรียงลำดับ
+  const p = String(s || '').split('/');
+  return p.length === 3 ? p[2] + p[1].padStart(2,'0') + p[0].padStart(2,'0') : '';
+}
+function jobKey(x){ return dkey(x.cells[5]) + (x.cells[6] || '99:99').padStart(5,'0'); }
+
+// มุมมองการ์ด: 1 คัน = 1 การ์ด เรียงงานในคันนั้นตามเวลาส่ง เรียงการ์ดตามงานแรกของคัน
+function renderCards(rows){
+  const cars = new Map();
+  rows.forEach(x => {
+    const k = x.cells[15] || 'ไม่ระบุรถ';
+    if(!cars.has(k)) cars.set(k, []);
+    cars.get(k).push(x);
+  });
+  const list = [...cars.entries()].map(([car, items]) => {
+    items.sort((a, b) => jobKey(a).localeCompare(jobKey(b)));
+    return {car, items};
+  }).sort((a, b) => jobKey(a.items[0]).localeCompare(jobKey(b.items[0])));
+
+  document.getElementById('cardView').innerHTML = list.length ? list.map(g => {
+    const f = g.items.find(x => x.cells[15]) || g.items[0];       // ข้อมูลรถ/คนขับ เอาจากงานที่มีค่า
+    const withVal = i => (g.items.find(x => x.cells[i]) || f).cells[i];
+    const tels = [withVal(20), withVal(21)].filter(Boolean).map(t =>
+      '<a class="tel" href="tel:' + String(t).replace(/[^0-9+]/g, '') + '">📞 ' + esc(t) + '</a>').join(' ');
+    const names = [withVal(18), withVal(19)].filter(Boolean).map(esc).join(' / ');
+    const head = '<div class="ch"><span class="cn">' + esc(g.car) + '</span>' +
+      '<span class="cm">' + [withVal(16), withVal(17)].filter(Boolean).map(esc).join(' · ') + '</span>' +
+      '<span class="cm">' + g.items.length + ' งาน</span>' +
+      (names || tels ? '<div class="dr">' + names + (names && tels ? ' &nbsp; ' : '') + tels + '</div>' : '') + '</div>';
+    const jobs = g.items.map(x => {
+      const c = x.cells;
+      const plan = [['ออกฟรีโอ', c[23]], ['เข้าโหลด', c[24]], ['โทรตาม', c[25]]].filter(p => p[1])
+        .map(p => p[0] + ' <b>' + shortDT(p[1]) + '</b>').join(' &nbsp;·&nbsp; ');
+      const vol = c[9] ? Number(String(c[9]).replace(/,/g, '')).toLocaleString('en-US') + ' ' + esc(c[10]) : '';
+      const due = c[5] && dkey(c[5]) !== DATA.date.replace(/-/g, '') ? '<small class="xday">' + esc(c[5]) + '</small>' : '';
+      return '<div class="job' + (x.cancelled ? ' cx' : '') + (x.chg ? ' chg' : '') + '">' +
+        '<div class="jt">' + esc(c[6] || '--:--') + due + '</div>' +
+        '<div class="jb"><div class="jc">' + esc(c[12] || '(ไม่ระบุลูกค้า)') + '</div>' +
+        (x.chg ? '<div class="js" style="color:var(--chg-ink)">' + chgTag(x) + '</div>' : '') +
+        '<div class="js">' + (c[11] ? '<span class="pill">' + esc(c[11]) + '</span>' : '') +
+        (c[4] ? '<span>' + esc(c[4]) + (c[13] ? ' · Drop ' + esc(c[13]) : '') + '</span>' : '') +
+        (vol ? '<span>' + vol + '</span>' : '') + (c[7] ? '<span>' + esc(c[7]) + '</span>' : '') + '</div>' +
+        (plan ? '<div class="jp">' + plan + '</div>' : '') + '</div></div>';
+    }).join('');
+    return '<div class="car-card">' + head + jobs + '</div>';
+  }).join('') : '<div class="empty">ไม่มีแผนงานของวันที่เลือก (หรือถูกกรองด้วยคลัง/คำค้นหา)</div>';
+}
+
+// กลุ่มคอลัมน์ — ปิดกลุ่มที่ไม่ใช้ ตารางจะแคบลงจนไม่ต้องเลื่อนซ้ายขวา
+const GROUPS = [
+  {id:'job',  name:'ใบงาน',           cols:[0,1,2,3,4,5,6,7]},
+  {id:'prod', name:'สินค้า / จุดส่ง', cols:[8,9,10,11,12,13]},
+  {id:'car',  name:'รถ / พขร.',       cols:[14,15,16,17,18,19,20,21]},
+  {id:'plan', name:'แผนเวลา',         cols:[22,23,24,25]},
+];
+let ON = {job:true, prod:true, car:true, plan:true};
+try{ Object.assign(ON, JSON.parse(localStorage.getItem('gb_plan_groups') || '{}')); }catch(e){}
+
+function buildChips(){
+  const box = document.getElementById('chips');
+  GROUPS.forEach(g => {
+    const b = document.createElement('button');
+    b.className = 'chip'; b.dataset.g = g.id; b.textContent = g.name;
+    const sync = () => b.classList.toggle('on', !!ON[g.id]);
+    b.onclick = () => {
+      ON[g.id] = !ON[g.id]; sync(); render();
+      try{ localStorage.setItem('gb_plan_groups', JSON.stringify(ON)); }catch(e){}
+    };
+    sync(); box.appendChild(b);
+  });
+}
+
+// "06/10/2026, 03:00" → "03:00" (ถ้าเป็นคนละวันกับที่เลือก ใส่ "05/10 03:00" ให้รู้ว่าข้ามวัน)
+function shortDT(s){
+  const parts = String(s || '').split(', ');            // ["06/10/2026", "03:00"]
+  const d = (parts[0] || '').split('/');                // ["06", "10", "2026"]
+  if(parts.length < 2 || d.length !== 3) return esc(s);
+  const sameDay = DATA && (d[2] + '-' + d[1].padStart(2,'0') + '-' + d[0].padStart(2,'0')) === DATA.date;
+  // แสดงเหมือนในชีตเดิม "02/10/2026, 17:00" — วันที่จางถ้าเป็นวันเดียวกับที่เลือก, ส้มถ้าข้ามวัน
+  const day = '<span class="' + (sameDay ? 'mut' : 'xday') + '">' + d[0] + '/' + d[1] + '/' + d[2] + ',</span> ';
+  return day + esc(parts[1]);
+}
+
+function cell(v, i){
+  if(v === '') return '<td></td>';
+  if(i === 1)  return '<td class="sk sk2">' + esc(v) + '</td>';
+  if(i === 6)  return '<td class="tm">' + esc(v) + '</td>';
+  if(i === 9){ const n = Number(String(v).replace(/,/g, ''));
+    return '<td class="num">' + (isNaN(n) ? esc(v) : n.toLocaleString('en-US')) + '</td>'; }
+  if(i === 11) return '<td><span class="pill">' + esc(v) + '</span></td>';
+  if(i === 12) return '<td class="cust" title="' + esc(v) + '">' + esc(v) + '</td>';
+  if(i === 15) return '<td class="car">' + esc(v) + '</td>';
+  if(i === 20 || i === 21){
+    const tel = String(v).replace(/[^0-9+]/g, '');
+    return '<td><a class="tel" href="tel:' + tel + '">' + esc(v) + '</a></td>'; }
+  if(i >= 23)  return '<td class="tm">' + shortDT(v) + '</td>';
+  return '<td>' + esc(v) + '</td>';
+}
+
+const dateEl = document.getElementById('date');
+dateEl.value = todayISO();
+dateEl.addEventListener('change', () => load(false));
+document.getElementById('prev').onclick = () => { dateEl.value = shift(dateEl.value || todayISO(), -1); load(); };
+document.getElementById('next').onclick = () => { dateEl.value = shift(dateEl.value || todayISO(), 1); load(); };
+document.getElementById('go').onclick = () => load(true);
+document.getElementById('depot').addEventListener('change', render);
+document.getElementById('q').addEventListener('input', render);
+document.getElementById('onlychg').onchange = e => { ONLYCHG = e.target.checked; render(); };
+document.getElementById('ack').onclick = () => {          // รับทราบ = ใช้ข้อมูลตอนนี้เป็นฐานเทียบใหม่
+  if(!DATA) return;
+  saveSeen(); computeChanges(); ONLYCHG = false; render();
+};
+document.getElementById('vCard').onclick = () => setView('card');
+document.getElementById('vTable').onclick = () => setView('table');
+buildChips();
+load();
 </script>
 </body></html>
 """
@@ -2225,6 +2727,7 @@ DASHBOARD_HTML = """<!doctype html>
     <button class="save-now" id="saveNow" title="ส่งสถานะที่เลือกไว้ลง Sheet ทันที (ปกติรอ 20 นาที)" hidden>
       💾 บันทึกลง Sheet (<span id="pendCount">0</span>)
     </button>
+    <a class="gear" href="/plan" title="แผนงาน">📋</a>
     <a class="gear" href="/settings" title="ตั้งค่า">⚙️</a>
   </div>
 </header>
