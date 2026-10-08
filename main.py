@@ -1884,9 +1884,11 @@ def plan_rows(date_str: str = Query(None, alias="date"), fresh: int = Query(0)):
         flag = (_cell(row, PLAN_STATUS) + " " + _cell(row, PLAN_DEST)).lower()
         cancelled = any(k in flag for k in CANCEL_KEYWORDS)
         out.append({"row": i + 1, "cells": cells, "cancelled": cancelled})
+    edit_block = _write_block_reason("PLAN_EDIT_ENABLED")
     return {"date": target, "fetched_at": _thai_now().strftime("%H:%M:%S"),
             "sheet_read_at": read_at, "throttled": throttled,
             "alt_source": PLAN_PAGE_ID != SOURCE_ID,      # True = กำลังอ่านชีตทดลอง ไม่ใช่ชีตจริง
+            "can_edit": not edit_block, "edit_block_reason": edit_block,
             "headers": headers, "total": len(out), "rows": out}
 
 
@@ -1998,13 +2000,18 @@ def _parse_dispatch_xlsx(data: bytes) -> dict:
             "warnings": warnings[:40], "warnings_total": len(warnings)}
 
 
-def _import_block_reason() -> str:
-    """ว่าง = เขียนได้ ถ้ามีข้อความ = เขียนไม่ได้เพราะอะไร"""
-    if os.environ.get("PLAN_IMPORT_ENABLED") != "1":
-        return "ยังไม่เปิดการเขียนลงชีต (ตั้ง PLAN_IMPORT_ENABLED=1 ที่ Vercel) — ตอนนี้ดูตัวอย่างได้อย่างเดียว"
+def _write_block_reason(flag: str) -> str:
+    """ว่าง = เขียนได้ ถ้ามีข้อความ = เขียนไม่ได้เพราะอะไร
+    flag = ชื่อสวิตช์ที่ต้องเปิด (PLAN_IMPORT_ENABLED สำหรับนำเข้า, PLAN_EDIT_ENABLED สำหรับแก้ทีละช่อง)"""
+    if os.environ.get(flag) != "1":
+        return f"ยังไม่เปิดการเขียนลงชีต (ตั้ง {flag}=1 ที่ Vercel) — ตอนนี้ดูได้อย่างเดียว"
     if PLAN_PAGE_ID in (SOURCE_ID, PLAN_ID):
         return "ชีตปลายทางเป็นชีตจริง — ระบบยอมเขียนเฉพาะชีตทดลอง ตั้ง PLAN_PAGE_ID เป็นชีต DEMO ก่อน"
     return ""
+
+
+def _import_block_reason() -> str:
+    return _write_block_reason("PLAN_IMPORT_ENABLED")
 
 
 @app.post("/api/plan/import", include_in_schema=False)
@@ -2065,6 +2072,108 @@ async def plan_import(file: UploadFile = File(...), commit: int = Form(0), repla
     _drop_sheet_cache(PLAN_PAGE_ID, PLAN_PAGE_TAB)
     return {**info, "written": len(parsed["rows"]), "removed": removed, "first_row": start,
             "last_row": start + len(parsed["rows"]) - 1}
+
+
+# ─── แก้ไขทีละช่องบนหน้าแผนงาน (ทดลอง) ───────────────────────────────────────────
+# เปิดได้ต่อเมื่อ PLAN_EDIT_ENABLED=1 และชีตปลายทางไม่ใช่ชีตจริง (กติกาเดียวกับการนำเข้า Excel)
+# กันชนกัน: ก่อนเขียนจะอ่านแถวนั้นสดจากชีต ถ้าค่าในช่องไม่ตรงกับที่คนแก้เห็นอยู่ (มีคนแก้ไปก่อน)
+# หรือแถวเลื่อนไปแล้ว จะไม่เขียนทับ แต่ส่งค่าปัจจุบันกลับไปให้ตัดสินใจ
+# ทุกครั้งที่แก้สำเร็จจะบันทึกประวัติ (เวลา/ผู้แก้/ค่าเดิม→ค่าใหม่) ลงแท็บ EditLog ของไฟล์ปลายทาง
+EDIT_LOG_TAB = "EditLog"
+_EDIT_TIME_RE = re.compile(r"^(\d{1,2})[:.](\d{2})(?::(\d{2}))?$")
+
+
+class PlanEdit(BaseModel):
+    row: int            # เลขแถวในชีต (เริ่มที่ 1)
+    col: int            # ตำแหน่งคอลัมน์ 0..25 (A..Z)
+    old: str = ""       # ค่าที่คนแก้เห็นก่อนแก้
+    value: str = ""     # ค่าใหม่ที่พิมพ์
+    key: str = ""       # "เลข JOB|Drop" ของแถวที่เห็น กันแถวเลื่อน
+    by: str = ""        # ชื่อผู้แก้ (ไว้บันทึกประวัติ)
+
+
+def _edit_value(col: int, value: str) -> str:
+    """ค่าที่พิมพ์ → ค่าที่เขียนลงชีต (วันที่เขียนเป็น ISO กันสลับวัน/เดือน); ผิดรูปแบบ = 400"""
+    v = value.strip()
+    if not v:
+        return ""
+    if col in _IMP_DATE_COLS:
+        iso = _parse_date(v)
+        if not iso:
+            raise HTTPException(400, "วันที่ไม่ถูกต้อง — พิมพ์เป็น วัน/เดือน/ปี เช่น 08/10/2026")
+        return iso
+    if col == 6:
+        m = _EDIT_TIME_RE.match(v)
+        if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+            raise HTTPException(400, "เวลาไม่ถูกต้อง — พิมพ์เป็น ชั่วโมง:นาที เช่น 13:30")
+        return f"{int(m.group(1)):02d}:{m.group(2)}:{m.group(3) or '00'}"
+    if col in _IMP_STAMP_COLS:
+        parts = v.replace(",", " ").split()
+        iso = _parse_date(parts[0]) if parts else None
+        m = _EDIT_TIME_RE.match(parts[1]) if len(parts) == 2 else None
+        if not iso or not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+            raise HTTPException(400, "ต้องเป็น วัน/เดือน/ปี ชั่วโมง:นาที เช่น 08/10/2026 07:30")
+        return f"{iso} {int(m.group(1)):02d}:{m.group(2)}:{m.group(3) or '00'}"
+    if col in (9, 10):
+        n = v.replace(",", "")
+        if not re.fullmatch(r"[0-9]+(\.[0-9]+)?", n):
+            raise HTTPException(400, "น้ำหนักต้องเป็นตัวเลข เช่น 8000")
+        return n
+    return _sheet_safe(v[:500])
+
+
+@app.post("/api/plan/edit", include_in_schema=False)
+def plan_edit(p: PlanEdit):
+    block = _write_block_reason("PLAN_EDIT_ENABLED")
+    if block:
+        raise HTTPException(403, block)
+    if not (0 <= p.col < PLAN_LAST_COL) or p.row < 2:
+        raise HTTPException(400, "ตำแหน่งช่องไม่ถูกต้อง")
+    new = _edit_value(p.col, p.value)
+    try:
+        sh = gspread.authorize(_build_creds()).open_by_key(PLAN_PAGE_ID)
+        ws = sh.worksheet(PLAN_PAGE_TAB)
+        cur = list(ws.row_values(p.row)) + [""] * PLAN_LAST_COL      # อ่านแถวนี้สดจากชีต
+    except Exception as e:
+        raise HTTPException(502, f"อ่านชีตไม่ได้ — {type(e).__name__}: {e}")
+    cur_key = f"{cur[1]}|{cur[13]}" if cur[1] else ""
+    if not any(str(x).strip() for x in cur[:PLAN_LAST_COL]):
+        # แถวว่างทั้งแถว (ถูกลบ/ล้างไปแล้ว) — ไม่เขียนลงแถวว่างเพราะหน้าเว็บที่เปิดค้างไว้ยังเห็นข้อมูลเก่า
+        return JSONResponse(status_code=409, content={"detail":
+            "แถวนี้ถูกลบหรือว่างไปแล้วในชีต — กดรีเฟรชก่อน", "current": ""})
+    if p.key != cur_key:
+        return JSONResponse(status_code=409, content={"detail":
+            "แถวนี้ในชีตเปลี่ยนไปแล้ว (มีคนแก้หรือแทรกแถว) — กดรีเฟรชแล้วแก้ใหม่", "current": cur[p.col]})
+    if str(cur[p.col]).strip() != p.old.strip():
+        return JSONResponse(status_code=409, content={"detail":
+            "ช่องนี้มีคนแก้ไปก่อนแล้ว — ยังไม่เขียนทับ", "current": cur[p.col]})
+
+    letter = _col_name(p.col)
+    try:
+        ws.update(values=[[new]], range_name=f"{letter}{p.row}", value_input_option="USER_ENTERED")
+        got = ws.get(f"{letter}{p.row}")                              # อ่านกลับ = ค่าที่ชีตแสดงจริง
+        shown = got[0][0] if got and got[0] else ""
+    except Exception as e:
+        raise HTTPException(502, f"เขียนลงชีตไม่สำเร็จ — {type(e).__name__}: {e}")
+
+    hit = _sheet_cache.get(f"{PLAN_PAGE_ID}:{PLAN_PAGE_TAB}")         # แก้แคชในช่องเดียว ไม่ต้องอ่านทั้งชีตใหม่
+    if hit and p.row - 1 < len(hit[1]):
+        r = hit[1][p.row - 1]
+        r.extend([""] * (p.col + 1 - len(r)))
+        r[p.col] = shown
+
+    logged = True
+    try:                                                              # ประวัติการแก้ไข (ล้มเหลวไม่กระทบการแก้)
+        try:
+            lg = sh.worksheet(EDIT_LOG_TAB)
+        except gspread.WorksheetNotFound:
+            lg = sh.add_worksheet(EDIT_LOG_TAB, rows=2000, cols=8)
+            lg.append_row(["เวลา", "ผู้แก้", "แถว", "คอลัมน์", "ค่าเดิม", "ค่าใหม่", "JOB|Drop"])
+        lg.append_row([_thai_now().strftime("%Y-%m-%d %H:%M:%S"), p.by[:60], p.row, letter,
+                       p.old, shown, cur_key], value_input_option="RAW")
+    except Exception:
+        logged = False
+    return {"ok": True, "value": shown, "row": p.row, "col": p.col, "logged": logged}
 
 
 @app.get("/plan", response_class=HTMLResponse, include_in_schema=False)
@@ -2358,6 +2467,15 @@ PLAN_HTML = """<!doctype html>
   .job.chg{background:var(--chg-bg);box-shadow:inset 4px 0 0 #f59e0b}
   tbody tr.chg td{background:var(--chg-bg)}
   td[data-cc]{background:var(--cc-bg) !important;font-weight:700}
+  /* ── โหมดแก้ไขทีละช่อง ── */
+  .wrap.edit-on td[data-r]{cursor:cell}
+  .wrap.edit-on td[data-r]:hover{outline:2px solid #2563eb;outline-offset:-2px}
+  input.cellin{width:100%;min-width:110px;font:inherit;padding:3px 6px;border:2px solid #2563eb;
+               border-radius:6px;background:var(--card);color:var(--ink)}
+  #editBtn.on{background:#f59e0b;border-color:#f59e0b;color:#fff}
+  .toast{position:fixed;right:18px;bottom:18px;background:#16a34a;color:#fff;padding:10px 16px;
+         border-radius:10px;font-weight:600;z-index:80;box-shadow:0 4px 14px rgba(0,0,0,.25);max-width:420px}
+  .toast.bad{background:var(--late)}
   /* ── หน้าต่างนำเข้า Excel ── */
   .imp-back{position:fixed;inset:0;background:rgba(15,23,42,.5);z-index:60;display:flex;
             align-items:flex-start;justify-content:center;padding:30px 16px;overflow:auto}
@@ -2407,11 +2525,16 @@ PLAN_HTML = """<!doctype html>
   <b id="dlabel" style="font-size:14px"></b>
   <select id="depot"><option value="">ทุกคลัง</option></select>
   <input type="search" id="q" placeholder="ค้นหา รถ / ลูกค้า / ทะเบียน / ออเดอร์">
+  <button id="editBtn" hidden title="แก้ไขข้อมูลทีละช่อง (ดับเบิลคลิกที่ช่อง)">✏️ โหมดแก้ไข</button>
   <button id="impOpen" title="อัปโหลดใบจัดรถ Excel เพื่อตรวจและนำเข้า">📥 นำเข้า Excel</button>
   <button class="primary" id="go">รีเฟรช</button>
 </div></header>
 <main>
   <div class="cards" id="cards"></div>
+  <div class="chgbar" id="edithint" hidden>
+    <span>✏️ <b>กำลังอยู่ในโหมดแก้ไข</b> — ดับเบิลคลิกที่ช่องเพื่อแก้ · Enter = บันทึกลงชีต · Esc = ยกเลิก ·
+      แก้ได้ทุกช่อง A–Z (ช่องที่เป็นสูตรในชีตจะถูกแทนที่ด้วยค่าที่พิมพ์)</span>
+  </div>
   <div class="chgbar" id="chgbar" hidden>
     <span id="chgtxt"></span>
     <label><input type="checkbox" id="onlychg"> ดูเฉพาะที่เปลี่ยน</label>
@@ -2477,6 +2600,8 @@ async function load(fresh){
     (DATA.alt_source ? ' · 🧪 ชีตทดลอง (DEMO)' : '') +
     (fresh && DATA.throttled ? ' (เพิ่งอ่านสดไปไม่นาน รออีกสักครู่แล้วกดใหม่)' : '');
   computeChanges();
+  document.getElementById('editBtn').hidden = !DATA.can_edit;      // ปุ่มแก้ไขขึ้นเฉพาะเมื่อเซิร์ฟเวอร์อนุญาต
+  if(!DATA.can_edit && EDITING) setEditing(false);
   const sel = document.getElementById('depot'), keep = sel.value;
   const depots = [...new Set(DATA.rows.map(x => x.cells[SRC_COL]).filter(Boolean))].sort();
   sel.innerHTML = '<option value="">ทุกคลัง</option>' +
@@ -2513,7 +2638,7 @@ function render(){
     ? rows.map(x => '<tr class="' + (x.cancelled ? 'cx ' : '') + (x.chg ? 'chg' : '') + '"><td class="sk sk1 rn">' +
         x.row + (x.chg ? '<br><span class="tag">' + (x.chg.type === 'new' ? 'ใหม่' : 'แก้') + '</span>' : '') + '</td>' +
         shown.map(i => {
-          const h = cell(x.cells[i], i);
+          const h = cell(x.cells[i], i).replace('<td', '<td data-r="' + x.row + '" data-c="' + i + '"');
           return x.chg && x.chg.cols.includes(i)
             ? h.replace('<td', '<td data-cc="1" title="' + esc('เดิม: ' + (x.chg.old[i] || 'ว่าง')) + '"') : h;
         }).join('') + '</tr>').join('')
@@ -2648,6 +2773,98 @@ document.getElementById('ack').onclick = () => {          // รับทรา�
   if(!DATA) return;
   saveSeen(); computeChanges(); ONLYCHG = false; render();
 };
+// ── แก้ไขทีละช่อง: ดับเบิลคลิก → พิมพ์ → Enter บันทึกลงชีต (เซิร์ฟเวอร์ตรวจชนกันก่อนเขียน) ──
+let EDITING = false;
+
+function toast(msg, bad){
+  const t = document.createElement('div');
+  t.className = 'toast' + (bad ? ' bad' : ''); t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), bad ? 6000 : 2500);
+}
+
+function editorName(){                  // ชื่อผู้แก้ ไว้บันทึกประวัติ (จำไว้ในเบราว์เซอร์)
+  let n = '';
+  try{ n = localStorage.getItem('gb_plan_editor') || ''; }catch(e){}
+  if(!n){
+    n = (prompt('ชื่อผู้แก้ไข (ใช้บันทึกประวัติการแก้ไขในชีต EditLog):') || '').trim();
+    if(n){ try{ localStorage.setItem('gb_plan_editor', n); }catch(e){} }
+  }
+  return n;
+}
+
+function setEditing(on){
+  if(on && !editorName()) return;       // ต้องบอกชื่อก่อนถึงเปิดโหมดแก้ไขได้
+  EDITING = on;
+  const b = document.getElementById('editBtn');
+  b.classList.toggle('on', on);
+  b.textContent = on ? '✏️ กำลังแก้ไข (กดเพื่อปิด)' : '✏️ โหมดแก้ไข';
+  document.querySelector('.wrap').classList.toggle('edit-on', on);
+  document.getElementById('edithint').hidden = !on;
+}
+
+function ownEdit(x, i, val){            // แก้เองสำเร็จ → ไม่นับเป็น "เปลี่ยนตั้งแต่ครั้งก่อน" ของตัวเอง
+  const base = readSeen(DATA.date);
+  const oldKey = x.key;
+  x.cells[i] = val;
+  if(i === 12) x.cancelled = /ยกเลิก|โหลดเก็บ|cancel/i.test(val);
+  const newKey = x.cells[1] ? x.cells[1] + '|' + x.cells[13] : ('r' + x.row);
+  if(base){
+    if(oldKey !== newKey && base[oldKey]){ base[newKey] = base[oldKey]; delete base[oldKey]; }
+    if(base[newKey]) base[newKey][i] = val;
+    try{ localStorage.setItem(SEEN_PREFIX + DATA.date, JSON.stringify(base)); }catch(e){}
+  }
+  computeChanges();
+}
+
+async function saveCell(x, i, old, value){
+  if(value.trim() === String(old).trim()){ render(); return; }
+  const td = document.querySelector('td[data-r="' + x.row + '"][data-c="' + i + '"]');
+  if(td) td.textContent = 'กำลังบันทึก...';
+  try{
+    const r = await fetch('/api/plan/edit', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({row: x.row, col: i, old: old, value: value,
+                            key: x.cells[1] ? x.cells[1] + '|' + x.cells[13] : '', by: editorName()})});
+    if(r.status === 401){ location.href = '/login'; return; }
+    let j = {};
+    try{ j = await r.json(); }catch(e){}
+    if(r.status === 409){                       // มีคนแก้ไปก่อน — ไม่เขียนทับ โชว์ค่าปัจจุบันให้เห็น
+      if(j.current !== undefined) x.cells[i] = j.current;
+      computeChanges();
+      toast((j.detail || 'ชนกับคนอื่น') + ' ค่าตอนนี้: "' + (j.current || 'ว่าง') + '"', true);
+    }else if(!r.ok){
+      toast(j.detail || ('HTTP ' + r.status), true);
+    }else{
+      ownEdit(x, i, j.value);
+      toast('บันทึกแล้ว ✓' + (j.logged ? '' : ' (บันทึกประวัติ EditLog ไม่ได้)'));
+    }
+  }catch(e){ toast('บันทึกไม่สำเร็จ: ' + e.message, true); }
+  render();
+}
+
+function startEdit(td, x, i){
+  const old = x.cells[i];
+  const inp = document.createElement('input');
+  inp.className = 'cellin'; inp.value = old;
+  td.textContent = ''; td.appendChild(inp); inp.focus(); inp.select();
+  let done = false;
+  const finish = fn => { if(done) return; done = true; fn(); };
+  inp.addEventListener('keydown', ev => {
+    if(ev.key === 'Escape'){ ev.preventDefault(); finish(render); }
+    else if(ev.key === 'Enter'){ ev.preventDefault(); finish(() => saveCell(x, i, old, inp.value)); }
+  });
+  inp.addEventListener('blur', () => finish(render));      // คลิกที่อื่น = ยกเลิก ไม่บันทึกโดยไม่ตั้งใจ
+}
+
+document.getElementById('rows').addEventListener('dblclick', e => {
+  if(!EDITING) return;
+  const td = e.target.closest('td[data-r]');
+  if(!td || td.querySelector('input')) return;
+  const x = DATA.rows.find(r => r.row === Number(td.dataset.r));
+  if(x) startEdit(td, x, Number(td.dataset.c));
+});
+document.getElementById('editBtn').onclick = () => setEditing(!EDITING);
+
 // ── นำเข้าใบจัดรถจาก Excel: อัปโหลด → ดูตัวอย่าง/คำเตือน → ยืนยันถึงเขียนลงชีต ──
 let IMPFILE = null;
 function impBody(html){ document.getElementById('impBody').innerHTML = html; }
