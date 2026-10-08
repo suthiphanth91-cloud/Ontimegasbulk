@@ -2188,7 +2188,7 @@ def _edit_value(col: int, value: str) -> str:
     return _sheet_safe(v[:500])
 
 
-# รายการให้เลือกตอนแก้ไข — อ่านจากไฟล์ (ไฟล์แผนงานก่อน แล้วไฟล์ต้นทาง) แคช 10 นาที
+# รายการให้เลือกตอนแก้ไข — อ่านจากแท็บในไฟล์แผนงานของหน้านี้ (PLAN_PAGE_ID) ไฟล์เดียว ไม่อ่านไฟล์อื่น แคช 10 นาที
 #   ต้นทาง  ← แท็บ "List" คอลัมน์ A          เบอร์รถ ← แท็บ "ข้อมูลรถ" คอลัมน์ B
 #   พขร.    ← แท็บ "ข้อมูลพขร." คอลัมน์ C (ไม่นับคนที่มีวันพ้นสภาพ)
 #   ปลายทาง ← แท็บ "ข้อมูลสาขา" หรือ "ข้อมูลปลายทาง" คอลัมน์ A
@@ -2207,24 +2207,20 @@ _opts_cache: tuple = (0.0, None)
 
 
 def _first_tab_values(tabs, col: int, ok=None):
-    """อ่านคอลัมน์ col ของแท็บแรกที่อ่านได้ (ลองไฟล์แผนงานแล้วไฟล์ต้นทาง) → (รายการไม่ซ้ำเรียงตามไฟล์, ที่มา)"""
-    seen_ids = []
-    for sid, label in ((PLAN_PAGE_ID, "ไฟล์แผนงาน"), (SOURCE_ID, "ไฟล์ต้นทาง")):
-        if sid in seen_ids:
+    """อ่านคอลัมน์ col ของแท็บแรกที่อ่านได้ → (รายการไม่ซ้ำเรียงตามไฟล์, ที่มา)
+    อ่าน "เฉพาะไฟล์แผนงานของหน้านี้" (PLAN_PAGE_ID) เท่านั้น ไม่แอบไปอ่านไฟล์อื่น"""
+    for tab in tabs:
+        try:
+            rows = _fetch_sheet(PLAN_PAGE_ID, tab)
+        except Exception:
             continue
-        seen_ids.append(sid)
-        for tab in tabs:
-            try:
-                rows = _fetch_sheet(sid, tab)
-            except Exception:
-                continue
-            vals: list = []
-            for r in rows[1:]:
-                v = _cell(r, col)
-                if v and (ok is None or ok(r)) and v not in vals:
-                    vals.append(v)
-            if vals:
-                return vals, f"{tab} ({label})"
+        vals: list = []
+        for r in rows[1:]:
+            v = _cell(r, col)
+            if v and (ok is None or ok(r)) and v not in vals:
+                vals.append(v)
+        if vals:
+            return vals, f"แท็บ {tab}"
     return [], ""
 
 
