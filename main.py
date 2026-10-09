@@ -29,7 +29,6 @@ from typing import Optional
 import httpx
 import gspread
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from google.oauth2.service_account import Credentials
 from pydantic import BaseModel
@@ -230,11 +229,34 @@ app = FastAPI(
     description="ติดตามรถ Gasbulk — รู้ล่วงหน้าว่าจะถึงช้าหรือเร็ว",
     version="3.0.0",
 )
-app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], allow_headers=["*"]
-)
 
 OPEN_PATHS = {"/login", "/api/login", "/favicon.ico", "/api/cron/hourly-status"}
+
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",                                   # ห้ามเบราว์เซอร์เดาชนิดไฟล์เอง
+    "X-Frame-Options": "DENY",                                             # ห้ามเว็บอื่นเอาหน้านี้ไปครอบ (clickjacking)
+    "Referrer-Policy": "same-origin",                                      # ไม่ส่งที่อยู่หน้าเราไปเว็บอื่น
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",    # บังคับ https
+    "Content-Security-Policy": "frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+}
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def _same_origin(request: Request) -> bool:
+    """คำขอที่แก้ข้อมูล (POST ฯลฯ) ต้องมาจากหน้าเว็บของเราเอง — เบราว์เซอร์ใส่ Origin/Referer มาให้เสมอ
+    ถ้าชี้ไปโดเมนอื่น = มีคนพยายามให้ผู้ใช้กดจากเว็บอื่น (CSRF) → ปฏิเสธ"""
+    src = request.headers.get("origin") or request.headers.get("referer") or ""
+    if not src:
+        return True                                  # ไม่ใช่เบราว์เซอร์ (เช่น สคริปต์) — ยังต้องผ่านด่านล็อกอินอยู่ดี
+    host = (request.headers.get("host") or "").lower()
+    try:
+        from urllib.parse import urlsplit
+        return urlsplit(src).netloc.lower() == host
+    except Exception:
+        return False
+
+
 
 
 @app.middleware("http")
@@ -250,6 +272,20 @@ async def require_login(request: Request, call_next):
     if path.startswith("/api/"):
         return JSONResponse({"detail": "ต้องล็อกอินก่อน"}, status_code=401)
     return RedirectResponse("/login", status_code=303)
+
+
+@app.middleware("http")
+async def security_layer(request: Request, call_next):
+    if request.method not in SAFE_METHODS and not _same_origin(request):
+        resp = JSONResponse({"detail": "คำขอไม่ได้มาจากหน้าเว็บนี้"}, status_code=403)
+    else:
+        resp = await call_next(request)
+    for k, v in SECURITY_HEADERS.items():
+        resp.headers.setdefault(k, v)
+    path = request.url.path
+    if path.startswith("/api/") or path in ("/", "/plan", "/settings", "/login"):
+        resp.headers["Cache-Control"] = "no-store"   # เครื่องกลางที่หลายคนใช้ — กันเบราว์เซอร์/พร็อกซีเก็บข้อมูลไว้
+    return resp
 
 # ─── MODELS ──────────────────────────────────────────────────────────────────
 
@@ -2543,15 +2579,60 @@ def plan_page():
 def login_page(error: str = ""):
     if not _app_password():
         return RedirectResponse("/", status_code=303)
-    msg = ('<p class="err">รหัสผ่านไม่ถูกต้อง</p>' if error else "")
+    msg = ('<p class="err">ลองผิดหลายครั้งเกินไป — รอ 5 นาทีแล้วลองใหม่</p>' if error == "2"
+           else '<p class="err">รหัสผ่านไม่ถูกต้อง</p>' if error else "")
     return LOGIN_HTML.replace("__ERR__", msg)
 
 
+# กันเดารหัสผ่าน: ผิด LOGIN_MAX_FAILS ครั้งภายใน LOGIN_WINDOW_SECS → ล็อกที่อยู่ IP นั้นชั่วคราว
+# (เก็บในหน่วยความจำของแต่ละเครื่อง Vercel — ไม่ได้กันได้ 100% แต่ทำให้เดาทีละหลายพันครั้งไม่ได้)
+LOGIN_MAX_FAILS, LOGIN_WINDOW_SECS, LOGIN_LOCK_SECS = 5, 300, 300
+_login_fails: dict = {}      # ip → [เวลาที่ผิดแต่ละครั้ง]
+_login_locked: dict = {}     # ip → เวลาที่ปลดล็อก
+
+
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for", "")
+    return (fwd.split(",")[0].strip() or (request.client.host if request.client else "?"))[:64]
+
+
+def _login_gate(ip: str) -> int:
+    """คืนจำนวนวินาทีที่ยังถูกล็อกอยู่ (0 = ลองได้)"""
+    left = int(_login_locked.get(ip, 0) - time())
+    if left <= 0:
+        _login_locked.pop(ip, None)
+        return 0
+    return left
+
+
+def _login_failed(ip: str) -> None:
+    now = time()
+    hits = [t for t in _login_fails.get(ip, []) if now - t < LOGIN_WINDOW_SECS] + [now]
+    _login_fails[ip] = hits
+    if len(hits) >= LOGIN_MAX_FAILS:
+        _login_locked[ip] = now + LOGIN_LOCK_SECS
+        _login_fails.pop(ip, None)
+    if len(_login_fails) > 2000:                     # กันหน่วยความจำบวม
+        _login_fails.clear(); _login_locked.clear()
+
+
+def _pw_equal(a: str, b: str) -> bool:
+    """เทียบรหัสแบบเวลาคงที่ — เทียบเป็น bytes เพราะ compare_digest กับ str ที่มีอักษรไทยจะ error (500)"""
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
 @app.post("/api/login", include_in_schema=False)
-def do_login(password: str = Form("")):
+def do_login(request: Request, password: str = Form("")):
     pw = _app_password()
-    if not pw or not hmac.compare_digest(password, pw):
+    ip = _client_ip(request)
+    wait = _login_gate(ip)
+    if wait:
+        return RedirectResponse("/login?error=2", status_code=303)
+    if not pw or not _pw_equal(password, pw):
+        _login_failed(ip)
+        sleep(0.8)                                   # หน่วงเล็กน้อยทุกครั้งที่ผิด ให้เดาได้ช้าลง
         return RedirectResponse("/login?error=1", status_code=303)
+    _login_fails.pop(ip, None)
 
     resp = RedirectResponse("/", status_code=303)
     resp.set_cookie(

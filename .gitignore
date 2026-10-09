@@ -19,3 +19,13 @@ build/
 
 # Vercel
 .vercel/
+
+# กุญแจ/ความลับ — ห้าม commit เด็ดขาด
+*.pem
+*.key
+.env.*
+*service-account*.json
+*serviceaccount*.json
+*-key.json
+*credentials*.json
+!.env.example
