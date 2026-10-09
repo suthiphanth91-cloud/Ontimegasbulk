@@ -3378,7 +3378,7 @@ document.getElementById('rows').addEventListener('click', e => {
   if(!EDITING) return;
   if(e.target.closest('a')) e.preventDefault();       // คลิกเบอร์โทรในโหมดแก้ไข = แก้ ไม่ใช่โทรออก
   const td = e.target.closest('td[data-r]');
-  if(!td || td.querySelector('input')) return;
+  if(!td || td.querySelector('input,select')) return;       // ช่องที่มีตัวแก้เปิดอยู่แล้ว (รวมกล่องเลือก) ห้ามเปิดซ้ำ ไม่งั้นรายการที่กำลังเปิดหาย
   const x = DATA.rows.find(r => r.row === Number(td.dataset.r));
   if(x) (OPTS ? Promise.resolve() : loadOpts()).then(() => startEdit(td, x, Number(td.dataset.c)));
 });
