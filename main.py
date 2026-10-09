@@ -2497,8 +2497,41 @@ def plan_edit(p: PlanEdit):
     except Exception:
         logged = False
         _gs_cache.pop("log", None)
+    global _recent_cache
+    _recent_cache = (0.0, None)
     return {"ok": True, "value": shown, "row": p.row, "col": p.col, "cells": fresh_row,
             "overwrote_formula": is_formula, "logged": logged}
+
+
+_recent_cache: tuple = (0.0, None)
+
+
+@app.get("/api/plan/recent", include_in_schema=False)
+def plan_recent(n: int = Query(300)):
+    """การแก้ไขล่าสุดจากแท็บ EditLog (เวลา/ผู้แก้/แถว/คอลัมน์/ค่าเดิม→ใหม่) ไว้บอกอีกคนว่า "เพื่อนแก้ไปแล้ว"
+    อ่านอย่างเดียว ไม่สร้างแท็บ EditLog ถ้ายังไม่มี; แคช 8 วินาที กันหลายคนเปิดพร้อมกันแล้วอ่านชีตซ้ำ"""
+    global _recent_cache
+    ts, hit = _recent_cache
+    if hit is not None and time() - ts < 8:
+        return {"edits": hit[-n:]}
+    out: list = []
+    try:
+        _ws, sh = _plan_ws()
+        try:
+            lg = sh.worksheet(EDIT_LOG_TAB)
+        except gspread.WorksheetNotFound:
+            lg = None
+        if lg is not None:
+            for r in (lg.get(f"A2:H{max(lg.row_count, 2)}") or [])[-400:]:
+                r = list(r) + [""] * 8
+                if not r[0]:
+                    continue
+                out.append({"t": r[0], "by": r[1], "row": int(r[2]) if str(r[2]).isdigit() else 0,
+                            "col": r[3], "old": r[4], "new": r[5], "note": r[7]})
+    except Exception:
+        out = []
+    _recent_cache = (time(), out)
+    return {"edits": out[-n:]}
 
 
 @app.get("/plan", response_class=HTMLResponse, include_in_schema=False)
@@ -2911,17 +2944,17 @@ function shift(iso, n){
   return d.toISOString().slice(0,10);
 }
 
-async function load(fresh){
+async function load(fresh, quiet){
   if(SAVEQ.length) await PUMP;           // รอให้คิวที่ค้างลงชีตให้หมดก่อน แล้วค่อยอ่านชีตใหม่
   const date = document.getElementById('date').value || todayISO();
   const btn = document.getElementById('go');
-  if(fresh){ btn.disabled = true; btn.textContent = 'กำลังอ่านชีต...'; }
+  if(fresh && !quiet){ btn.disabled = true; btn.textContent = 'กำลังอ่านชีต...'; }
   // ช่องวันที่ของเบราว์เซอร์อาจโชว์เป็น เดือน/วัน/ปี จึงบอกวันที่แบบไทยกำกับอีกที กันอ่านสลับ
   const wd = ['อาทิตย์','จันทร์','อังคาร','พุธ','พฤหัสบดี','ศุกร์','เสาร์'];
   const dd = new Date(date + 'T00:00:00Z');
   document.getElementById('dlabel').textContent = isNaN(dd) ? '' :
     'วัน' + wd[dd.getUTCDay()] + ' ' + date.slice(8,10) + '/' + date.slice(5,7) + '/' + date.slice(0,4);
-  const err = document.getElementById('err'); err.hidden = true;
+  const err = document.getElementById('err'); if(!quiet) err.hidden = true;
   try{
     const r = await fetch('/api/plan?date=' + encodeURIComponent(date) + (fresh ? '&fresh=1' : ''));
     if(r.status === 401){ location.href = '/login'; return; }
@@ -2932,9 +2965,10 @@ async function load(fresh){
     }
     DATA = await r.json();
   }catch(e){
-    err.textContent = 'โหลดแผนงานไม่สำเร็จ: ' + e.message; err.hidden = false; return;
+    if(!quiet){ err.textContent = 'โหลดแผนงานไม่สำเร็จ: ' + e.message; err.hidden = false; }
+    return;
   }finally{
-    btn.disabled = false; btn.textContent = 'รีเฟรช';
+    if(!quiet){ btn.disabled = false; btn.textContent = 'รีเฟรช'; }
   }
   // บอกว่าข้อมูลมาจากชีตตอนไหน (ไม่ใช่เวลาที่เปิดหน้า) จะได้รู้ว่าเห็นของล่าสุดหรือยัง
   document.getElementById('stamp').textContent = 'ข้อมูลจากชีตเมื่อ ' + DATA.sheet_read_at +
@@ -3039,14 +3073,54 @@ function chgTag(x){                     // ป้ายบอกว่าแถ�
   const more = x.chg.cols.length > 4 ? ' และอีก ' + (x.chg.cols.length - 4) + ' ช่อง' : '';
   return '<span class="tag">แก้</span><span>' + shown.join(' · ') + more + '</span>';
 }
+let WHO = {};                            // "แถว,คอลัมน์" → การแก้ล่าสุดจาก EditLog {by, t, old, new}
+function whoChanged(){                   // ชื่อคนที่แก้ช่องที่ไฮไลต์เหลืองอยู่ (ไม่ซ้ำ)
+  const set = {};
+  DATA.rows.forEach(x => { if(x.chg && x.chg.cols) x.chg.cols.forEach(c => { const w = WHO[x.row + ',' + c]; if(w) set[w.by || 'ไม่ระบุชื่อ'] = 1; }); });
+  return Object.keys(set);
+}
+function changedCount(){                 // จำนวนช่องที่เปลี่ยน + แถวใหม่
+  let n = 0;
+  DATA.rows.forEach(x => { if(x.chg) n += x.chg.type === 'new' ? 1 : x.chg.cols.length; });
+  return n;
+}
+async function loadWho(){
+  try{
+    const r = await fetch('/api/plan/recent');
+    if(!r.ok) return;
+    WHO = {};
+    ((await r.json()).edits || []).forEach(e => { WHO[e.row + ',' + COLS.indexOf(e.col)] = e; });   // เรียงเก่า→ใหม่ ตัวล่าสุดทับ
+  }catch(e){}
+}
+
+// ── รีเฟรชอัตโนมัติ: เพื่อนแก้อะไรไป หน้าเว็บบอกเอง (ไม่ต้องกดรีเฟรช) ──
+const AUTO = {ms: 30000, last: 0};
+async function autoTick(){
+  if(document.hidden || SAVEQ.length || SAVING || !DATA) return;                        // ซ่อนแท็บ/มีคิวค้าง = ข้าม
+  if(document.querySelector('#rows input, #rows select')) return;                       // กำลังพิมพ์อยู่ = ไม่รบกวน
+  if(!document.getElementById('impBack').hidden) return;                                // เปิดหน้าต่างนำเข้าอยู่ = ข้าม
+  const before = changedCount();
+  await loadWho();                                                                       // ชื่อผู้แก้ต้องมาก่อน render ใน load
+  await load(true, true);
+  if(!DATA) return;
+  const now = changedCount();
+  if(now > before){
+    const names = whoChanged();
+    toast('👥 ' + (names.length ? names.join(', ') : 'มีคน') + ' แก้ไปแล้ว ' + (now - before) + ' ช่อง (ดูช่องสีเหลืองในตาราง)', false);
+  }
+}
+setInterval(autoTick, AUTO.ms);
+document.addEventListener('visibilitychange', () => { if(!document.hidden) autoTick(); });   // กลับมาที่แท็บนี้ = ตรวจทันที
+
 function updateBar(){
   const n = DATA.rows.filter(x => x.chg && x.chg.type === 'new').length;
   const e = DATA.rows.filter(x => x.chg && x.chg.type === 'edit').length;
   const bar = document.getElementById('chgbar');
   bar.hidden = !(n || e || GONE);
   if(bar.hidden) ONLYCHG = false;
+  const names = whoChanged();
   document.getElementById('chgtxt').textContent = '🔔 เปลี่ยนตั้งแต่ครั้งก่อนที่คุณดู: ใหม่ ' + n +
-    ' · แก้ไข ' + e + (GONE ? ' · หายไป ' + GONE : '') + ' แถว';
+    ' · แก้ไข ' + e + (GONE ? ' · หายไป ' + GONE : '') + ' แถว' + (names.length ? ' · แก้โดย ' + names.join(', ') : '');
   document.getElementById('onlychg').checked = ONLYCHG;
 }
 
@@ -3148,7 +3222,11 @@ function setEditing(on){
 function tdHtml(x, i){                  // HTML ของช่อง (แถว x คอลัมน์ i) — ใช้ทั้งตอนวาดทั้งตารางและตอนวาดซ้ำเฉพาะแถว
   let h = cell(x.cells[i], i).replace('<td', '<td data-r="' + x.row + '" data-c="' + i + '"' +
                                            (PENDING[x.row + ',' + i] ? ' data-pend="1"' : ''));
-  if(x.chg && x.chg.cols.includes(i)) h = h.replace('<td', '<td data-cc="1" title="' + esc('เดิม: ' + (x.chg.old[i] || 'ว่าง')) + '"');
+  if(x.chg && x.chg.cols.includes(i)){
+    const w = WHO[x.row + ',' + i];
+    h = h.replace('<td', '<td data-cc="1" title="' + esc('เดิม: ' + (x.chg.old[i] || 'ว่าง') +
+      (w ? ' · แก้โดย ' + (w.by || 'ไม่ระบุชื่อ') + ' เวลา ' + String(w.t).slice(11, 16) : '')) + '"');
+  }
   return h;
 }
 
@@ -3511,7 +3589,7 @@ document.getElementById('impClose').onclick = () => { document.getElementById('i
 document.getElementById('impFile').onchange = e => { IMPFILE = e.target.files[0] || null; if(IMPFILE) impPreview(); };
 
 buildChips();
-load().then(resumeOutbox);
+loadWho().then(() => load()).then(resumeOutbox);
 </script>
 </body></html>
 """
