@@ -2876,6 +2876,8 @@ PLAN_HTML = """<!doctype html>
   .chip.on{color:#fff;border-color:transparent}
   .chip[data-g=job].on{background:#2563eb}.chip[data-g=prod].on{background:#0891b2}
   .chip[data-g=car].on{background:#7c3aed}.chip[data-g=plan].on{background:#d97706}
+  #colmode .chip{color:var(--ink)}
+  #colmode .chip.on{background:#2563eb;color:#fff}          /* ปุ่มสลับมุมมองตาราง: อันที่เลือกอยู่ = พื้นน้ำเงินตัวขาว */
   .empty{padding:48px;text-align:center;color:var(--mut)}
   .warn{background:var(--late-bg);color:var(--late);padding:10px 14px;border-radius:10px;margin-bottom:12px}
   @media (max-width:820px){header{padding:11px 12px}main{padding:12px}
@@ -2911,6 +2913,11 @@ PLAN_HTML = """<!doctype html>
     <span id="chgtxt"></span>
     <label><input type="checkbox" id="onlychg"> ดูเฉพาะที่เปลี่ยน</label>
     <button id="ack">รับทราบทั้งหมด</button>
+  </div>
+  <div class="chips" id="colmode">
+    <span class="mut" style="font-size:13px">มุมมองตาราง:</span>
+    <button class="chip" id="colCompact" title="แสดงเฉพาะคอลัมน์ที่ใช้จัดรถ ไม่ต้องเลื่อนซ้ายขวา">ย่อ (เฉพาะที่ใช้จัดรถ)</button>
+    <button class="chip" id="colAll" title="แสดงครบทุกคอลัมน์ A–Z เหมือนในชีต">ทั้งหมด A–Z</button>
   </div>
   <div class="chips" id="chips"><span class="mut" style="font-size:13px">แสดงคอลัมน์:</span></div>
   <div id="err" class="warn" hidden></div>
@@ -3003,10 +3010,16 @@ function render(){
     '<div class="c"><b>' + (rows.length - cx) + '</b><span>ใช้งานจริง</span></div>' +
     '<div class="c"><b style="color:var(--late)">' + cx + '</b><span>ยกเลิก/โหลดเก็บ</span></div>';
   // เลือกเฉพาะคอลัมน์ในกลุ่มที่เปิดอยู่ (B = เลข JOB ตรึงไว้เสมอ)
+  const compact = COLMODE === 'compact';
+  document.getElementById('chips').hidden = compact;                       // ปุ่มกลุ่มคอลัมน์ใช้เฉพาะมุมมอง "ทั้งหมด"
+  document.getElementById('colCompact').classList.toggle('on', compact);
+  document.getElementById('colAll').classList.toggle('on', !compact);
   const shown = [];
-  GROUPS.forEach(g => { if(ON[g.id]) g.cols.forEach(i => shown.push(i)); });
+  if(compact) COMPACT.forEach(i => shown.push(i));
+  else GROUPS.forEach(g => { if(ON[g.id]) g.cols.forEach(i => shown.push(i)); });
   let band = '<th class="sk sk1" rowspan="2">แถว</th>';
-  GROUPS.forEach(g => {
+  if(compact) band += '<th class="g-job" colspan="' + shown.length + '">จัดรถ</th>';
+  else GROUPS.forEach(g => {
     if(!ON[g.id]) return;
     band += '<th class="g-' + g.id + '" colspan="' + g.cols.length + '">' + g.name + '</th>';
   });
@@ -3133,6 +3146,18 @@ const GROUPS = [
 ];
 let ON = {job:true, prod:true, car:true, plan:true};
 try{ Object.assign(ON, JSON.parse(localStorage.getItem('gb_plan_groups') || '{}')); }catch(e){}
+
+// มุมมองตารางย่อ: เฉพาะคอลัมน์ที่ใช้จัดรถ (เรียงตามลำดับในชีต) — B เลข JOB ตรึงซ้ายเสมอ
+const COMPACT = [1, 4, 6, 9, 11, 12, 13, 14, 15, 18, 24];   // B JOB, E เที่ยววิ่ง, G เวลาส่ง, J น้ำหนัก, L ต้นทาง, M ปลายทาง, N Drop, O หมายเหตุ, P เบอร์รถ, S พขร.1, Y เวลาเข้าโหลด(P)
+let COLMODE = 'compact';
+try{ COLMODE = localStorage.getItem('gb_plan_colmode') === 'all' ? 'all' : 'compact'; }catch(e){}
+function setColMode(m){
+  COLMODE = m;
+  try{ localStorage.setItem('gb_plan_colmode', m); }catch(e){}
+  render();
+}
+document.getElementById('colCompact').onclick = () => setColMode('compact');
+document.getElementById('colAll').onclick = () => setColMode('all');
 
 function buildChips(){
   const box = document.getElementById('chips');
