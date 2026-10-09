@@ -2047,9 +2047,75 @@ def _import_block_reason() -> str:
     return _write_block_reason("PLAN_IMPORT_ENABLED")
 
 
+_gs_cache: dict = {}                       # {"gc": client, "ws": {(id, แท็บ): (เวลา, ws, sh)}, "log": {id: ws}}
+_GS_TTL = 600
+
+
+def _gc():
+    """gspread client ตัวเดียวใช้ซ้ำ (เดิมสร้างใหม่ทุกคำขอ = ขอ token ใหม่ทุกครั้ง)"""
+    if "gc" not in _gs_cache:
+        _gs_cache["gc"] = gspread.authorize(_build_creds())
+    return _gs_cache["gc"]
+
+
+def _plan_ws(force: bool = False):
+    """(ws, sh) ของแท็บแผนงานในไฟล์ PLAN_PAGE_ID — เก็บไว้ 10 นาที ลดการเรียก Google ที่ต้องเปิดไฟล์/แท็บซ้ำ"""
+    key = (PLAN_PAGE_ID, PLAN_PAGE_TAB)
+    hit = _gs_cache.setdefault("ws", {}).get(key)
+    if hit and not force and time() - hit[0] < _GS_TTL:
+        return hit[1], hit[2]
+    sh = _gc().open_by_key(PLAN_PAGE_ID)
+    ws = sh.worksheet(PLAN_PAGE_TAB)
+    _gs_cache["ws"][key] = (time(), ws, sh)
+    return ws, sh
+
+
+def _gs_forget() -> None:
+    """ล้างตัวที่เก็บไว้ (เมื่อมี error เช่นแท็บถูกเปลี่ยนชื่อ/ลบ แล้วเปิดใหม่ในรอบถัดไป)"""
+    _gs_cache.pop("ws", None)
+    _gs_cache.pop("log", None)
+
+
+def _editlog_ws(sh):
+    """แท็บ EditLog (สร้างให้ถ้ายังไม่มี) เก็บไว้ใช้ซ้ำ เพื่อเขียนประวัติด้วยคำสั่งเดียว"""
+    lg = _gs_cache.setdefault("log", {}).get(PLAN_PAGE_ID)
+    if lg is None:
+        try:
+            lg = sh.worksheet(EDIT_LOG_TAB)
+        except gspread.WorksheetNotFound:
+            lg = sh.add_worksheet(EDIT_LOG_TAB, rows=2000, cols=8)
+            lg.append_row(["เวลา", "ผู้แก้", "แถว", "คอลัมน์", "ค่าเดิม", "ค่าใหม่", "JOB|Drop", "หมายเหตุ"])
+        _gs_cache["log"][PLAN_PAGE_ID] = lg
+    return lg
+
+
+def _pad_row(vals) -> list:
+    row = [("" if v is None else str(v)) for v in (list(vals[0]) if vals else [])]
+    return (row + [""] * PLAN_LAST_COL)[:PLAN_LAST_COL]
+
+
+def _cached_head() -> int:
+    """แถวหัวตาราง (นับจาก 0) จากข้อมูลแผนงานที่แคชไว้แล้ว ไม่ต้องอ่านทั้งคอลัมน์ C ใหม่"""
+    hit = _sheet_cache.get(f"{PLAN_PAGE_ID}:{PLAN_PAGE_TAB}")
+    try:
+        return _plan_header_row(hit[1]) if hit else 2
+    except Exception:
+        return 2
+
+
 def _head_index(col_c: list) -> int:
     """แถวหัวตาราง (นับจาก 0) จากคอลัมน์ C — ไม่เจอใช้แถวที่ 3 ตามชีตจริง"""
     return next((i for i, v in enumerate(col_c[:6]) if "วันที่" in v and not _parse_date(v)), 2)
+
+
+def _array_cols_from(top) -> set:
+    out: set = set()
+    for row in top or []:
+        for c, v in enumerate(list(row)[:PLAN_LAST_COL]):
+            u = str(v).upper()
+            if u.startswith("=") and "ARRAYFORMULA(" in u:
+                out.add(c)
+    return out
 
 
 def _array_cols(ws, head: int) -> set:
@@ -2059,13 +2125,7 @@ def _array_cols(ws, head: int) -> set:
         top = ws.get(f"A1:Z{head + 4}", value_render_option=gspread.utils.ValueRenderOption.formula)
     except Exception:
         return set()
-    out: set = set()
-    for row in top or []:
-        for c, v in enumerate(list(row)[:PLAN_LAST_COL]):
-            u = str(v).upper()
-            if u.startswith("=") and "ARRAYFORMULA(" in u:
-                out.add(c)
-    return out
+    return _array_cols_from(top)
 
 
 def _row_is_dark(ws, row: int):
@@ -2162,7 +2222,7 @@ async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = 
     if not rv["rows"] or not rv["date"]:
         raise HTTPException(status_code=400, detail="ไม่มีแถวงาน หรืออ่านวันที่ไม่ได้ — ไม่เขียนอะไรลงชีต")
     try:
-        ws = gspread.authorize(_build_creds()).open_by_key(PLAN_PAGE_ID).worksheet(PLAN_PAGE_TAB)
+        ws, _sh = _plan_ws()
         col_c = ws.col_values(PLAN_DATE + 1)
         head = _head_index(col_c)
         n_new = len(sheet_rows)
@@ -2367,20 +2427,30 @@ def plan_options():
 
 @app.post("/api/plan/edit", include_in_schema=False)
 def plan_edit(p: PlanEdit):
+    """แก้ 1 ช่อง — ยิง Google ประมาณ 5 ครั้งต่อช่อง: อ่านแถว, อ่านสูตร (รวมบรรทัดหัว), เขียน, อ่านแถวกลับ, เขียนประวัติ
+    (client/ไฟล์/แท็บ EditLog เก็บไว้ใช้ซ้ำ ไม่ล็อกอินและเปิดใหม่ทุกครั้ง)"""
     block = _write_block_reason("PLAN_EDIT_ENABLED")
     if block:
         raise HTTPException(403, block)
     if not (0 <= p.col < PLAN_LAST_COL) or p.row < 2:
         raise HTTPException(400, "ตำแหน่งช่องไม่ถูกต้อง")
     new = _edit_value(p.col, p.value)
-    try:
-        sh = gspread.authorize(_build_creds()).open_by_key(PLAN_PAGE_ID)
-        ws = sh.worksheet(PLAN_PAGE_TAB)
-        cur = list(ws.row_values(p.row)) + [""] * PLAN_LAST_COL      # อ่านแถวนี้สดจากชีต
-    except Exception as e:
-        raise HTTPException(502, f"อ่านชีตไม่ได้ — {type(e).__name__}: {e}")
+    letter = _col_name(p.col)
+    rng = f"A{p.row}:Z{p.row}"
+    V = gspread.utils.ValueRenderOption
+
+    for attempt in (0, 1):                      # ถ้าของที่เก็บไว้เสีย (เช่นแท็บถูกเปลี่ยนชื่อ) เปิดใหม่แล้วลองอีกครั้ง
+        try:
+            ws, sh = _plan_ws(force=bool(attempt))
+            cur = _pad_row(ws.get(rng))        # อ่านแถวนี้สดจากชีต
+            break
+        except Exception as e:
+            _gs_forget()
+            if attempt:
+                raise HTTPException(502, f"อ่านชีตไม่ได้ — {type(e).__name__}: {e}")
+
     cur_key = f"{cur[1]}|{cur[13]}" if cur[1] else ""
-    if not any(str(x).strip() for x in cur[:PLAN_LAST_COL]):
+    if not any(str(x).strip() for x in cur):
         # แถวว่างทั้งแถว (ถูกลบ/ล้างไปแล้ว) — ไม่เขียนลงแถวว่างเพราะหน้าเว็บที่เปิดค้างไว้ยังเห็นข้อมูลเก่า
         return JSONResponse(status_code=409, content={"detail":
             "แถวนี้ถูกลบหรือว่างไปแล้วในชีต — กดรีเฟรชก่อน", "current": ""})
@@ -2391,32 +2461,28 @@ def plan_edit(p: PlanEdit):
         return JSONResponse(status_code=409, content={"detail":
             "ช่องนี้มีคนแก้ไปก่อนแล้ว — ยังไม่เขียนทับ", "current": cur[p.col]})
 
-    letter = _col_name(p.col)
-    # ช่องที่เป็นสูตร: เขียนทับแล้วสูตรของแถวนั้นหายถาวร จึงไม่เขียนเว้นแต่คนแก้ยืนยัน (override)
-    formula = ""
+    # ช่องที่เป็นสูตร (หรืออยู่ในคอลัมน์ ARRAYFORMULA): เขียนทับแล้วสูตรหายถาวร จึงไม่เขียนเว้นแต่คนแก้ยืนยัน (override)
+    formula, in_array = "", False
     try:
-        fm = ws.get(f"{letter}{p.row}", value_render_option=gspread.utils.ValueRenderOption.formula)
-        formula = str(fm[0][0]) if fm and fm[0] else ""
+        top, rowf = ws.batch_get([f"A1:Z{_cached_head() + 4}", rng], value_render_option=V.formula)   # สูตร 2 ช่วง ในคำขอเดียว
+        in_array = p.col in _array_cols_from(top)
+        rf = list(rowf[0]) if rowf else []
+        formula = str(rf[p.col]) if p.col < len(rf) else ""
     except Exception:
-        formula = ""
-    in_array = False
-    try:
-        in_array = p.col in _array_cols(ws, _head_index(ws.col_values(PLAN_DATE + 1)))
-    except Exception:
-        in_array = False
+        formula, in_array = "", False
     is_formula = formula.startswith("=") or in_array
     if is_formula and not p.override:
         return JSONResponse(status_code=423, content={"detail":
             "ช่องนี้เป็นสูตรในชีต (ค่าถูกคำนวณจากช่องอื่น)", "formula": True, "current": cur[p.col]})
     try:
         ws.update(values=[[new]], range_name=f"{letter}{p.row}", value_input_option="USER_ENTERED")
-        got = ws.get(f"{letter}{p.row}")                              # อ่านกลับ = ค่าที่ชีตแสดงจริง
-        shown = got[0][0] if got and got[0] else ""
-        fresh_row = (list(ws.row_values(p.row)) + [""] * PLAN_LAST_COL)[:PLAN_LAST_COL]   # ช่องสูตรที่พึ่งช่องนี้คำนวณใหม่แล้ว
+        fresh_row = _pad_row(ws.get(rng))       # อ่านทั้งแถวกลับครั้งเดียว: ได้ทั้งค่าที่ชีตแสดงจริงและช่องสูตรที่คำนวณใหม่
+        shown = fresh_row[p.col]
     except Exception as e:
+        _gs_forget()
         raise HTTPException(502, f"เขียนลงชีตไม่สำเร็จ — {type(e).__name__}: {e}")
 
-    hit = _sheet_cache.get(f"{PLAN_PAGE_ID}:{PLAN_PAGE_TAB}")         # แก้แคชในช่องเดียว ไม่ต้องอ่านทั้งชีตใหม่
+    hit = _sheet_cache.get(f"{PLAN_PAGE_ID}:{PLAN_PAGE_TAB}")         # แก้แคชในแถวเดียว ไม่ต้องอ่านทั้งชีตใหม่
     if hit and p.row - 1 < len(hit[1]):
         r = hit[1][p.row - 1]
         r.extend([""] * (PLAN_LAST_COL - len(r)))
@@ -2424,16 +2490,13 @@ def plan_edit(p: PlanEdit):
 
     logged = True
     try:                                                              # ประวัติการแก้ไข (ล้มเหลวไม่กระทบการแก้)
-        try:
-            lg = sh.worksheet(EDIT_LOG_TAB)
-        except gspread.WorksheetNotFound:
-            lg = sh.add_worksheet(EDIT_LOG_TAB, rows=2000, cols=8)
-            lg.append_row(["เวลา", "ผู้แก้", "แถว", "คอลัมน์", "ค่าเดิม", "ค่าใหม่", "JOB|Drop", "หมายเหตุ"])
-        lg.append_row([_thai_now().strftime("%Y-%m-%d %H:%M:%S"), p.by[:60], p.row, letter,
-                       p.old, shown, cur_key, ("เขียนทับสูตร: " + (formula[:80] or "ARRAYFORMULA ของคอลัมน์")) if is_formula else ""],
-                      value_input_option="RAW")
+        _editlog_ws(sh).append_row([_thai_now().strftime("%Y-%m-%d %H:%M:%S"), p.by[:60], p.row, letter,
+                                    p.old, shown, cur_key,
+                                    ("เขียนทับสูตร: " + (formula[:80] or "ARRAYFORMULA ของคอลัมน์")) if is_formula else ""],
+                                   value_input_option="RAW")
     except Exception:
         logged = False
+        _gs_cache.pop("log", None)
     return {"ok": True, "value": shown, "row": p.row, "col": p.col, "cells": fresh_row,
             "overwrote_formula": is_formula, "logged": logged}
 
@@ -2729,6 +2792,12 @@ PLAN_HTML = """<!doctype html>
   .job.chg{background:var(--chg-bg);box-shadow:inset 4px 0 0 #f59e0b}
   tbody tr.chg td{background:var(--chg-bg)}
   td[data-cc]{background:var(--cc-bg) !important;font-weight:700}
+  td[data-pend]{opacity:.6;font-style:italic}
+  .savebadge{position:fixed;left:164px;bottom:18px;background:#f59e0b;color:#fff;padding:8px 14px;border-radius:10px;
+             font-weight:700;z-index:80;box-shadow:0 4px 14px rgba(0,0,0,.25)}
+  .savebadge.ok{background:#16a34a}
+  .savebadge[hidden]{display:none}
+  @media (max-width:820px){.savebadge{left:12px}}
   /* ── โหมดแก้ไขทีละช่อง ── */
   .wrap.edit-on td[data-r]{cursor:cell}
   .wrap.edit-on td[data-r]:hover{outline:2px solid #2563eb;outline-offset:-2px}
@@ -2819,6 +2888,7 @@ PLAN_HTML = """<!doctype html>
   <p class="mut" style="font-size:13px">ข้อมูลจากชีต "แผนงาน Gasbulk" คอลัมน์ A–Z (อ่านอย่างเดียว) &middot; สีแดง = ยกเลิก/โหลดเก็บ</p>
 </main>
 
+<div class="savebadge" id="savebadge" hidden></div>
 <div class="imp-back" id="impBack" hidden><div class="imp">
   <div class="imp-h"><b>📥 นำเข้าใบจัดรถจาก Excel</b><button id="impClose" title="ปิด">✕</button></div>
   <p class="mut" style="margin:0 0 8px;font-size:14px">
@@ -2842,6 +2912,7 @@ function shift(iso, n){
 }
 
 async function load(fresh){
+  if(SAVEQ.length) await PUMP;           // รอให้คิวที่ค้างลงชีตให้หมดก่อน แล้วค่อยอ่านชีตใหม่
   const date = document.getElementById('date').value || todayISO();
   const btn = document.getElementById('go');
   if(fresh){ btn.disabled = true; btn.textContent = 'กำลังอ่านชีต...'; }
@@ -2869,6 +2940,10 @@ async function load(fresh){
   document.getElementById('stamp').textContent = 'ข้อมูลจากชีตเมื่อ ' + DATA.sheet_read_at +
     (DATA.alt_source ? ' · 🧪 ชีตทดลอง (DEMO)' : '') +
     (fresh && DATA.throttled ? ' (เพิ่งอ่านสดไปไม่นาน รออีกสักครู่แล้วกดใหม่)' : '');
+  SAVEQ.forEach(q => {                   // ค่าที่ยังรอลงชีตอยู่ ต้องไม่ถูกข้อมูลที่เพิ่งอ่านใหม่ทับ
+    const cur = DATA.rows.find(r => r.row === q.row);
+    if(cur){ cur.cells[q.col] = q.value; PENDING[q.row + ',' + q.col] = true; }
+  });
   computeChanges();
   document.getElementById('editBtn').hidden = !DATA.can_edit;      // ปุ่มแก้ไขขึ้นเฉพาะเมื่อเซิร์ฟเวอร์อนุญาต
   if(!DATA.can_edit && EDITING) setEditing(false);
@@ -2907,11 +2982,7 @@ function render(){
   document.getElementById('rows').innerHTML = rows.length
     ? rows.map(x => '<tr class="' + (x.cancelled ? 'cx ' : '') + (x.chg ? 'chg' : '') + '"><td class="sk sk1 rn">' +
         x.row + (x.chg ? '<br><span class="tag">' + (x.chg.type === 'new' ? 'ใหม่' : 'แก้') + '</span>' : '') + '</td>' +
-        shown.map(i => {
-          const h = cell(x.cells[i], i).replace('<td', '<td data-r="' + x.row + '" data-c="' + i + '"');
-          return x.chg && x.chg.cols.includes(i)
-            ? h.replace('<td', '<td data-cc="1" title="' + esc('เดิม: ' + (x.chg.old[i] || 'ว่าง')) + '"') : h;
-        }).join('') + '</tr>').join('')
+        shown.map(i => tdHtml(x, i)).join('') + '</tr>').join('')
     : '<tr><td colspan="30" class="empty">ไม่มีแผนงานของวันที่เลือก</td></tr>';
 }
 
@@ -3074,6 +3145,26 @@ function setEditing(on){
   document.getElementById('edithint').hidden = !on;
 }
 
+function tdHtml(x, i){                  // HTML ของช่อง (แถว x คอลัมน์ i) — ใช้ทั้งตอนวาดทั้งตารางและตอนวาดซ้ำเฉพาะแถว
+  let h = cell(x.cells[i], i).replace('<td', '<td data-r="' + x.row + '" data-c="' + i + '"' +
+                                           (PENDING[x.row + ',' + i] ? ' data-pend="1"' : ''));
+  if(x.chg && x.chg.cols.includes(i)) h = h.replace('<td', '<td data-cc="1" title="' + esc('เดิม: ' + (x.chg.old[i] || 'ว่าง')) + '"');
+  return h;
+}
+
+function repaintRow(x){                 // วาดซ้ำเฉพาะแถวนี้ ข้ามช่องที่กำลังมีตัวแก้เปิดอยู่
+  const first = document.querySelector('td[data-r="' + x.row + '"]');
+  if(!first) return;
+  const tr = first.parentElement;
+  tr.className = (x.cancelled ? 'cx ' : '') + (x.chg ? 'chg' : '');
+  tr.querySelectorAll('td[data-c]').forEach(td => {
+    if(td.querySelector('input,select')) return;
+    const tmp = document.createElement('tbody');
+    tmp.innerHTML = '<tr>' + tdHtml(x, Number(td.dataset.c)) + '</tr>';
+    td.replaceWith(tmp.querySelector('td'));
+  });
+}
+
 function ownEdit(x, i, val, cells){    // แก้เองสำเร็จ → ไม่นับเป็น "เปลี่ยนตั้งแต่ครั้งก่อน" ของตัวเอง
   const base = readSeen(DATA.date);
   const oldKey = x.key;
@@ -3107,39 +3198,125 @@ function advance(x, i, dir){            // เลื่อนไปแก้ช�
   startEdit(nx, row, Number(nx.dataset.c));
 }
 
-async function saveCell(x, i, old, value, override, dir){
-  if(value.trim() === String(old).trim()){ render(); if(dir) advance(x, i, dir); return; }
-  const td = document.querySelector('td[data-r="' + x.row + '"][data-c="' + i + '"]');
-  if(td) td.textContent = 'กำลังบันทึก...';
-  let saved = false;
+// ── บันทึกที่หน้าเว็บก่อน แล้วส่งลงชีตตามหลัง ──
+// พิมพ์เสร็จ = ค่าขึ้นในตารางและเลื่อนไปช่องถัดไปทันที ส่วนการเขียนลงชีตทำเป็นคิวเรียงทีละช่องเบื้องหลัง
+// คิวที่ยังไม่ได้ลงชีตเก็บไว้ในเบราว์เซอร์ (localStorage) ถ้าเน็ตหลุดหรือปิดหน้าไปก่อน เปิดใหม่ระบบส่งต่อให้
+let SAVEQ = [], SAVING = false, PENDING = {}, PUMP = Promise.resolve(), DONEN = 0;
+const OUTBOX_KEY = 'gb_plan_outbox';
+
+function outboxSave(){
   try{
-    const r = await fetch('/api/plan/edit', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({row: x.row, col: i, old: old, value: value,
-                            key: x.cells[1] ? x.cells[1] + '|' + x.cells[13] : '', by: editorName(),
-                            override: !!override})});
-    if(r.status === 401){ location.href = '/login'; return; }
-    let j = {};
-    try{ j = await r.json(); }catch(e){}
-    if(r.status === 423){                       // ช่องนี้เป็นสูตรในชีต — ถามก่อนเขียนทับ
-      if(confirm((j.detail || 'ช่องนี้เป็นสูตร') + ' — ค่าตอนนี้: "' + (j.current || 'ว่าง') + '" — '
-                 + 'ถ้าแก้ตรงนี้ สูตรในช่องนี้ของแถวนี้จะหาย แทนที่ด้วยค่าที่พิมพ์ ต้องการเขียนทับ?')){
-        return saveCell(x, i, old, value, true, dir);
-      }
-    }else if(r.status === 409){                 // มีคนแก้ไปก่อน — ไม่เขียนทับ โชว์ค่าปัจจุบันให้เห็น
-      if(j.current !== undefined) x.cells[i] = j.current;
-      computeChanges();
-      toast((j.detail || 'ชนกับคนอื่น') + ' ค่าตอนนี้: "' + (j.current || 'ว่าง') + '"', true);
-    }else if(!r.ok){
-      toast(j.detail || ('HTTP ' + r.status), true);
-    }else{
-      ownEdit(x, i, j.value, j.cells);
-      saved = true;
-      toast('บันทึกแล้ว ✓' + (j.overwrote_formula ? ' (เขียนทับสูตร)' : '') + (j.logged ? '' : ' (บันทึกประวัติ EditLog ไม่ได้)'));
-    }
-  }catch(e){ toast('บันทึกไม่สำเร็จ: ' + e.message, true); }
-  render();
-  if(dir && saved) advance(x, i, dir);            // เลื่อนต่อเฉพาะเมื่อบันทึกสำเร็จ ถ้าติดปัญหาให้อยู่ที่เดิมดูข้อความ
+    if(!SAVEQ.length){ localStorage.removeItem(OUTBOX_KEY); return; }
+    localStorage.setItem(OUTBOX_KEY, JSON.stringify({date: DATA && DATA.date, jobs: SAVEQ}));
+  }catch(e){}
 }
+
+function badge(){
+  const b = document.getElementById('savebadge');
+  if(SAVEQ.length){ b.hidden = false; b.className = 'savebadge'; b.textContent = '⏳ กำลังบันทึกลงชีต ' + SAVEQ.length + ' ช่อง…'; }
+  else if(DONEN){
+    b.hidden = false; b.className = 'savebadge ok'; b.textContent = '✓ บันทึกลงชีตครบแล้ว ' + DONEN + ' ช่อง';
+    setTimeout(() => { if(!SAVEQ.length){ b.hidden = true; DONEN = 0; } }, 2500);
+  }else b.hidden = true;
+}
+
+function saveCell(x, i, old, value, override, dir){
+  value = String(value).trim();
+  if(value === String(old).trim()){ render(); if(dir) advance(x, i, dir); return; }
+  const job = {row: x.row, col: i, old: old, value: value, override: !!override,
+               key: x.cells[1] ? x.cells[1] + '|' + x.cells[13] : '', tries: 0};
+  x.cells[i] = value;                                   // แสดงค่าที่พิมพ์ทันที (จางๆ จนกว่าชีตยืนยัน)
+  PENDING[x.row + ',' + i] = true;
+  SAVEQ.push(job); outboxSave(); badge();
+  render();
+  if(dir) advance(x, i, dir);                           // ไปช่องถัดไปเลย ไม่รอเซิร์ฟเวอร์
+  pump();
+}
+
+function revertJob(job, cur){                           // ชีตไม่รับ → คืนค่าเดิม
+  delete PENDING[job.row + ',' + job.col];
+  if(cur){ cur.cells[job.col] = job.old; computeChanges(); repaintRow(cur); }
+}
+
+async function runJob(job){                             // คืนค่าเมื่อชีตตัดสินแล้ว (สำเร็จ/ไม่รับ) โยน error เมื่อต้องลองใหม่
+  const r = await fetch('/api/plan/edit', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({row: job.row, col: job.col, old: job.old, value: job.value, key: job.key,
+                          by: editorName(), override: job.override})});
+  if(r.status === 401){ location.href = '/login'; throw new Error('ต้องล็อกอินใหม่'); }
+  if(r.status >= 500) throw new Error('เซิร์ฟเวอร์/Google ตอบ ' + r.status);
+  let j = {};
+  try{ j = await r.json(); }catch(e){}
+  const cur = DATA && DATA.rows.find(q => q.row === job.row);
+  const k = job.row + ',' + job.col;
+  if(r.status === 423){                                 // ช่องนี้เป็นสูตรในชีต — ถามก่อนเขียนทับ
+    if(confirm((j.detail || 'ช่องนี้เป็นสูตร') + ' — ค่าตอนนี้: "' + (j.current || 'ว่าง') + '" — '
+               + 'ถ้าแก้ตรงนี้ สูตรในช่องนี้ของแถวนี้จะหาย แทนที่ด้วยค่าที่พิมพ์ ต้องการเขียนทับ?')){
+      job.override = true; return runJob(job);
+    }
+    revertJob(job, cur); return;
+  }
+  if(r.status === 409){                                 // มีคนแก้ไปก่อน — ไม่เขียนทับ โชว์ค่าปัจจุบันให้เห็น
+    delete PENDING[k];
+    if(cur && j.current !== undefined) cur.cells[job.col] = j.current;
+    computeChanges(); if(cur) repaintRow(cur);
+    toast((j.detail || 'ชนกับคนอื่น') + ' ค่าตอนนี้: "' + (j.current || 'ว่าง') + '"', true); return;
+  }
+  if(!r.ok){ revertJob(job, cur); toast(j.detail || ('HTTP ' + r.status), true); return; }
+  delete PENDING[k]; DONEN++;
+  if(cur){
+    ownEdit(cur, job.col, j.value, j.cells);
+    SAVEQ.slice(1).filter(q => q.row === job.row).forEach(q => { cur.cells[q.col] = q.value; });   // ช่องอื่นในแถวที่ยังรอคิว คงค่าที่พิมพ์ไว้
+    repaintRow(cur);
+  }
+  if(!j.logged) toast('บันทึกแล้ว แต่เขียนประวัติ EditLog ไม่ได้', true);
+}
+
+function pump(){
+  if(SAVING) return PUMP;
+  SAVING = true;
+  PUMP = (async () => {
+    while(SAVEQ.length){
+      const job = SAVEQ[0];
+      try{
+        await runJob(job);
+      }catch(e){                                        // เน็ตหลุด/เซิร์ฟเวอร์ล่ม: เก็บไว้ในคิวแล้วลองใหม่ ครบ 3 ครั้งถึงยอมแพ้
+        job.tries = (job.tries || 0) + 1;
+        if(job.tries >= 3){
+          SAVEQ.shift(); outboxSave();
+          revertJob(job, DATA && DATA.rows.find(q => q.row === job.row));
+          toast('บันทึกลงชีตไม่สำเร็จ (' + e.message + ') — คืนค่าเดิมให้แล้ว ลองแก้ใหม่อีกครั้ง', true);
+          continue;
+        }
+        outboxSave(); badge();
+        toast('ยังส่งลงชีตไม่ได้ (' + e.message + ') เก็บไว้แล้ว จะลองใหม่ใน 6 วินาที', true);
+        SAVING = false;
+        setTimeout(pump, 6000);
+        return;
+      }
+      SAVEQ.shift(); outboxSave(); badge();
+    }
+    SAVING = false; badge();
+  })();
+  return PUMP;
+}
+
+function resumeOutbox(){                                // เปิดหน้ามาใหม่แล้วมีงานค้างจากรอบก่อน → ส่งต่อให้
+  let box = null;
+  try{ box = JSON.parse(localStorage.getItem(OUTBOX_KEY) || 'null'); }catch(e){}
+  if(!box || !box.jobs || !box.jobs.length || SAVEQ.length) return;
+  if(!DATA || !DATA.can_edit){ try{ localStorage.removeItem(OUTBOX_KEY); }catch(e){} return; }
+  box.jobs.forEach(job => {
+    const cur = DATA.rows.find(q => q.row === job.row);
+    if(cur && box.date === DATA.date && String(cur.cells[job.col]).trim() === String(job.old).trim()){
+      cur.cells[job.col] = job.value; PENDING[job.row + ',' + job.col] = true;
+    }
+    SAVEQ.push(job);
+  });
+  toast('มี ' + SAVEQ.length + ' ช่องที่แก้ไว้แล้วยังไม่ได้ลงชีต กำลังส่งต่อให้', false);
+  badge(); render(); pump();
+}
+window.addEventListener('beforeunload', e => { if(SAVEQ.length){ e.preventDefault(); e.returnValue = ''; } });
+window.addEventListener('online', () => { if(SAVEQ.length) pump(); });
 
 let OPTS = null;
 async function loadOpts(){              // รายการตัวเลือกของช่อง (อ่านจากไฟล์ต้นทางฝั่งเซิร์ฟเวอร์)
@@ -3334,7 +3511,7 @@ document.getElementById('impClose').onclick = () => { document.getElementById('i
 document.getElementById('impFile').onchange = e => { IMPFILE = e.target.files[0] || null; if(IMPFILE) impPreview(); };
 
 buildChips();
-load();
+load().then(resumeOutbox);
 </script>
 </body></html>
 """
