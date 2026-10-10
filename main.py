@@ -2002,7 +2002,18 @@ def _parse_dispatch_xlsx(data: bytes) -> dict:
     notes = []
     if uncomputed:
         notes.append(f"มี {uncomputed} แถวที่มีข้อมูลแต่ช่องเลข JOB ว่าง — ถ้าไฟล์เพิ่งแก้ ให้เปิดแล้วกดบันทึกใน Excel ก่อนอัปโหลดใหม่")
-    return {"headers": headers, "rows": rows, "notes": notes}
+    tabs = {}                                  # ข้อมูลรถ/พขร. ที่อยู่ในไฟล์เดียวกัน (เก็บไว้เติมอัตโนมัติ) อ่านไม่ได้ = ข้ามไป ไม่กระทบการนำเข้า
+    for name in ("ข้อมูลรถ", "พขร.ประจำรถ", "ข้อมูลพขร."):
+        try:
+            if name in wb.sheetnames:
+                tabs[name] = [[_xl_cell(v, -1) for v in r] for r in wb[name].iter_rows(values_only=True, max_row=3000)]
+        except Exception:
+            pass
+    try:
+        master = _build_cars(tabs)
+    except Exception:
+        master = {}
+    return {"headers": headers, "rows": rows, "notes": notes, "master": master}
 
 
 def _review_rows(rows: list, notes=None) -> dict:
@@ -2214,7 +2225,7 @@ def _copy_down(ws, src_row: int, first: int, last: int) -> None:
 
 @app.post("/api/plan/import", include_in_schema=False)
 async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = Form(""),
-                      commit: int = Form(0), replace: int = Form(1)):
+                      commit: int = Form(0), replace: int = Form(1), master_json: str = Form("")):
     """ครั้งแรกส่ง file (อ่านใบจัดรถ) ครั้งต่อไปส่ง rows_json (แถวที่แก้ในหน้าต่างนำเข้า) เพื่อตรวจซ้ำ/เขียนจริง"""
     headers = None
     if rows_json:
@@ -2224,6 +2235,14 @@ async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = 
         except Exception:
             raise HTTPException(status_code=400, detail="ข้อมูลแถวที่ส่งมาไม่ถูกต้อง")
         notes: list = []
+        master = None
+        if master_json:
+            try:
+                master = _clean_master(json.loads(master_json))
+            except HTTPException:
+                raise
+            except Exception:
+                raise HTTPException(status_code=400, detail="ข้อมูลรถ/พขร. ที่ส่งมาไม่ถูกต้อง")
     else:
         if file is None:
             raise HTTPException(status_code=400, detail="ไม่ได้แนบไฟล์")
@@ -2232,11 +2251,13 @@ async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = 
             raise HTTPException(status_code=413, detail="ไฟล์ใหญ่เกิน 4MB")
         parsed = _parse_dispatch_xlsx(data)
         rows_in, headers, notes = parsed["rows"], parsed["headers"], parsed["notes"]
+        master = parsed["master"]
     rv = _review_rows(rows_in, notes)
     sheet_rows = rv.pop("sheet_rows")
     block = _import_block_reason()
     info = {**rv, "headers": headers, "total": len(rv["rows"]), "can_commit": not block, "block_reason": block,
-            "target": "ชีตทดลอง" if PLAN_PAGE_ID != SOURCE_ID else "ชีตจริง", "existing": None}
+            "target": "ชีตทดลอง" if PLAN_PAGE_ID != SOURCE_ID else "ชีตจริง", "existing": None,
+            "master": master if file is not None and not rows_json else None, "master_n": len(master or {})}
 
     # ในชีตปลายทางมีงานของวันนี้อยู่แล้วกี่แถว (ถ้าอ่านได้) — เอาไว้เตือนก่อนแทนที่
     if rv["date"]:
@@ -2325,8 +2346,15 @@ async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = 
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"เขียนลงชีตไม่สำเร็จ — {type(e).__name__}: {e}")
     _drop_sheet_cache(PLAN_PAGE_ID, PLAN_PAGE_TAB)
+    master_saved, master_note = 0, ""
+    if master:                                 # เก็บข้อมูลรถ/พขร. ไว้เติมอัตโนมัติ — พลาดตรงนี้ไม่ทำให้การนำเข้าแผนงานล้ม
+        try:
+            master_saved = _save_master(master)
+        except Exception as e:
+            master_note = f"นำเข้าแผนงานสำเร็จ แต่เก็บข้อมูลรถ/พขร. ไม่ได้ ({type(e).__name__})"
     return {**info, "written": len(sheet_rows), "removed": removed, "inserted": inserted, "first_row": start,
-            "last_row": start + len(sheet_rows) - 1, "kept_formula_cols": kept_cols, "note": note}
+            "last_row": start + len(sheet_rows) - 1, "kept_formula_cols": kept_cols, "note": note,
+            "master_saved": master_saved, "master_note": master_note}
 
 
 # ─── แก้ไขทีละช่องบนหน้าแผนงาน (ทดลอง) ───────────────────────────────────────────
@@ -2484,18 +2512,14 @@ def _hdr_find(rows: list, need: list):
     return None, {}
 
 
-def _plan_cars() -> dict:
-    global _cars_cache
-    ts, hit = _cars_cache
-    if hit is not None and time() - ts < _OPTS_TTL:
-        return hit
+MASTER_TAB = "MasterCarDriver"            # แท็บของเว็บเอง: เก็บข้อมูลรถ/พขร. ที่อ่านจากไฟล์จัดงานตอนนำเข้า (เขียนทับทั้งแท็บทุกครั้งที่นำเข้า)
+MASTER_HEADER = ["เบอร์รถ", "ประเภทรถ", "ทะเบียนรถ", "พขร.1", "พขร.2", "เบอร์โทร.1", "เบอร์โทร.2", "อัปเดตเมื่อ"]
+_MASTER_KEYS = ("t", "plate", "d1", "d2", "p1", "p2")
 
-    def tab(name: str) -> list:
-        try:
-            return _fetch_sheet(PLAN_PAGE_ID, name)
-        except Exception:
-            return []
 
+def _build_cars(tabs: dict) -> dict:
+    """tabs = {ชื่อแท็บ: แถว (list ของข้อความ)} → {เบอร์รถ: {t, plate, d1, d2, p1, p2}}
+    หาคอลัมน์จาก "ชื่อหัวตาราง" ไม่ใช้ตำแหน่งตายตัว แท็บที่ไม่มี/หัวไม่ตรง = ข้ามไป"""
     def norm_type(t: str) -> str:             # "08 Tons" / "10 Tons" / "Trailer (สำรอง)" → ค่าที่ช่อง Q รับ
         t = (t or "").strip().lower()
         return next((v for v in _FIXED_STRICT["16"] if t.startswith(v.lower())), "")
@@ -2505,10 +2529,10 @@ def _plan_cars() -> dict:
         return "" if v in _NO_PERSON else v
 
     def blank() -> dict:
-        return {"t": "", "plate": "", "d1": "", "d2": "", "p1": "", "p2": ""}
+        return {k: "" for k in _MASTER_KEYS}
 
     cars: dict = {}
-    rows = tab("ข้อมูลรถ")
+    rows = tabs.get("ข้อมูลรถ") or []
     h, ix = _hdr_find(rows, ["เบอร์รถ", "ทะเบียนรถ", "ประเภทรถ"])
     if h is not None:
         for r in rows[h + 1:]:
@@ -2519,16 +2543,17 @@ def _plan_cars() -> dict:
                 e["t"] = norm_type(_cell(r, ix["ประเภทรถ"]))
 
     phones: dict = {}
-    rows = tab("ข้อมูลพขร.")
+    rows = tabs.get("ข้อมูลพขร.") or []
     h, ix = _hdr_find(rows, ["ชื่อ-สกุล", "เบอร์ติดต่อ"])
     if h is not None:
-        leave = _hdr_cells(rows[h]).index("วันที่พ้นสภาพ") if "วันที่พ้นสภาพ" in _hdr_cells(rows[h]) else None
+        hc = _hdr_cells(rows[h])
+        leave = hc.index("วันที่พ้นสภาพ") if "วันที่พ้นสภาพ" in hc else None
         for r in rows[h + 1:]:
             name, ph = _cell(r, ix["ชื่อ-สกุล"]), _cell(r, ix["เบอร์ติดต่อ"])
             if name and ph and not (leave is not None and _cell(r, leave)) and name not in phones:
                 phones[name] = ph
 
-    rows = tab("พขร.ประจำรถ")
+    rows = tabs.get("พขร.ประจำรถ") or []
     for h, r0 in enumerate(rows[:8]):
         cells = _hdr_cells(r0)
         blocks = []                            # ตารางเรียงข้างกันได้หลายชุด (เช่น บางปะกง | ศรีราชา)
@@ -2546,12 +2571,75 @@ def _plan_cars() -> dict:
                 if not _CAR_RE.match(car):
                     continue
                 e = cars.setdefault(car, blank())
-                e["d1"], e["d2"] = person(_cell(r, j1)), person(_cell(r, j2)) if j2 is not None else ""
+                e["d1"], e["d2"] = person(_cell(r, j1)), (person(_cell(r, j2)) if j2 is not None else "")
                 e["p1"], e["p2"] = phones.get(e["d1"], ""), phones.get(e["d2"], "")
                 if not e["t"] and jt is not None:
                     e["t"] = norm_type(_cell(r, jt))
         break
+    return cars
 
+
+def _clean_master(obj) -> dict:
+    """ข้อมูลรถที่หน้าเว็บส่งกลับมาตอนยืนยันนำเข้า → ตรวจรูปแบบ/ขนาดก่อนเก็บ (ไม่ไว้ใจค่าจากฝั่งผู้ใช้)"""
+    if not isinstance(obj, dict) or len(obj) > 800:
+        raise HTTPException(status_code=400, detail="ข้อมูลรถ/พขร. ที่ส่งมาไม่ถูกต้อง")
+    out: dict = {}
+    for car, e in obj.items():
+        if not isinstance(car, str) or len(car) > 20 or not _CAR_RE.match(car) or not isinstance(e, dict):
+            continue
+        row = {k: str(e.get(k, "") or "").replace("\n", " ").strip()[:100] for k in _MASTER_KEYS}
+        if row["t"] not in ("",) + tuple(_FIXED_STRICT["16"]):
+            row["t"] = ""
+        out[car] = row
+    return out
+
+
+def _save_master(cars: dict) -> int:
+    """เก็บข้อมูลรถ/พขร. ลงแท็บ MasterCarDriver ของไฟล์แผนงาน (ไฟล์ทดลองเท่านั้น — ต้องผ่านด่านเดียวกับการนำเข้า)
+    สร้างแท็บใหม่ถ้ายังไม่มี และเขียนทับ "เฉพาะแท็บนี้" ไม่แตะแท็บแผนงานหรือแท็บอื่นเลย"""
+    block = _import_block_reason()
+    if block:
+        raise HTTPException(status_code=403, detail=block)
+    global _cars_cache
+    _, sh = _plan_ws()
+    try:
+        mws = sh.worksheet(MASTER_TAB)
+    except gspread.WorksheetNotFound:
+        mws = sh.add_worksheet(title=MASTER_TAB, rows=max(len(cars) + 20, 100), cols=len(MASTER_HEADER))
+    stamp = _thai_now().strftime("%Y-%m-%d %H:%M")
+    rows = [MASTER_HEADER] + [[car] + [e[k] for k in _MASTER_KEYS] + [stamp] for car, e in sorted(cars.items())]
+    mws.clear()
+    if mws.row_count < len(rows):
+        mws.add_rows(len(rows) - mws.row_count)
+    mws.update(values=rows, range_name="A1", value_input_option="RAW")      # RAW = ไม่ตีความเป็นสูตร
+    _drop_sheet_cache(PLAN_PAGE_ID, MASTER_TAB)
+    _cars_cache = (0.0, None)
+    return len(cars)
+
+
+def _plan_cars() -> dict:
+    global _cars_cache
+    ts, hit = _cars_cache
+    if hit is not None and time() - ts < _OPTS_TTL:
+        return hit
+
+    def tab(name: str) -> list:
+        try:
+            return _fetch_sheet(PLAN_PAGE_ID, name)
+        except Exception:
+            return []
+
+    # 1) แท็บข้อมูลรถ/พขร. ที่วางไว้ในชีตเอง  2) แท็บ MasterCarDriver ที่เว็บเก็บไว้ตอนนำเข้าไฟล์จัดงาน (ใหม่กว่า — ทับ)
+    cars = _build_cars({n: tab(n) for n in ("ข้อมูลรถ", "พขร.ประจำรถ", "ข้อมูลพขร.")})
+    rows = tab(MASTER_TAB)
+    h, ix = _hdr_find(rows, ["เบอร์รถ", "ทะเบียนรถ", "พขร.1"])
+    if h is not None:
+        names = _hdr_cells(rows[h])
+        cols = {"t": "ประเภทรถ", "plate": "ทะเบียนรถ", "d1": "พขร.1", "d2": "พขร.2", "p1": "เบอร์โทร.1", "p2": "เบอร์โทร.2"}
+        for r in rows[h + 1:]:
+            car = _cell(r, ix["เบอร์รถ"])
+            if _CAR_RE.match(car):
+                cars[car] = {k: (_cell(r, names.index(v)) if v in names else "") for k, v in cols.items()}
     result = {"cars": cars, "n": len(cars)}
     _cars_cache = (time(), result)
     return result
@@ -3706,6 +3794,7 @@ function dmy(iso){ return iso ? iso.slice(8,10) + '/' + iso.slice(5,7) + '/' + i
 async function impSend(o){               // o = {rows?, commit?, replace?}  ไม่มี rows = ส่งไฟล์ที่เลือก
   const fd = new FormData();
   if(o.rows) fd.append('rows_json', JSON.stringify(o.rows)); else fd.append('file', IMPFILE);
+  if(o.master) fd.append('master_json', JSON.stringify(o.master));
   fd.append('commit', o.commit ? '1' : '0');
   fd.append('replace', o.replace ? '1' : '0');
   const r = await fetch('/api/plan/import', {method:'POST', body: fd});
@@ -3733,7 +3822,7 @@ async function impPreview(){             // อ่านไฟล์ครั้
     await loadOpts();                    // รายการเลือก (ต้นทาง/ปลายทาง/รถ ฯลฯ) ไว้ใช้ตอนแก้ในตาราง
     const j = await impSend({});
     if(!j) return;
-    IMP = {rows: j.rows, headers: j.headers, edited: {}, errs: {}, warns: {}, info: j, replace: true, onlyBad: false};
+    IMP = {rows: j.rows, headers: j.headers, edited: {}, errs: {}, warns: {}, info: j, replace: true, onlyBad: false, master: j.master || null};
     impMarkErrors(j);
     impRender();
   }catch(e){ impBody('<div class="box bad">อ่านไฟล์ไม่ได้: ' + esc(e.message) + '</div>'); }
@@ -3771,6 +3860,7 @@ function impRender(){
     ? 'แทนที่งานเดิมของวันที่ ' + dmy(j.date) + ' (ชีตมีอยู่แล้ว ' + j.existing + ' แถว) ที่ตำแหน่งเดิม ไม่แตะแถวสีดำคั่นวัน'
     : 'วันที่ ' + dmy(j.date) + ' ยังไม่มีในชีต จะลงต่อท้ายวันสุดท้าย ข้ามแถวสีดำ') + '</label>';
   const ok = j.can_commit && j.total && !nerr;
+  const nmaster = IMP.master ? Object.keys(IMP.master).length : 0;
   impBody(
     '<div class="box"><b>วันที่ ' + dmy(j.date) + '</b> · ' + j.total + ' แถวงาน · ปลายทาง: <b>' + esc(j.target) + '</b>' +
     (nedit ? ' · <span class="ied" style="padding:1px 8px;border-radius:6px">แก้แล้ว ' + nedit + ' ช่อง</span>' : '') + '</div>' +
@@ -3780,6 +3870,9 @@ function impRender(){
     '> ดูเฉพาะแถวที่มีช่องสีแดง (' + nbad + ' แถว)</label>' +
     '<div class="tbl"><table><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div>' +
     '<div class="box">' + ex + '</div>' +
+    '<div class="box ' + (nmaster ? 'ok' : '') + '">' + (nmaster
+      ? '🚚 พบข้อมูลรถ/พขร. ' + nmaster + ' คันในไฟล์นี้ — จะเก็บไว้ใช้เติมประเภท/ทะเบียน/พขร./เบอร์โทรอัตโนมัติตอนเลือกเบอร์รถ'
+      : 'ไม่พบแท็บข้อมูลรถ/พขร. ในไฟล์นี้ — ถ้าเคยนำเข้าไว้แล้ว ระบบใช้ข้อมูลเดิมต่อ') + '</div>' +
     (j.can_commit ? '' : '<div class="box bad">เขียนลงชีตไม่ได้ตอนนี้: ' + esc(j.block_reason) + '</div>') +
     '<button class="go" id="impGo"' + (ok ? '' : ' disabled') + '>เขียน ' + j.total + ' แถวลงชีต</button>');
   const t = document.querySelector('#impBody .tbl');
@@ -3808,13 +3901,16 @@ async function impCommit(){
               (replace ? ' และลบงานเดิมของวันนั้นก่อน' : '') + ' — ยืนยัน?')) return;
   const btn = document.getElementById('impGo'); btn.disabled = true; btn.textContent = 'กำลังเขียนลงชีต...';
   try{
-    const r = await impSend({rows: IMP.rows, commit: true, replace: replace});
+    const r = await impSend({rows: IMP.rows, commit: true, replace: replace, master: IMP.master});
     if(!r) return;
     impBody('<div class="box ok">✓ เขียนแล้ว ' + r.written + ' แถว (แถวที่ ' + r.first_row + '–' + r.last_row + ' ในชีต)' +
       (r.removed ? ' · ลบแถวส่วนเกิน ' + r.removed + ' แถว' : '') + (r.inserted ? ' · แทรกเพิ่ม ' + r.inserted + ' แถว' : '') +
       (r.kept_formula_cols && r.kept_formula_cols.length ? ' · ช่องที่เป็นสูตรในคอลัมน์ ' + r.kept_formula_cols.join(', ') + ' ระบบไม่ได้เขียนทับ ให้ชีตคำนวณเอง' : '') + '</div>' +
+      (r.master_saved ? '<p class="mut">🚚 เก็บข้อมูลรถ/พขร. ' + r.master_saved + ' คันแล้ว (ใช้เติมอัตโนมัติ)</p>' : '') +
+      (r.master_note ? '<div class="box bad">' + esc(r.master_note) + '</div>' : '') +
       '<p class="mut">' + esc(r.note || '') + '</p><p class="mut">ปิดหน้าต่างนี้เพื่อดูผลในหน้าแผนงาน (เปลี่ยนไปวันที่ ' + dmy(r.date) + ' ให้แล้ว)</p>');
     document.getElementById('date').value = r.date; load(true);
+    if(r.master_saved){ CARS = null; loadCars(); }
   }catch(e){ impBody('<div class="box bad">เขียนไม่สำเร็จ: ' + esc(e.message) + '</div>'); }
 }
 
