@@ -1862,6 +1862,10 @@ PLAN_FRESH_MIN_SECS = 15   # ปุ่มรีเฟรชอ่านชีต
 # ชีตที่หน้าแผนงาน (/plan) อ่าน — แยกจาก SOURCE_ID ที่หน้าเช็กรถใช้ จะได้ทดลองกับชีต DEMO ได้
 # โดยไม่กระทบหน้าเช็กรถ ตั้ง PLAN_PAGE_ID / PLAN_PAGE_TAB ที่ Vercel (ไม่ตั้ง = ใช้ชีตเดิม)
 PLAN_PAGE_ID  = os.environ.get("PLAN_PAGE_ID")  or SOURCE_ID
+# ชีต "ข้อมูลรถ+พขร (แก๊สบัลค์)" — ใช้ "อ่านอย่างเดียว" เพื่อเติมข้อมูลรถ/พขร. อัตโนมัติ (ไม่ตั้ง = ไม่อ่าน)
+# ใส่ลิงก์เต็มหรือเฉพาะ id ก็ได้; ต้องแชร์ชีตให้บัญชีของเว็บแบบ "ผู้ดู (Viewer)" ชีตนี้ห้ามมีโค้ดส่วนไหนเขียน
+_m_cars = re.search(r"/d/([A-Za-z0-9_-]{20,})", os.environ.get("CARS_SHEET_ID", ""))
+CARS_SHEET_ID = _m_cars.group(1) if _m_cars else os.environ.get("CARS_SHEET_ID", "").strip().strip("\"'").strip()
 PLAN_PAGE_TAB = os.environ.get("PLAN_PAGE_TAB") or PLAN_TAB
 
 
@@ -2085,7 +2089,7 @@ def _write_block_reason(flag: str) -> str:
         seen = os.environ.get(flag)           # สวิตช์พวกนี้ไม่ใช่ความลับ โชว์ค่าที่เห็นจริงเพื่อไล่หาว่าตั้งผิดตรงไหน
         hint = " [ระบบไม่เห็นตัวแปรนี้เลย — ตั้งแล้วต้อง Redeploy]" if seen is None else f" [ระบบเห็นค่า {seen!r} — ต้องเป็น 1]"
         return f"ยังไม่เปิดการเขียนลงชีต (ตั้ง {flag}=1 ที่ Vercel){hint} — ตอนนี้ดูได้อย่างเดียว"
-    if PLAN_PAGE_ID in (SOURCE_ID, PLAN_ID):
+    if PLAN_PAGE_ID in (SOURCE_ID, PLAN_ID) or (CARS_SHEET_ID and PLAN_PAGE_ID == CARS_SHEET_ID):
         return "ชีตปลายทางเป็นชีตจริง — ระบบยอมเขียนเฉพาะชีตทดลอง ตั้ง PLAN_PAGE_ID เป็นชีต DEMO ก่อน"
     return ""
 
@@ -2503,9 +2507,9 @@ def _hdr_cells(row: list) -> list:
     return [str(c).replace("\n", " ").strip() for c in row]
 
 
-def _hdr_find(rows: list, need: list):
-    """แถวหัวตาราง (ใน 8 แถวแรก) ที่มีชื่อครบ → (เลขแถว, {ชื่อ: คอลัมน์แรกที่เจอ}) ไม่เจอ = (None, {})"""
-    for i, r in enumerate(rows[:8]):
+def _hdr_find(rows: list, need: list, limit: int = 40):
+    """แถวหัวตาราง (ใน limit แถวแรก) ที่มีชื่อครบ → (เลขแถว, {ชื่อ: คอลัมน์แรกที่เจอ}) ไม่เจอ = (None, {})"""
+    for i, r in enumerate(rows[:limit]):
         cells = _hdr_cells(r)
         if all(n in cells for n in need):
             return i, {n: cells.index(n) for n in need}
@@ -2533,14 +2537,16 @@ def _build_cars(tabs: dict) -> dict:
 
     cars: dict = {}
     rows = tabs.get("ข้อมูลรถ") or []
-    h, ix = _hdr_find(rows, ["เบอร์รถ", "ทะเบียนรถ", "ประเภทรถ"])
+    h, ix = _hdr_find(rows, ["เบอร์รถ", "ทะเบียนรถ"])
     if h is not None:
+        hc = _hdr_cells(rows[h])
+        tcol = hc.index("ประเภทรถ") if "ประเภทรถ" in hc else (hc.index("น้ำหนัก") if "น้ำหนัก" in hc else None)   # ชีตต้นฉบับเก็บ "10 Tons/Trailer" ไว้ในคอลัมน์ น้ำหนัก
         for r in rows[h + 1:]:
             car = _cell(r, ix["เบอร์รถ"])
             if _CAR_RE.match(car):
                 e = cars.setdefault(car, blank())
                 e["plate"] = _cell(r, ix["ทะเบียนรถ"])
-                e["t"] = norm_type(_cell(r, ix["ประเภทรถ"]))
+                e["t"] = norm_type(_cell(r, tcol)) if tcol is not None else ""
 
     phones: dict = {}
     rows = tabs.get("ข้อมูลพขร.") or []
@@ -2554,7 +2560,7 @@ def _build_cars(tabs: dict) -> dict:
                 phones[name] = ph
 
     rows = tabs.get("พขร.ประจำรถ") or []
-    for h, r0 in enumerate(rows[:8]):
+    for h, r0 in enumerate(rows[:40]):
         cells = _hdr_cells(r0)
         blocks = []                            # ตารางเรียงข้างกันได้หลายชุด (เช่น บางปะกง | ศรีราชา)
         for j, c in enumerate(cells):
@@ -2640,7 +2646,19 @@ def _plan_cars() -> dict:
             car = _cell(r, ix["เบอร์รถ"])
             if _CAR_RE.match(car):
                 cars[car] = {k: (_cell(r, names.index(v)) if v in names else "") for k, v in cols.items()}
-    result = {"cars": cars, "n": len(cars)}
+    src = {"live": "ไม่ได้ตั้งค่า" if not CARS_SHEET_ID else "", "live_n": 0}
+    if CARS_SHEET_ID:                          # 3) ชีตข้อมูลรถ+พขร. (อ่านอย่างเดียว) — ใหม่สุด ทับชั้นอื่น
+        live_tabs, errs = {}, []
+        for name in ("ข้อมูลรถ", "พขร.ประจำรถ", "ข้อมูลพขร."):
+            try:
+                live_tabs[name] = _fetch_sheet(CARS_SHEET_ID, name)
+            except Exception as e:
+                errs.append(f"{name}: {type(e).__name__}")
+        live = _build_cars(live_tabs) if live_tabs else {}
+        cars.update(live)
+        src["live_n"] = len(live)
+        src["live"] = ("อ่านได้" if live else "อ่านแล้วไม่พบรถ") + (" · แท็บที่อ่านไม่ได้: " + ", ".join(errs) if errs else "")
+    result = {"cars": cars, "n": len(cars), "from": src}
     _cars_cache = (time(), result)
     return result
 
