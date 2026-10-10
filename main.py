@@ -2461,6 +2461,108 @@ def plan_options():
     return _plan_options()
 
 
+# ข้อมูลรถ+พขร. สำหรับเติมอัตโนมัติ — อ่านอย่างเดียวจากแท็บในไฟล์แผนงานของหน้านี้ (PLAN_PAGE_ID) เท่านั้น ไม่เขียนอะไร
+#   ข้อมูลรถ     : หัว เบอร์รถ / ทะเบียนรถ / ประเภทรถ
+#   พขร.ประจำรถ  : หัว เบอร์รถ / พขร.1 / พขร.2 (ประเภทรถ)
+#   ข้อมูลพขร.   : หัว ชื่อ-สกุล / เบอร์ติดต่อ (วันที่พ้นสภาพ ถ้ามี = ข้ามคนที่ออกแล้ว)
+# หาคอลัมน์จาก "ชื่อหัวตาราง" ไม่ใช้ตำแหน่งตายตัว ถ้าไม่มีแท็บ/หัวไม่ตรง = ว่าง (หน้าเว็บก็แค่ไม่เติมให้)
+_cars_cache: tuple = (0.0, None)
+_CAR_RE = re.compile(r"^[A-Za-z]{2,4}\.?\s?\d")
+_NO_PERSON = {"", "-", "—", "ยังไม่มีรถ", "ไม่มี", "ว่าง", "ผ่านแล้ว"}
+
+
+def _hdr_cells(row: list) -> list:
+    return [str(c).replace("\n", " ").strip() for c in row]
+
+
+def _hdr_find(rows: list, need: list):
+    """แถวหัวตาราง (ใน 8 แถวแรก) ที่มีชื่อครบ → (เลขแถว, {ชื่อ: คอลัมน์แรกที่เจอ}) ไม่เจอ = (None, {})"""
+    for i, r in enumerate(rows[:8]):
+        cells = _hdr_cells(r)
+        if all(n in cells for n in need):
+            return i, {n: cells.index(n) for n in need}
+    return None, {}
+
+
+def _plan_cars() -> dict:
+    global _cars_cache
+    ts, hit = _cars_cache
+    if hit is not None and time() - ts < _OPTS_TTL:
+        return hit
+
+    def tab(name: str) -> list:
+        try:
+            return _fetch_sheet(PLAN_PAGE_ID, name)
+        except Exception:
+            return []
+
+    def norm_type(t: str) -> str:             # "08 Tons" / "10 Tons" / "Trailer (สำรอง)" → ค่าที่ช่อง Q รับ
+        t = (t or "").strip().lower()
+        return next((v for v in _FIXED_STRICT["16"] if t.startswith(v.lower())), "")
+
+    def person(v: str) -> str:
+        v = (v or "").strip()
+        return "" if v in _NO_PERSON else v
+
+    def blank() -> dict:
+        return {"t": "", "plate": "", "d1": "", "d2": "", "p1": "", "p2": ""}
+
+    cars: dict = {}
+    rows = tab("ข้อมูลรถ")
+    h, ix = _hdr_find(rows, ["เบอร์รถ", "ทะเบียนรถ", "ประเภทรถ"])
+    if h is not None:
+        for r in rows[h + 1:]:
+            car = _cell(r, ix["เบอร์รถ"])
+            if _CAR_RE.match(car):
+                e = cars.setdefault(car, blank())
+                e["plate"] = _cell(r, ix["ทะเบียนรถ"])
+                e["t"] = norm_type(_cell(r, ix["ประเภทรถ"]))
+
+    phones: dict = {}
+    rows = tab("ข้อมูลพขร.")
+    h, ix = _hdr_find(rows, ["ชื่อ-สกุล", "เบอร์ติดต่อ"])
+    if h is not None:
+        leave = _hdr_cells(rows[h]).index("วันที่พ้นสภาพ") if "วันที่พ้นสภาพ" in _hdr_cells(rows[h]) else None
+        for r in rows[h + 1:]:
+            name, ph = _cell(r, ix["ชื่อ-สกุล"]), _cell(r, ix["เบอร์ติดต่อ"])
+            if name and ph and not (leave is not None and _cell(r, leave)) and name not in phones:
+                phones[name] = ph
+
+    rows = tab("พขร.ประจำรถ")
+    for h, r0 in enumerate(rows[:8]):
+        cells = _hdr_cells(r0)
+        blocks = []                            # ตารางเรียงข้างกันได้หลายชุด (เช่น บางปะกง | ศรีราชา)
+        for j, c in enumerate(cells):
+            if c != "เบอร์รถ":
+                continue
+            nxt = lambda name: next((k for k in range(j + 1, len(cells)) if cells[k] == name), None)
+            if nxt("พขร.1") is not None:
+                blocks.append((j, nxt("พขร.1"), nxt("พขร.2"), nxt("ประเภทรถ")))
+        if not blocks:
+            continue
+        for r in rows[h + 1:]:
+            for jc, j1, j2, jt in blocks:
+                car = _cell(r, jc)
+                if not _CAR_RE.match(car):
+                    continue
+                e = cars.setdefault(car, blank())
+                e["d1"], e["d2"] = person(_cell(r, j1)), person(_cell(r, j2)) if j2 is not None else ""
+                e["p1"], e["p2"] = phones.get(e["d1"], ""), phones.get(e["d2"], "")
+                if not e["t"] and jt is not None:
+                    e["t"] = norm_type(_cell(r, jt))
+        break
+
+    result = {"cars": cars, "n": len(cars)}
+    _cars_cache = (time(), result)
+    return result
+
+
+@app.get("/api/plan/cars", include_in_schema=False)
+def plan_cars():
+    """เบอร์รถ → {t ประเภทรถ, plate ทะเบียน, d1/d2 พขร.1-2, p1/p2 เบอร์โทร} ไว้เติมอัตโนมัติตอนเลือกเบอร์รถ (อ่านอย่างเดียว)"""
+    return _plan_cars()
+
+
 @app.post("/api/plan/edit", include_in_schema=False)
 def plan_edit(p: PlanEdit):
     """แก้ 1 ช่อง — ยิง Google ประมาณ 5 ครั้งต่อช่อง: อ่านแถว, อ่านสูตร (รวมบรรทัดหัว), เขียน, อ่านแถวกลับ, เขียนประวัติ
@@ -3404,14 +3506,32 @@ function badge(){
   }else b.hidden = true;
 }
 
-function saveCell(x, i, old, value, override, dir){
+let CARS = null;                         // เบอร์รถ → ข้อมูลรถ/พขร. จากแท็บในชีตทดลอง (อ่านอย่างเดียว)
+const CAR_COL = 15, CAR_FILL = [['t', 16, 'ประเภทรถ'], ['plate', 17, 'ทะเบียน'], ['d1', 18, 'พขร.1'], ['d2', 19, 'พขร.2'],
+                                ['p1', 20, 'เบอร์โทร.1'], ['p2', 21, 'เบอร์โทร.2']];
+function autofillCar(x, oldCar, newCar){
+  // เลือกเบอร์รถแล้ว เติมประเภท/ทะเบียน/พขร./เบอร์โทรให้ — เฉพาะช่องที่ว่าง หรือยังเป็นค่าเดิมของรถคันก่อน (ไม่ทับที่คนกรอกเอง)
+  if(!CARS || !CARS[newCar]) return;
+  const nw = CARS[newCar], od = CARS[oldCar] || {}, done = [];
+  CAR_FILL.forEach(f => {
+    const k = f[0], c = f[1], want = nw[k] || '', cur = String(x.cells[c] || '').trim();
+    if(!want || cur === want) return;
+    if(cur && cur !== (od[k] || '')) return;
+    saveCell(x, c, cur, want, false, null, true);
+    done.push(f[2]);
+  });
+  if(done.length) toast('เติมจากข้อมูลรถ ' + newCar + ': ' + done.join(', '), false);
+}
+
+function saveCell(x, i, old, value, override, dir, auto){
   value = String(value).trim();
   if(value === String(old).trim()){ render(); if(dir) advance(x, i, dir); return; }
-  const job = {row: x.row, col: i, old: old, value: value, override: !!override,
+  const job = {row: x.row, col: i, old: old, value: value, override: !!override, auto: !!auto,
                key: x.cells[1] ? x.cells[1] + '|' + x.cells[13] : '', tries: 0};
   x.cells[i] = value;                                   // แสดงค่าที่พิมพ์ทันที (จางๆ จนกว่าชีตยืนยัน)
   PENDING[x.row + ',' + i] = true;
   SAVEQ.push(job); outboxSave(); badge();
+  if(i === CAR_COL && !auto) autofillCar(x, old, value);   // เลือกเบอร์รถ → เติมช่องที่เกี่ยวกับรถให้
   render();
   if(dir) advance(x, i, dir);                           // ไปช่องถัดไปเลย ไม่รอเซิร์ฟเวอร์
   pump();
@@ -3432,6 +3552,7 @@ async function runJob(job){                             // คืนค่าเ
   try{ j = await r.json(); }catch(e){}
   const cur = DATA && DATA.rows.find(q => q.row === job.row);
   const k = job.row + ',' + job.col;
+  if(r.status === 423 && job.auto){ revertJob(job, cur); return; }   // เติมอัตโนมัติชนช่องสูตร = ข้ามเงียบๆ ไม่ถามเขียนทับ
   if(r.status === 423){                                 // ช่องนี้เป็นสูตรในชีต — ถามก่อนเขียนทับ
     if(confirm((j.detail || 'ช่องนี้เป็นสูตร') + ' — ค่าตอนนี้: "' + (j.current || 'ว่าง') + '" — '
                + 'ถ้าแก้ตรงนี้ สูตรในช่องนี้ของแถวนี้จะหาย แทนที่ด้วยค่าที่พิมพ์ ต้องการเขียนทับ?')){
@@ -3503,8 +3624,15 @@ window.addEventListener('beforeunload', e => { if(SAVEQ.length){ e.preventDefaul
 window.addEventListener('online', () => { if(SAVEQ.length) pump(); });
 
 let OPTS = null;
+async function loadCars(){
+  try{
+    const r = await fetch('/api/plan/cars');
+    if(r.ok) CARS = (await r.json()).cars || {};
+  }catch(e){}
+}
 async function loadOpts(){              // รายการตัวเลือกของช่อง (อ่านจากไฟล์ต้นทางฝั่งเซิร์ฟเวอร์)
   if(OPTS) return;
+  loadCars();
   try{
     const r = await fetch('/api/plan/options');
     if(!r.ok) return;
