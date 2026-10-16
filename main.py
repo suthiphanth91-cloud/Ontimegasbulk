@@ -2227,6 +2227,32 @@ def _copy_down(ws, src_row: int, first: int, last: int) -> None:
         pass
 
 
+def _dup_key(r: list):
+    """กุญแจบอกว่าเป็นงานเดียวกัน: เลขออเดอร์ + เลขโหลด + ต้นทาง + ปลายทาง + Drop ("ATL-" เฉยๆ = ไม่มีเลขออเดอร์; ไม่มีทั้งเลขออเดอร์และเลขโหลด = เทียบไม่ได้)"""
+    h = str(r[7]).strip() if len(r) > 13 else ""
+    i = str(r[8]).strip() if len(r) > 13 else ""
+    if len(h) <= 4:
+        h = ""
+    if not h and not i:
+        return None
+    return (h, i, str(r[11]).strip(), str(r[12]).strip(), str(r[13]).strip())
+
+
+def _dup_rows(rows: list, date_iso: str) -> list:
+    """ลำดับแถว (นับจาก 0) ของชุดที่วาง ที่ซ้ำกับงานของวันเดียวกันที่มีในชีตอยู่แล้ว (อ่านจากแคชของแผนงาน)"""
+    try:
+        sheet = _fetch_sheet(PLAN_PAGE_ID, PLAN_PAGE_TAB)
+    except Exception:
+        return []
+    have = set()
+    for r in sheet:
+        if _parse_date(_cell(r, PLAN_DATE)) == date_iso:
+            k = _dup_key([_cell(r, c) for c in range(PLAN_LAST_COL)])
+            if k:
+                have.add(k)
+    return [n for n, r in enumerate(rows) if (_dup_key(r) in have and _dup_key(r) is not None)]
+
+
 def _write_near(ws, head: int, hit: list, sheet_rows: list) -> dict:
     """เพิ่มงานเข้าวันที่มีอยู่แล้ว โดยไม่ลบงานเดิม: งานของรถคันที่มีแถวอยู่ในวันนั้น แทรกต่อท้ายกลุ่มแถวของรถคันนั้น
     ส่วนงานที่ยังไม่มีเบอร์รถ/เป็นรถคันใหม่ ต่อท้ายวัน (ก่อนแถวสีดำคั่นวัน) — แทรกแถว+คัดลอกสูตร+เขียนค่า รวมเป็น 3 คำสั่งเรียก Google
@@ -2293,7 +2319,8 @@ def _write_near(ws, head: int, hit: list, sheet_rows: list) -> dict:
 
 @app.post("/api/plan/import", include_in_schema=False)
 async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = Form(""),
-                      commit: int = Form(0), replace: int = Form(1), master_json: str = Form(""), near: int = Form(0)):
+                      commit: int = Form(0), replace: int = Form(1), master_json: str = Form(""), near: int = Form(0),
+                      skip_dups: int = Form(0)):
     """ครั้งแรกส่ง file (อ่านใบจัดรถ) ครั้งต่อไปส่ง rows_json (แถวที่แก้ในหน้าต่างนำเข้า) เพื่อตรวจซ้ำ/เขียนจริง"""
     headers = None
     if rows_json:
@@ -2334,6 +2361,15 @@ async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = 
             info["existing"] = sum(1 for r in sheet if _parse_date(_cell(r, PLAN_DATE)) == rv["date"])
         except Exception:
             info["existing"] = None
+    dups: list = []
+    if near and rv["date"]:                       # โหมดวางข้อมูล: เตือนงานที่ซ้ำกับในชีต (ไม่เช็กตอนนำเข้าไฟล์ เพราะนั้นแทนที่ทั้งวันอยู่แล้ว)
+        dups = _dup_rows(rv["rows"], rv["date"])
+        info["dups"] = dups
+        if dups:
+            info["marks"] = (info.get("marks") or []) + [{"r": i, "c": 7, "msg": "ซ้ำกับงานที่มีในชีตของวันนี้แล้ว"} for i in dups]
+            info["warnings"] = [f"{len(dups)} แถวซ้ำกับงานที่มีในชีตของวันนี้อยู่แล้ว (เลขออเดอร์/เลขโหลด/ต้นทาง/ปลายทาง/Drop เหมือนกัน) "
+                                "— ติ๊ก \"ข้ามแถวที่ซ้ำ\" เพื่อไม่ให้งานซ้ำ"] + list(info.get("warnings") or [])
+            info["warnings_total"] = int(info.get("warnings_total") or 0) + 1
     if not commit:
         return info
 
@@ -2346,6 +2382,13 @@ async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = 
                             f"คอลัมน์ {_col_name(e0['c'])}: {e0['msg']}) — แก้ในตารางก่อนเขียนลงชีต")
     if not rv["rows"] or not rv["date"]:
         raise HTTPException(status_code=400, detail="ไม่มีแถวงาน หรืออ่านวันที่ไม่ได้ — ไม่เขียนอะไรลงชีต")
+    if near and skip_dups and dups:                # ข้ามแถวที่ซ้ำกับชีต (อ่านสดอีกรอบก่อนตัดสิน)
+        _drop_sheet_cache(PLAN_PAGE_ID, PLAN_PAGE_TAB)
+        dups = _dup_rows(rv["rows"], rv["date"])
+        skip = set(dups)
+        sheet_rows = [r for i, r in enumerate(sheet_rows) if i not in skip]
+        if not sheet_rows:
+            raise HTTPException(status_code=400, detail="ทุกแถวที่วางซ้ำกับงานที่มีในชีตแล้ว — ไม่มีอะไรให้เพิ่ม ไม่เขียนอะไรลงชีต")
     try:
         ws, _sh = _plan_ws()
         col_c = ws.col_values(PLAN_DATE + 1)
@@ -3708,6 +3751,18 @@ function autofillCar(x, oldCar, newCar){
   if(done.length) toast('เติมจากข้อมูลรถ ' + newCar + ': ' + done.join(', '), false);
 }
 
+function autoTrip(x, car){
+  // เลข JOB = วันที่ + เบอร์รถ + เที่ยววิ่ง — ถ้าเที่ยวของแถวนี้ซ้ำกับงานอื่นของรถคันเดียวกัน เปลี่ยนเป็นเที่ยวว่างถัดไปให้
+  const used = {};
+  DATA.rows.forEach(r => { if(r !== x && String(r.cells[CAR_COL] || '').trim() === car){ const t = parseInt(String(r.cells[4] || '').split(' ')[1], 10); if(t) used[t] = 1; } });
+  const mine = parseInt(String(x.cells[4] || '').split(' ')[1], 10);
+  if(mine && !used[mine]) return;
+  let n = 1; while(used[n]) n++;
+  if(n > 3){ toast('รถ ' + car + ' มีครบ 3 เที่ยวแล้วในวันนี้ — เลือกเที่ยววิ่งเองเพื่อไม่ให้เลข JOB ซ้ำ', true); return; }
+  saveCell(x, 4, String(x.cells[4] || ''), 'เที่ยว ' + n, false, null, true);
+  toast('ปรับเที่ยววิ่งเป็น เที่ยว ' + n + ' (กันเลข JOB ซ้ำกับงานอื่นของรถ ' + car + ')', false);
+}
+
 function saveCell(x, i, old, value, override, dir, auto){
   value = String(value).trim();
   if(value === String(old).trim()){ render(); if(dir) advance(x, i, dir); return; }
@@ -3716,7 +3771,7 @@ function saveCell(x, i, old, value, override, dir, auto){
   x.cells[i] = value;                                   // แสดงค่าที่พิมพ์ทันที (จางๆ จนกว่าชีตยืนยัน)
   PENDING[x.row + ',' + i] = true;
   SAVEQ.push(job); outboxSave(); badge();
-  if(i === CAR_COL && !auto) autofillCar(x, old, value);   // เลือกเบอร์รถ → เติมช่องที่เกี่ยวกับรถให้
+  if(i === CAR_COL && !auto && value){ autoTrip(x, value); autofillCar(x, old, value); }   // เลือกเบอร์รถ → เที่ยววิ่งไม่ซ้ำ + เติมช่องที่เกี่ยวกับรถให้
   render();
   if(dir) advance(x, i, dir);                           // ไปช่องถัดไปเลย ไม่รอเซิร์ฟเวอร์
   pump();
@@ -3728,6 +3783,8 @@ function revertJob(job, cur){                           // ชีตไม่ร
 }
 
 async function runJob(job){                             // คืนค่าเมื่อชีตตัดสินแล้ว (สำเร็จ/ไม่รับ) โยน error เมื่อต้องลองใหม่
+  const q0 = DATA && DATA.rows.find(q => q.row === job.row);
+  if(q0 && job.col !== 1 && job.col !== 13) job.key = q0.cells[1] ? q0.cells[1] + '|' + q0.cells[13] : '';   // ช่อง JOB/Drop เป็นตัวกำหนดกุญแจเอง ไม่ปรับ
   const r = await fetch('/api/plan/edit', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({row: job.row, col: job.col, old: job.old, value: job.value, key: job.key,
                           by: editorName(), override: job.override})});
@@ -3893,6 +3950,7 @@ async function impSend(o){               // o = {rows?, commit?, replace?}  ไ�
   if(o.rows) fd.append('rows_json', JSON.stringify(o.rows)); else fd.append('file', IMPFILE);
   if(o.master) fd.append('master_json', JSON.stringify(o.master));
   if(o.near) fd.append('near', '1');
+  if(o.skip) fd.append('skip_dups', '1');
   fd.append('commit', o.commit ? '1' : '0');
   fd.append('replace', o.replace ? '1' : '0');
   const r = await fetch('/api/plan/import', {method:'POST', body: fd});
@@ -3960,7 +4018,10 @@ function impRender(){
     : '<label><input type="checkbox" id="impReplace"' + (IMP.replace ? ' checked' : '') + '> ' + (j.existing
     ? 'แทนที่งานเดิมของวันที่ ' + dmy(j.date) + ' (ชีตมีอยู่แล้ว ' + j.existing + ' แถว) ที่ตำแหน่งเดิม ไม่แตะแถวสีดำคั่นวัน'
     : 'วันที่ ' + dmy(j.date) + ' ยังไม่มีในชีต จะลงต่อท้ายวันสุดท้าย ข้ามแถวสีดำ') + '</label>';
-  const ok = j.can_commit && j.total && !nerr;
+  const ndup = (j.dups || []).length;
+  if(IMP.skip === undefined) IMP.skip = ndup > 0;
+  const nw = j.total - (IMP.near && IMP.skip ? ndup : 0);
+  const ok = j.can_commit && nw > 0 && !nerr;
   const nmaster = IMP.master ? Object.keys(IMP.master).length : 0;
   impBody(
     '<div class="box"><b>วันที่ ' + dmy(j.date) + '</b> · ' + j.total + ' แถวงาน · ปลายทาง: <b>' + esc(j.target) + '</b>' +
@@ -3971,14 +4032,17 @@ function impRender(){
     '> ดูเฉพาะแถวที่มีช่องสีแดง (' + nbad + ' แถว)</label>' +
     '<div class="tbl"><table><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div>' +
     '<div class="box">' + ex + '</div>' +
+    (ndup ? '<div class="box"><label><input type="checkbox" id="impSkip"' + (IMP.skip ? ' checked' : '') + '> <b>ข้ามแถวที่ซ้ำกับชีต (' + ndup +
+      ' แถว)</b> — งานที่มีเลขออเดอร์/เลขโหลด/ปลายทางเหมือนที่อยู่ในชีตวันนี้แล้ว จะไม่ถูกเพิ่มซ้ำ (แถวสีเหลืองในช่องเลขออเดอร์)</label></div>' : '') +
     (IMP.near ? '' : '<div class="box ' + (nmaster ? 'ok' : '') + '">' + (nmaster
       ? '🚚 พบข้อมูลรถ/พขร. ' + nmaster + ' คันในไฟล์นี้ — จะเก็บไว้ใช้เติมประเภท/ทะเบียน/พขร./เบอร์โทรอัตโนมัติตอนเลือกเบอร์รถ'
       : 'ไม่พบแท็บข้อมูลรถ/พขร. ในไฟล์นี้ — ถ้าเคยนำเข้าไว้แล้ว ระบบใช้ข้อมูลเดิมต่อ') + '</div>') +
     (j.can_commit ? '' : '<div class="box bad">เขียนลงชีตไม่ได้ตอนนี้: ' + esc(j.block_reason) + '</div>') +
-    '<button class="go" id="impGo"' + (ok ? '' : ' disabled') + '>เขียน ' + j.total + ' แถวลงชีต</button>');
+    '<button class="go" id="impGo"' + (ok ? '' : ' disabled') + '>เขียน ' + nw + ' แถวลงชีต</button>');
   const t = document.querySelector('#impBody .tbl');
   if(t){ t.scrollLeft = sx; t.scrollTop = sy; }
   const rp = document.getElementById('impReplace'); if(rp) rp.onchange = e => { IMP.replace = e.target.checked; };
+  const sk = document.getElementById('impSkip'); if(sk) sk.onchange = e => { IMP.skip = e.target.checked; impRender(); };
   document.getElementById('impOnlyBad').onchange = e => { IMP.onlyBad = e.target.checked; impRender(); };
   document.getElementById('impGo').onclick = impCommit;
 }
@@ -3998,11 +4062,12 @@ document.getElementById('impBody').addEventListener('click', e => {
 
 async function impCommit(){
   const j = IMP.info, replace = IMP.replace;
-  if(!confirm('เขียน ' + j.total + ' แถวของวันที่ ' + dmy(j.date) + ' ลง' + j.target +
+  const nd = (j.dups || []).length, nw = j.total - (IMP.near && IMP.skip ? nd : 0);
+  if(!confirm('เขียน ' + nw + ' แถวของวันที่ ' + dmy(j.date) + ' ลง' + j.target + (IMP.near && !IMP.skip && nd ? ' (⚠ รวม ' + nd + ' แถวที่ซ้ำกับชีต)' : '') +
               (IMP.near ? ' (เพิ่มเข้าไป ไม่ลบงานเดิม)' : replace ? ' และลบงานเดิมของวันนั้นก่อน' : '') + ' — ยืนยัน?')) return;
   const btn = document.getElementById('impGo'); btn.disabled = true; btn.textContent = 'กำลังเขียนลงชีต...';
   try{
-    const r = await impSend({rows: IMP.rows, commit: true, replace: replace, master: IMP.master, near: IMP.near});
+    const r = await impSend({rows: IMP.rows, commit: true, replace: replace, master: IMP.master, near: IMP.near, skip: IMP.near && IMP.skip});
     if(!r) return;
     impBody('<div class="box ok">✓ เขียนแล้ว ' + r.written + ' แถว (แถวที่ ' + r.first_row + '–' + r.last_row + ' ในชีต)' +
       (r.removed ? ' · ลบแถวส่วนเกิน ' + r.removed + ' แถว' : '') + (r.inserted ? ' · แทรกเพิ่ม ' + r.inserted + ' แถว' : '') +
@@ -4037,7 +4102,7 @@ function parseTsv(txt){                  // Tab คั่นช่อง, ขึ
   if(cell !== '' || row.length) endRow();
   return rows;
 }
-function pasteParse(txt, iso){
+function pasteParse(txt, iso, used){
   const TAB = String.fromCharCode(9), NL = String.fromCharCode(10), CR = String.fromCharCode(13);
   const grid = parseTsv(txt);
   if(!grid.length) return {err: 'ยังไม่ได้วางข้อมูล'};
@@ -4051,20 +4116,22 @@ function pasteParse(txt, iso){
   }else if(Math.max.apply(null, grid.map(r => r.length)) > 10){
     return {err: 'ข้อมูลที่วางมี ' + Math.max.apply(null, grid.map(r => r.length)) + ' คอลัมน์ แต่ต้องเป็น 10 คอลัมน์ตามลำดับ (หรือวางพร้อมบรรทัดหัวตาราง)'};
   }
-  const trips = {}, rows = [];
+  const trips = {}, rows = []; let tripFull = 0; used = used || {};
   body.forEach(r => {
     const out = new Array(26).fill('');
     PASTE_MAP.forEach((m, k) => { if(pos[k] >= 0 && pos[k] < r.length) out[m[1]] = r[pos[k]]; });
     if(!out.some((v, i) => i >= 6 && i <= 15 && v !== '')) return;      // แถวว่างทั้งแถว
     const car = out[15];
-    const n = car ? (trips[car] = (trips[car] || 0) + 1) : 1;           // รถคันเดียวกันงานที่ 2, 3 ในวัน = เที่ยว 2, 3
-    out[2] = dmy(iso); out[5] = dmy(iso); out[4] = 'เที่ยว ' + Math.min(n, 3);
+    let n = 1;                                                          // เที่ยวว่างเที่ยวแรกของรถคันนี้ (นับรวมที่มีในชีตแล้ว + ที่วางมาก่อนหน้า)
+    if(car){ const u = used[car] = used[car] || {}; while(u[n]) n++; u[n] = 1; }
+    if(n > 3) tripFull++;                                               // เกิน 3 เที่ยว: เว้นว่างให้เลือกเอง ดีกว่าให้เลข JOB ซ้ำ
+    out[2] = dmy(iso); out[5] = dmy(iso); out[4] = n > 3 ? '' : 'เที่ยว ' + n;
     const c = CARS && car && CARS[car];                                 // เติมประเภท/ทะเบียน/พขร./เบอร์โทรจากข้อมูลรถ
     if(c){ out[16] = c.t || ''; out[17] = c.plate || ''; out[18] = c.d1 || ''; out[19] = c.d2 || ''; out[20] = c.p1 || ''; out[21] = c.p2 || ''; }
     rows.push(out);
   });
   if(!rows.length) return {err: 'ไม่พบแถวข้อมูลในที่วาง'};
-  return {rows: rows};
+  return {rows: rows, tripFull: tripFull};
 }
 async function pasteGo(){
   const iso = document.getElementById('pasteDate').value;
@@ -4073,10 +4140,19 @@ async function pasteGo(){
   try{
     await loadOpts();
     if(!CARS) await loadCars();
-    const res = pasteParse(document.getElementById('pasteTxt').value, iso);
+    const used = {};                                                    // เที่ยวที่รถแต่ละคันมีอยู่แล้วในชีตของวันนั้น (กันเลข JOB ซ้ำ)
+    try{
+      const pr = await fetch('/api/plan?date=' + iso);
+      if(pr.ok) ((await pr.json()).rows || []).forEach(x => {
+        const car = String(x.cells[15] || '').trim(), t = parseInt(String(x.cells[4] || '').split(' ')[1], 10);
+        if(car && t) (used[car] = used[car] || {})[t] = 1;
+      });
+    }catch(e){}
+    const res = pasteParse(document.getElementById('pasteTxt').value, iso, used);
     if(res.err){ impBody('<div class="box bad">' + esc(res.err) + '</div>'); return; }
     const j = await impSend({rows: res.rows, near: true});
     if(!j) return;
+    if(res.tripFull){ j.warnings = ['รถบางคันมีครบ 3 เที่ยวแล้ว ' + res.tripFull + ' แถว — เว้นช่องเที่ยววิ่งไว้ให้เลือกเอง (กันเลข JOB ซ้ำ)'].concat(j.warnings || []); j.warnings_total = (j.warnings_total || 0) + 1; }
     IMP = {rows: j.rows, headers: DATA.headers.map(h => h.name || h.col), edited: {}, errs: {}, warns: {}, info: j, replace: false,
            onlyBad: false, master: null, near: true};
     impMarkErrors(j);
