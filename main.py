@@ -3290,7 +3290,7 @@ PLAN_HTML = """<!doctype html>
 
 <div class="savebadge" id="savebadge" hidden></div>
 <div class="imp-back" id="impBack" hidden><div class="imp">
-  <div class="imp-h"><b>📥 นำเข้าใบจัดรถจาก Excel</b><button id="impClose" title="ปิด">✕</button></div>
+  <div class="imp-h"><b>📥 นำเข้า Excel / 📋 วางข้อมูลลูกค้า</b><button id="impClose" title="ปิด">✕</button></div>
   <p class="mut" style="margin:0 0 8px;font-size:14px">
     เลือกไฟล์ใบจัดรถ (.xlsx) ระบบอ่านชีต "ข้อมูลการจัดส่ง" คอลัมน์ E–AD แล้วแสดงเป็นตาราง
     <b>แก้ข้อมูลในตารางนี้ได้เลยก่อนนำเข้า</b> ยังไม่เขียนอะไรลงชีตจนกว่าคุณจะกดยืนยัน</p>
