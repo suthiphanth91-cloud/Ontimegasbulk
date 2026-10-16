@@ -4018,12 +4018,29 @@ async function impCommit(){
 // ── วางข้อมูลที่ลูกค้าให้มา (10 คอลัมน์ G–P) → แถวเต็ม A–Z → ตรวจ/แก้ในหน้าต่างเดียวกับนำเข้า Excel ──
 const PASTE_MAP = [['เวลาส่งมอบ', 6], ['เลขออเดอร์', 7], ['เลขโหลด', 8], ['น้ำหนักบรรทุก', 9], ['น้ำหนักสุทธิ', 10],
                    ['ต้นทาง', 11], ['ปลายทาง', 12], ['Drop', 13], ['หมายเหตุ', 14], ['เบอร์รถ', 15]];
+function parseTsv(txt){                  // Tab คั่นช่อง, ขึ้นบรรทัดใหม่คั่นแถว; ช่องที่ครอบด้วย "..." ขึ้นบรรทัดใหม่/Tab ข้างในได้ ("" = เครื่องหมายคำพูด)
+  const TAB = String.fromCharCode(9), NL = String.fromCharCode(10), CR = String.fromCharCode(13), Q = String.fromCharCode(34);
+  const rows = []; let row = [], cell = '', inq = false, started = false;
+  const endCell = () => { row.push(cell.split(NL).join(' ').split(CR).join('').trim()); cell = ''; started = false; };
+  const endRow = () => { endCell(); if(row.some(c => c !== '')) rows.push(row); row = []; };
+  for(let i = 0; i < txt.length; i++){
+    const ch = txt[i];
+    if(inq){
+      if(ch === Q){ if(txt[i + 1] === Q){ cell += Q; i++; } else inq = false; }
+      else cell += ch;
+    }else if(ch === Q && !started){ inq = true; started = true; }
+    else if(ch === TAB){ endCell(); }
+    else if(ch === NL){ endRow(); }
+    else if(ch === CR){ /* ข้าม */ }
+    else { cell += ch; started = true; }
+  }
+  if(cell !== '' || row.length) endRow();
+  return rows;
+}
 function pasteParse(txt, iso){
   const TAB = String.fromCharCode(9), NL = String.fromCharCode(10), CR = String.fromCharCode(13);
-  const lines = txt.split(CR).join('').split(NL).filter(l => l.trim() !== '');
-  if(!lines.length) return {err: 'ยังไม่ได้วางข้อมูล'};
-  const grid = lines.map(l => l.split(TAB).map(c => {
-    c = c.trim(); if(c.length > 1 && c[0] === '"' && c[c.length - 1] === '"') c = c.slice(1, -1).trim(); return c; }));
+  const grid = parseTsv(txt);
+  if(!grid.length) return {err: 'ยังไม่ได้วางข้อมูล'};
   const norm = c => String(c).split(' ').join('');
   let pos = PASTE_MAP.map(m => m[1] - 6), body = grid;                 // ไม่มีหัวตาราง: เรียงตามลำดับ 10 คอลัมน์
   const head = grid[0].map(norm);
