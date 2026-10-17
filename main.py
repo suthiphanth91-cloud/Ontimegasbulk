@@ -3320,6 +3320,7 @@ PLAN_HTML = """<!doctype html>
   td.car{font-weight:700;color:#7c3aed}
   td.num{text-align:right;font-variant-numeric:tabular-nums}
   td.pt{font-size:13px;color:var(--mut)}
+  .nt{white-space:normal;line-height:1.35;font-size:13px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
   .pill{display:inline-block;padding:2px 10px;border-radius:999px;background:var(--tr-bg);
         color:#2563eb;font-weight:600;font-size:12.5px}
   /* ── แถวที่เปลี่ยนตั้งแต่ครั้งก่อนที่ดู ── */
@@ -3477,6 +3478,17 @@ PLAN_HTML = """<!doctype html>
 </div></div>
 <script>
 const SRC_COL = 11;   // L คลังต้นทาง
+(function(){                             // สร้าง CSS ความกว้างคอลัมน์ A–Z (ใช้กับหัว+ช่องของตารางหลักและตารางตรวจข้อมูล)
+  const W = [[56, 66, 'center'], [150, 200], [100, 116], [60, 76, 'center'], [76, 92, 'center'], [100, 116], [70, 84, 'center'], [130, 170],
+             [96, 120], [80, 104, 'right'], [80, 104, 'right'], [84, 104, 'center'], [150, 210], [52, 64, 'center'], [150, 230], [74, 92, 'center'],
+             [76, 96, 'center'], [126, 176], [128, 170], [128, 170], [108, 126], [108, 126], [118, 170], [128, 160, 'center'], [128, 160, 'center'], [128, 160, 'center']];
+  let css = 'th[data-c],.imp th[data-ic]{white-space:normal;line-height:1.25;vertical-align:bottom}';      // หัวคอลัมน์ขึ้นบรรทัดใหม่ได้ ไม่ต้องกว้างเท่าความยาวของชื่อ
+  W.forEach((w, i) => {
+    css += 'th[data-c="' + i + '"],td[data-c="' + i + '"],.imp th[data-ic="' + i + '"],.imp td[data-ic="' + i + '"]{min-width:' + w[0] + 'px;max-width:' + w[1] + 'px;' +
+           (w[2] ? 'text-align:' + w[2] + ';' : '') + 'overflow:hidden;text-overflow:ellipsis}';
+  });
+  const st = document.createElement('style'); st.id = 'colw'; st.textContent = css; document.head.appendChild(st);
+})();
 let DATA = null;
 
 function esc(s){
@@ -3562,7 +3574,7 @@ function render(){
     band += '<th class="g-' + g.id + '" colspan="' + g.cols.length + '">' + g.name + '</th>';
   });
   document.getElementById('head').innerHTML = '<tr class="g">' + band + '</tr><tr class="h">' +
-    shown.map(i => '<th' + (i === 1 ? ' class="sk sk2"' : '') + '><small>' + DATA.headers[i].col +
+    shown.map(i => '<th data-c="' + i + '"' + (i === 1 ? ' class="sk sk2"' : '') + '><small>' + DATA.headers[i].col +
       '</small>' + esc(DATA.headers[i].name) + '</th>').join('') + '</tr>';
   document.getElementById('rows').innerHTML = rows.length
     ? rows.map(x => '<tr class="' + (x.cancelled ? 'cx ' : '') + (x.chg ? 'chg' : '') + '"><td class="sk sk1 rn">' +
@@ -3730,6 +3742,7 @@ function cell(v, i){
     return '<td class="num">' + (isNaN(n) ? esc(v) : n.toLocaleString('en-US')) + '</td>'; }
   if(i === 11) return '<td><span class="pill">' + esc(v) + '</span></td>';
   if(i === 12) return '<td class="cust" title="' + esc(v) + '">' + esc(v) + '</td>';
+  if(i === 14) return '<td><div class="nt" title="' + esc(v) + '">' + esc(v) + '</div></td>';
   if(i === 15) return '<td class="car">' + esc(v) + '</td>';
   if(i === 20 || i === 21){
     const tel = String(v).replace(/[^0-9+]/g, '');
@@ -4235,7 +4248,7 @@ function impRender(){
     : '<div class="box ok">✓ ไม่พบเรื่องที่ควรตรวจ</div>';
   const er = nerr
     ? '<div class="box"><b class="bad">✖ มี ' + nerr + ' ช่องที่ไม่ถูกต้อง (ช่องสีแดงในตาราง เอาเมาส์ชี้ดูสาเหตุ) — ต้องแก้ก่อนเขียนลงชีต</b></div>' : '';
-  const head = '<tr><th>#</th>' + IMP.headers.map((h, c) => '<th><small>' + COLS[c] + '</small>' + esc(h) + '</th>').join('') + '</tr>';
+  const head = '<tr><th>#</th>' + IMP.headers.map((h, c) => '<th data-ic="' + c + '"><small>' + COLS[c] + '</small>' + esc(h) + '</th>').join('') + '</tr>';
   const bad = impBadRows(), nbad = Object.keys(bad).length;
   const qEl = document.getElementById('impQ'), qHad = !!qEl && document.activeElement === qEl, qPos = qHad ? qEl.selectionStart : 0;   // พิมพ์ค้นหาอยู่ → วาดใหม่แล้วคืนเคอร์เซอร์ให้
   const hide = ri => (IMP.onlyBad && !bad[ri]) || impHidden(ri);
@@ -4246,7 +4259,7 @@ function impRender(){
       : IMP.warns[k] ? ' class="iwarn" title="' + esc(IMP.warns[k]) + '"'
       : IMP.edited[k] ? ' class="ied"' : '';
     const sel = IMP.sel && IMP.sel.r === ri && IMP.sel.c === c;
-    return '<td data-ir="' + ri + '" data-ic="' + c + '"' + cls + (sel ? ' data-sel="1"' : '') + '>' + impHl(v) + (sel ? '<i class="fh" title="ลากลงเพื่อคัดลอกค่าไปแถวล่าง"></i>' : '') + '</td>';
+    return '<td data-ir="' + ri + '" data-ic="' + c + '"' + cls + (sel ? ' data-sel="1"' : '') + '>' + (c === 14 ? '<div class="nt" title="' + esc(v) + '">' + impHl(v) + '</div>' : impHl(v)) + (sel ? '<i class="fh" title="ลากลงเพื่อคัดลอกค่าไปแถวล่าง"></i>' : '') + '</td>';
   }).join('') + '</tr>').join('');
   const nedit = Object.keys(IMP.edited).length;
   const ex = IMP.near ? (j.existing
