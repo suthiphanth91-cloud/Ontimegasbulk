@@ -2634,7 +2634,7 @@ MASTER_HEADER = ["เบอร์รถ", "ประเภทรถ", "ทะเ
 _MASTER_KEYS = ("t", "plate", "d1", "d2", "p1", "p2")
 
 
-def _build_cars(tabs: dict) -> dict:
+def _build_cars(tabs: dict, phones_out=None, names_out=None) -> dict:
     """tabs = {ชื่อแท็บ: แถว (list ของข้อความ)} → {เบอร์รถ: {t, plate, d1, d2, p1, p2}}
     หาคอลัมน์จาก "ชื่อหัวตาราง" ไม่ใช้ตำแหน่งตายตัว แท็บที่ไม่มี/หัวไม่ตรง = ข้ามไป"""
     def norm_type(t: str) -> str:             # "08 Tons" / "10 Tons" / "Trailer (สำรอง)" → ค่าที่ช่อง Q รับ
@@ -2669,8 +2669,13 @@ def _build_cars(tabs: dict) -> dict:
         leave = hc.index("วันที่พ้นสภาพ") if "วันที่พ้นสภาพ" in hc else None
         for r in rows[h + 1:]:
             name, ph = _cell(r, ix["ชื่อ-สกุล"]), _cell(r, ix["เบอร์ติดต่อ"])
-            if name and ph and not (leave is not None and _cell(r, leave)) and name not in phones:
+            gone = leave is not None and bool(_cell(r, leave))                 # มีวันพ้นสภาพ = ไม่นับ
+            if name and not gone and names_out is not None and name not in names_out:
+                names_out.append(name)
+            if name and ph and not gone and name not in phones:
                 phones[name] = ph
+        if phones_out is not None:
+            phones_out.update(phones)
 
     rows = tabs.get("พขร.ประจำรถ") or []
     for h, r0 in enumerate(rows[:40]):
@@ -2749,7 +2754,9 @@ def _plan_cars() -> dict:
             return []
 
     # 1) แท็บข้อมูลรถ/พขร. ที่วางไว้ในชีตเอง  2) แท็บ MasterCarDriver ที่เว็บเก็บไว้ตอนนำเข้าไฟล์จัดงาน (ใหม่กว่า — ทับ)
-    cars = _build_cars({n: tab(n) for n in ("ข้อมูลรถ", "พขร.ประจำรถ", "ข้อมูลพขร.")})
+    phones_all: dict = {}
+    names_all: list = []
+    cars = _build_cars({n: tab(n) for n in ("ข้อมูลรถ", "พขร.ประจำรถ", "ข้อมูลพขร.")}, phones_all, names_all)
     rows = tab(MASTER_TAB)
     h, ix = _hdr_find(rows, ["เบอร์รถ", "ทะเบียนรถ", "พขร.1"])
     if h is not None:
@@ -2759,6 +2766,9 @@ def _plan_cars() -> dict:
             car = _cell(r, ix["เบอร์รถ"])
             if _CAR_RE.match(car):
                 cars[car] = {k: (_cell(r, names.index(v)) if v in names else "") for k, v in cols.items()}
+                for dk, pk in (("d1", "p1"), ("d2", "p2")):
+                    if cars[car][dk] and cars[car][pk]:
+                        phones_all.setdefault(cars[car][dk], cars[car][pk])
     src = {"live": "ไม่ได้ตั้งค่า" if not CARS_SHEET_ID else "", "live_n": 0}
     if CARS_SHEET_ID:                          # 3) ชีตข้อมูลรถ+พขร. (อ่านอย่างเดียว) — ใหม่สุด ทับชั้นอื่น
         live_tabs, errs = {}, []
@@ -2767,11 +2777,16 @@ def _plan_cars() -> dict:
                 live_tabs[name] = _fetch_sheet(CARS_SHEET_ID, name)
             except Exception as e:
                 errs.append(f"{name}: {type(e).__name__}")
-        live = _build_cars(live_tabs) if live_tabs else {}
+        ph_live: dict = {}
+        nm_live: list = []
+        live = _build_cars(live_tabs, ph_live, nm_live) if live_tabs else {}
         cars.update(live)
+        phones_all.update(ph_live)
+        if nm_live:                           # ชีตข้อมูลรถ+พขร. อ่านได้ → รายชื่อคนขับใช้ของชีตนี้ (คนเท่านั้น ไม่รวมคนที่พ้นสภาพ)
+            names_all = nm_live
         src["live_n"] = len(live)
         src["live"] = ("อ่านได้" if live else "อ่านแล้วไม่พบรถ") + (" · แท็บที่อ่านไม่ได้: " + ", ".join(errs) if errs else "")
-    result = {"cars": cars, "n": len(cars), "from": src}
+    result = {"cars": cars, "n": len(cars), "from": src, "phones": phones_all, "drivers": sorted(set(names_all))}
     _cars_cache = (time(), result)
     return result
 
@@ -3342,7 +3357,9 @@ PLAN_HTML = """<!doctype html>
     <b>📋 หรือ วางข้อมูลที่ลูกค้าให้มา</b>
     <p class="mut" style="margin:4px 0 6px;font-size:13px">คัดลอกตารางจาก Excel/อีเมล แล้ววางในกล่องนี้ (Ctrl+V) ตามลำดับ 10 คอลัมน์:
       เวลาส่งมอบ · เลขออเดอร์ · เลขโหลด · น้ำหนักบรรทุก · น้ำหนักสุทธิ · ต้นทาง · ปลายทาง · Drop · หมายเหตุ · เบอร์รถ
-      (จะมีบรรทัดหัวตารางมาด้วยหรือไม่ก็ได้) ระบบเติมวันที่ เที่ยววิ่ง ทะเบียน และคนขับให้ แล้วให้ตรวจ/แก้ก่อนเขียนลงชีต</p>
+      (จะมีบรรทัดหัวตารางมาด้วยหรือไม่ก็ได้) ระบบเติมวันที่ เที่ยววิ่ง ทะเบียน และคนขับให้ แล้วให้ตรวจ/แก้ก่อนเขียนลงชีต<br>
+      ถ้าวางพร้อมหัวตาราง จะใส่คอลัมน์เพิ่มได้ เช่น <b>เวลาเข้าโหลด (P)</b> · เวลาออกจากฟรีต (P) · เวลาโทรตาม พขร (P) · พขร.1 · พขร.2 · ประเภทรถ
+      (ถ้ามีแต่เวลาเข้าโหลด ระบบคำนวณอีกสองช่องให้: ออกจากฟรีต = เข้าโหลด − 30 นาที, โทรตาม พขร = ออกจากฟรีต − 1 ชม.)</p>
     <textarea id="pasteTxt" rows="5" style="width:100%;box-sizing:border-box;font:inherit" placeholder="วางข้อมูลที่นี่ (Ctrl+V)"></textarea>
     <div style="margin-top:6px">วันที่ของงาน: <input type="date" id="pasteDate"> <button id="pasteGo" class="go">ตรวจข้อมูลที่วาง</button></div>
   </div>
@@ -3735,6 +3752,22 @@ function badge(){
 }
 
 let CARS = null;                         // เบอร์รถ → ข้อมูลรถ/พขร. จากแท็บในชีตทดลอง (อ่านอย่างเดียว)
+let PHONES = {}, DRIVERS = [];           // ชื่อ พขร. → เบอร์โทร / รายชื่อ พขร. (คนเท่านั้น) สำหรับดรอปลิสต์
+function applyDrivers(){                 // ช่อง พขร.1/พขร.2 = เลือกจากดรอปลิสต์รายชื่อคนขับเท่านั้น (ไม่ใช่พิมพ์อิสระ)
+  if(OPTS && DRIVERS.length){
+    OPTS.strict['18'] = DRIVERS; OPTS.strict['19'] = DRIVERS;
+    delete OPTS.suggest['18']; delete OPTS.suggest['19'];
+  }
+}
+function autoPhone(x, i, oldName, newName){
+  // เปลี่ยนชื่อ พขร. → เบอร์โทรต้องตรงกับชื่อใหม่ (อิงตามชื่อในรายชื่อคนขับ): ชื่อใหม่มีเบอร์ = ใส่เบอร์นั้น, ไม่มีเบอร์ = เคลียร์เฉพาะเบอร์ที่เป็นของคนเดิม
+  const pc = i === 18 ? 20 : 21, cur = String(x.cells[pc] || '').trim();
+  const oldPh = PHONES[String(oldName).trim()] || '', nw = PHONES[String(newName).trim()] || '';
+  if(cur === nw) return;
+  if(!nw && !(cur && cur === oldPh)) return;
+  saveCell(x, pc, cur, nw, false, null, true);
+  toast(nw ? 'เบอร์โทรตาม ' + newName + ': ' + nw : 'ไม่พบเบอร์ของ ' + (newName || 'พขร. ที่เลือก') + ' — เคลียร์เบอร์ของคนเดิมให้', false);
+}
 const CAR_COL = 15, CAR_FILL = [['t', 16, 'ประเภทรถ'], ['plate', 17, 'ทะเบียน'], ['d1', 18, 'พขร.1'], ['d2', 19, 'พขร.2'],
                                 ['p1', 20, 'เบอร์โทร.1'], ['p2', 21, 'เบอร์โทร.2']];
 function autofillCar(x, oldCar, newCar){
@@ -3771,6 +3804,7 @@ function saveCell(x, i, old, value, override, dir, auto){
   x.cells[i] = value;                                   // แสดงค่าที่พิมพ์ทันที (จางๆ จนกว่าชีตยืนยัน)
   PENDING[x.row + ',' + i] = true;
   SAVEQ.push(job); outboxSave(); badge();
+  if((i === 18 || i === 19) && !auto) autoPhone(x, i, old, value);                           // เปลี่ยน พขร. → เบอร์โทรตามชื่อ
   if(i === CAR_COL && !auto && value){ autoTrip(x, value); autofillCar(x, old, value); }   // เลือกเบอร์รถ → เที่ยววิ่งไม่ซ้ำ + เติมช่องที่เกี่ยวกับรถให้
   render();
   if(dir) advance(x, i, dir);                           // ไปช่องถัดไปเลย ไม่รอเซิร์ฟเวอร์
@@ -3869,7 +3903,7 @@ let OPTS = null;
 async function loadCars(){
   try{
     const r = await fetch('/api/plan/cars');
-    if(r.ok) CARS = (await r.json()).cars || {};
+    if(r.ok){ const j = await r.json(); CARS = j.cars || {}; PHONES = j.phones || {}; DRIVERS = j.drivers || []; applyDrivers(); }
   }catch(e){}
 }
 async function loadOpts(){              // รายการตัวเลือกของช่อง (อ่านจากไฟล์ต้นทางฝั่งเซิร์ฟเวอร์)
@@ -3879,6 +3913,7 @@ async function loadOpts(){              // รายการตัวเลื�
     const r = await fetch('/api/plan/options');
     if(!r.ok) return;
     OPTS = await r.json();
+    applyDrivers();
     let box = document.getElementById('dls');
     if(!box){ box = document.createElement('div'); box.id = 'dls'; box.hidden = true; document.body.appendChild(box); }
     box.innerHTML = Object.keys(OPTS.suggest).map(c => '<datalist id="dl' + c + '">' +
@@ -4102,15 +4137,41 @@ function parseTsv(txt){                  // Tab คั่นช่อง, ขึ
   if(cell !== '' || row.length) endRow();
   return rows;
 }
+const PASTE_EXTRA = [['เที่ยววิ่ง', 4], ['ประเภทรถ', 16], ['ทะเบียนรถ', 17], ['พขร.1', 18], ['พขร.2', 19], ['เบอร์โทร.1', 20], ['เบอร์โทร.2', 21],
+                     ['เวลาออกจากฟรีต', 23], ['เวลาเข้าโหลด', 24], ['เวลาโทรตามพขร', 25]];     // ใส่มาในหัวตารางก็ได้ ไม่ใส่ก็ได้
+function tp(s){                          // 'HH:MM[:SS]' → [ชม., นาที, วินาที] ไม่ใช่เวลา = null
+  const p = String(s).trim().split(':');
+  if(p.length < 2 || p.length > 3 || p.some(x => x === '' || isNaN(Number(x)))) return null;
+  return [Number(p[0]), Number(p[1]), Number(p[2] || 0)];
+}
+function pad2(n){ return (n < 10 ? '0' : '') + n; }
+function fmtStamp(d){ return pad2(d.getDate()) + '/' + pad2(d.getMonth() + 1) + '/' + d.getFullYear() + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds()); }
+function parseStamp(s){                  // 'dd/mm/yyyy HH:MM[:SS]' (คั่นด้วยเครื่องหมายจุลภาคก็ได้)
+  const parts = String(s).split(',').join(' ').split(' ').filter(x => x !== '');
+  if(parts.length !== 2) return null;
+  const dm = parts[0].split('/'), t = tp(parts[1]);
+  if(dm.length !== 3 || !t) return null;
+  const y = Number(dm[2]) > 2400 ? Number(dm[2]) - 543 : Number(dm[2]);
+  return new Date(y, Number(dm[1]) - 1, Number(dm[0]), t[0], t[1], t[2]);
+}
+function stampFrom(v, ref){              // ค่าที่วางมาเป็นเวลาล้วน (เช่น 08:00) → วันที่เต็ม: วันเดียวกับ ref ถ้าไม่เลยเวลา ref ไม่งั้นเลื่อนเป็นวันก่อนหน้า
+  const t = tp(v);
+  if(!t){ const d = parseStamp(v); return d; }
+  const d = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate(), t[0], t[1], t[2]);
+  if(d > ref) d.setDate(d.getDate() - 1);
+  return d;
+}
 function pasteParse(txt, iso, used){
   const TAB = String.fromCharCode(9), NL = String.fromCharCode(10), CR = String.fromCharCode(13);
   const grid = parseTsv(txt);
   if(!grid.length) return {err: 'ยังไม่ได้วางข้อมูล'};
   const norm = c => String(c).split(' ').join('');
   let pos = PASTE_MAP.map(m => m[1] - 6), body = grid;                 // ไม่มีหัวตาราง: เรียงตามลำดับ 10 คอลัมน์
+  let epos = PASTE_EXTRA.map(() => -1);
   const head = grid[0].map(norm);
   if(head.some(c => c.indexOf('เบอร์รถ') === 0 || c.indexOf('เวลาส่งมอบ') === 0 || c.indexOf('เลขออเดอร์') === 0)){
     pos = PASTE_MAP.map(m => head.findIndex(c => c.indexOf(norm(m[0])) === 0));   // มีหัวตาราง: จับคู่ตามชื่อ ลำดับสลับได้
+    epos = PASTE_EXTRA.map(m => head.findIndex(c => c.indexOf(norm(m[0])) === 0));
     body = grid.slice(1);
     if(pos[6] < 0) return {err: 'ไม่พบคอลัมน์ "ปลายทาง" ในหัวตารางที่วาง'};
   }else if(Math.max.apply(null, grid.map(r => r.length)) > 10){
@@ -4121,13 +4182,34 @@ function pasteParse(txt, iso, used){
     const out = new Array(26).fill('');
     PASTE_MAP.forEach((m, k) => { if(pos[k] >= 0 && pos[k] < r.length) out[m[1]] = r[pos[k]]; });
     if(!out.some((v, i) => i >= 6 && i <= 15 && v !== '')) return;      // แถวว่างทั้งแถว
+    PASTE_EXTRA.forEach((m, k) => { if(epos[k] >= 0 && epos[k] < r.length && r[epos[k]] !== '') out[m[1]] = r[epos[k]]; });
     const car = out[15];
     let n = 1;                                                          // เที่ยวว่างเที่ยวแรกของรถคันนี้ (นับรวมที่มีในชีตแล้ว + ที่วางมาก่อนหน้า)
-    if(car){ const u = used[car] = used[car] || {}; while(u[n]) n++; u[n] = 1; }
-    if(n > 3) tripFull++;                                               // เกิน 3 เที่ยว: เว้นว่างให้เลือกเอง ดีกว่าให้เลข JOB ซ้ำ
-    out[2] = dmy(iso); out[5] = dmy(iso); out[4] = n > 3 ? '' : 'เที่ยว ' + n;
-    const c = CARS && car && CARS[car];                                 // เติมประเภท/ทะเบียน/พขร./เบอร์โทรจากข้อมูลรถ
-    if(c){ out[16] = c.t || ''; out[17] = c.plate || ''; out[18] = c.d1 || ''; out[19] = c.d2 || ''; out[20] = c.p1 || ''; out[21] = c.p2 || ''; }
+    const given = parseInt(String(out[4]).split(' ')[1], 10);           // ถ้าลูกค้า/คุณใส่เที่ยววิ่งมาในหัวตาราง ใช้ตามนั้น
+    if(car){ const u = used[car] = used[car] || {}; if(given){ n = given; } else { while(u[n]) n++; } u[n] = 1; }
+    if(!given){
+      if(n > 3) tripFull++;                                             // เกิน 3 เที่ยว: เว้นว่างให้เลือกเอง ดีกว่าให้เลข JOB ซ้ำ
+      out[4] = n > 3 ? '' : 'เที่ยว ' + n;
+    }
+    out[2] = dmy(iso); out[5] = dmy(iso);
+    const c = CARS && car && CARS[car];                                 // เติมประเภท/ทะเบียน/พขร. จากข้อมูลรถ (เฉพาะช่องที่ยังว่าง ไม่ทับที่วางมา)
+    if(c){ [[16, 't'], [17, 'plate'], [18, 'd1'], [19, 'd2']].forEach(f => { if(!out[f[0]]) out[f[0]] = c[f[1]] || ''; }); }
+    [[18, 20, 'p1'], [19, 21, 'p2']].forEach(f => {                     // เบอร์โทรอิงตามชื่อ พขร. (ตรงกันเสมอ)
+      if(out[f[0]] && !out[f[1]]) out[f[1]] = PHONES[out[f[0]]] || ((c && c['d' + f[2][1]] === out[f[0]]) ? c[f[2]] : '') || '';
+    });
+    // เวลา (P): วางมาเป็นเวลาล้วนก็ได้ ระบบเติมวันที่ให้ — ถ้ามีเวลาเข้าโหลด แต่ช่องออกจากฟรีต/โทรตามว่าง คำนวณตามสูตรในไฟล์จัดงาน (เข้าโหลด − 30 นาที, แล้ว − 1 ชม.)
+    const tdel = tp(out[6]), ref0 = tdel ? new Date(Number(iso.slice(0, 4)), Number(iso.slice(5, 7)) - 1, Number(iso.slice(8, 10)), tdel[0], tdel[1], tdel[2]) : null;
+    let dY = null, dX = null, dZ = null;
+    if(ref0){
+      if(out[24]) dY = stampFrom(out[24], ref0);
+      if(out[23]) dX = stampFrom(out[23], dY || ref0);
+      if(out[25]) dZ = stampFrom(out[25], dX || dY || ref0);
+      if(dY && !out[23]) dX = new Date(dY.getTime() - 30 * 60000);
+      if(dX && !out[25]) dZ = new Date(dX.getTime() - 60 * 60000);
+      if(dY) out[24] = fmtStamp(dY);
+      if(dX) out[23] = fmtStamp(dX);
+      if(dZ) out[25] = fmtStamp(dZ);
+    }
     rows.push(out);
   });
   if(!rows.length) return {err: 'ไม่พบแถวข้อมูลในที่วาง'};
