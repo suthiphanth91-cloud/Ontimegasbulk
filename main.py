@@ -3277,6 +3277,9 @@ PLAN_HTML = """<!doctype html>
   .imp td[data-ir]{cursor:cell}
   .imp td[data-ir]:hover{outline:2px solid #2563eb;outline-offset:-2px}
   .imp td.ied{background:var(--cc-bg);font-weight:700}
+  .imp td[data-sel]{outline:2px solid #2563eb;outline-offset:-2px;position:relative}
+  .imp td[data-sel] .fh{position:absolute;right:0;bottom:0;width:11px;height:11px;background:#2563eb;border:1px solid #fff;cursor:crosshair}
+  .imp td.idrag{background:#dbeafe}
   .imp td.ierr{background:#fca5a5;color:#7f1d1d;outline:2px solid var(--late);outline-offset:-2px;font-weight:700}
   .imp td.iwarn{background:#fee2e2;color:#991b1b;outline:2px dashed #ef4444;outline-offset:-2px}
   .imp td.rn{color:var(--mut);font-size:11.5px}
@@ -4044,7 +4047,8 @@ function impRender(){
     const cls = IMP.errs[k] ? ' class="ierr" title="' + esc(IMP.errs[k]) + '"'
       : IMP.warns[k] ? ' class="iwarn" title="' + esc(IMP.warns[k]) + '"'
       : IMP.edited[k] ? ' class="ied"' : '';
-    return '<td data-ir="' + ri + '" data-ic="' + c + '"' + cls + '>' + esc(v) + '</td>';
+    const sel = IMP.sel && IMP.sel.r === ri && IMP.sel.c === c;
+    return '<td data-ir="' + ri + '" data-ic="' + c + '"' + cls + (sel ? ' data-sel="1"' : '') + '>' + esc(v) + (sel ? '<i class="fh" title="ลากลงเพื่อคัดลอกค่าไปแถวล่าง"></i>' : '') + '</td>';
   }).join('') + '</tr>').join('');
   const nedit = Object.keys(IMP.edited).length;
   const ex = IMP.near ? (j.existing
@@ -4082,17 +4086,91 @@ function impRender(){
   document.getElementById('impGo').onclick = impCommit;
 }
 
+function impTrip(r, car){                // เที่ยววิ่งของแถวนี้ต้องไม่ซ้ำกับงานอื่นของรถคันเดียวกัน (กันเลข JOB ซ้ำ): ดูทั้งในชีตของวันนั้นและในชุดที่วางนี้
+  const used = {};
+  const us = (IMP.usedSheet || {})[car] || {};
+  Object.keys(us).forEach(k => { used[k] = 1; });
+  IMP.rows.forEach((o, i) => { if(i !== r && String(o[15] || '').trim() === car){ const t = parseInt(String(o[4] || '').split(' ')[1], 10); if(t) used[t] = 1; } });
+  const mine = parseInt(String(IMP.rows[r][4] || '').split(' ')[1], 10);
+  if(mine && !used[mine]) return;
+  let n = 1; while(used[n]) n++;
+  IMP.rows[r][4] = n > 3 ? '' : 'เที่ยว ' + n; IMP.edited[r + ',4'] = 1;
+}
+function impApply(r, c, v){              // ใส่ค่าในแถว r ช่อง c พร้อมผลที่ตามมา
+  const row = IMP.rows[r], old = row[c];
+  if(v === old) return;
+  row[c] = v; IMP.edited[r + ',' + c] = 1;
+  if(c === 18 || c === 19){              // เปลี่ยนชื่อ พขร. → เบอร์โทรตามชื่อ (เบอร์ว่างหรือเป็นของคนเดิมถึงแก้/เคลียร์)
+    const pc = c === 18 ? 20 : 21, cur = String(row[pc] || '').trim();
+    const oldPh = PHONES[String(old).trim()] || '', nw = PHONES[String(v).trim()] || '';
+    if(cur !== nw && (nw || (cur && cur === oldPh))){ row[pc] = nw; IMP.edited[r + ',' + pc] = 1; }
+  }
+  if(c === 15 && v && CARS && CARS[v]){  // ใส่เบอร์รถ → เติมประเภท/ทะเบียน/พขร. (ช่องว่างหรือยังเป็นของรถคันเดิม) + เบอร์โทรตามชื่อ + เที่ยววิ่งไม่ซ้ำ
+    const nc = CARS[v], oc = (CARS && CARS[old]) || {};
+    [[16, 't'], [17, 'plate'], [18, 'd1'], [19, 'd2']].forEach(f => {
+      const cur = String(row[f[0]] || '').trim(), want = nc[f[1]] || '';
+      if(want && cur !== want && (!cur || cur === (oc[f[1]] || ''))){ row[f[0]] = want; IMP.edited[r + ',' + f[0]] = 1; }
+    });
+    [[18, 20], [19, 21]].forEach(f => {
+      const nm = String(row[f[0]] || '').trim(), ph = PHONES[nm] || '';
+      if(nm && ph && String(row[f[1]] || '').trim() !== ph){ row[f[1]] = ph; IMP.edited[r + ',' + f[1]] = 1; }
+    });
+    if(IMP.near) impTrip(r, v);
+  }
+}
 function impSet(r, c, v){                // แก้ช่องในตารางนำเข้า แล้วตรวจซ้ำ
+  IMP.sel = {r: r, c: c};
   if(v === IMP.rows[r][c]){ impRender(); return; }
-  IMP.rows[r][c] = v; IMP.edited[r + ',' + c] = 1;
+  impApply(r, c, v);
+  impRecheck();
+}
+function impFill(from, col, a, b){       // ลากคัดลอกค่าของช่อง (from, col) ไปแถว a..b ของคอลัมน์เดียวกัน (ทับค่าเดิมในช่องปลายทาง)
+  const v = IMP.rows[from][col];
+  const car = String(IMP.rows[from][15] || '').trim();
+  const carCol = col >= 16 && col <= 21;  // ประเภทรถ/ทะเบียน/พขร./เบอร์โทร เป็นของรถแต่ละคัน → ลากผ่านแถวของรถคันอื่นให้ข้าม ไม่ทับ
+  let skipped = 0, done = 0;
+  for(let r = a; r <= b; r++){
+    if(r === from) continue;
+    if(carCol && String(IMP.rows[r][15] || '').trim() !== car){ skipped++; continue; }
+    impApply(r, col, v); done++;
+  }
+  if(skipped) toast('ใส่ให้ ' + done + ' แถว · ข้าม ' + skipped + ' แถวที่เป็นรถคันอื่น', false);
   impRecheck();
 }
 
 document.getElementById('impBody').addEventListener('click', e => {
+  if(e.target.closest('.fh') || (IMP && IMP.justDragged)) return;
   const td = e.target.closest('td[data-ir]');
   if(!td || !IMP || td.querySelector('input,select')) return;
   const r = Number(td.dataset.ir), c = Number(td.dataset.ic);
+  IMP.sel = {r: r, c: c};
   openEditor(td, c, IMP.rows[r][c], v => impSet(r, c, v), impRender);
+});
+// ลากจุดสีน้ำเงินมุมขวาล่างของช่องที่เลือก ลงไปแถวล่าง (หรือขึ้นไปแถวบน) = คัดลอกค่าไปทุกช่องที่ลากผ่าน แล้วตรวจซ้ำครั้งเดียว
+document.getElementById('impBody').addEventListener('mousedown', e => {
+  if(!e.target.closest('.fh') || !IMP || !IMP.sel) return;
+  e.preventDefault();
+  const from = IMP.sel.r, col = IMP.sel.c, tbl = document.querySelector('#impBody .tbl');
+  let to = from;
+  const mark = () => {
+    document.querySelectorAll('#impBody td.idrag').forEach(t => t.classList.remove('idrag'));
+    for(let r = Math.min(from, to); r <= Math.max(from, to); r++){
+      const t = document.querySelector('#impBody td[data-ir="' + r + '"][data-ic="' + col + '"]');
+      if(t && r !== from) t.classList.add('idrag');
+    }
+  };
+  const move = ev => {
+    if(tbl){ const rc = tbl.getBoundingClientRect(); if(ev.clientY > rc.bottom - 28) tbl.scrollTop += 24; else if(ev.clientY < rc.top + 44) tbl.scrollTop -= 24; }
+    const el = document.elementFromPoint(ev.clientX, ev.clientY), td = el && el.closest ? el.closest('td[data-ir]') : null;
+    if(td){ to = Number(td.dataset.ir); mark(); }
+  };
+  const up = () => {
+    document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up);
+    IMP.justDragged = true; setTimeout(() => { if(IMP) IMP.justDragged = false; }, 300);   // กันคลิกหลังปล่อยเมาส์เปิดช่องแก้
+    if(to === from){ impRender(); return; }
+    impFill(from, col, Math.min(from, to), Math.max(from, to));
+  };
+  document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
 });
 
 async function impCommit(){
@@ -4230,13 +4308,14 @@ async function pasteGo(){
         if(car && t) (used[car] = used[car] || {})[t] = 1;
       });
     }catch(e){}
+    const usedSheet = JSON.parse(JSON.stringify(used));
     const res = pasteParse(document.getElementById('pasteTxt').value, iso, used);
     if(res.err){ impBody('<div class="box bad">' + esc(res.err) + '</div>'); return; }
     const j = await impSend({rows: res.rows, near: true});
     if(!j) return;
     if(res.tripFull){ j.warnings = ['รถบางคันมีครบ 3 เที่ยวแล้ว ' + res.tripFull + ' แถว — เว้นช่องเที่ยววิ่งไว้ให้เลือกเอง (กันเลข JOB ซ้ำ)'].concat(j.warnings || []); j.warnings_total = (j.warnings_total || 0) + 1; }
     IMP = {rows: j.rows, headers: DATA.headers.map(h => h.name || h.col), edited: {}, errs: {}, warns: {}, info: j, replace: false,
-           onlyBad: false, master: null, near: true};
+           onlyBad: false, master: null, near: true, usedSheet: usedSheet};
     impMarkErrors(j);
     impRender();
   }catch(e){ impBody('<div class="box bad">ตรวจข้อมูลไม่ได้: ' + esc(e.message) + '</div>'); }
