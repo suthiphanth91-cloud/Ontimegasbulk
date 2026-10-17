@@ -4026,11 +4026,24 @@ async function impPreview(){             // อ่านไฟล์ครั้
   }catch(e){ impBody('<div class="box bad">อ่านไฟล์ไม่ได้: ' + esc(e.message) + '</div>'); }
 }
 
-async function impRecheck(){             // ตรวจซ้ำหลังแก้ (ส่งแถวที่แก้ไปให้เซิร์ฟเวอร์ตรวจด้วยกติกาเดียวกับตอนเขียน)
+let IMP_CHECKING = false, IMP_AGAIN = false;
+async function impRecheck(){             // แสดงผลที่แก้ทันที แล้วตรวจกับเซิร์ฟเวอร์เบื้องหลัง (ช่องแดง/คำเตือนอัปเดตตามหลัง)
+  IMP.checking = true;
+  impRender();
+  if(IMP_CHECKING){ IMP_AGAIN = true; return; }   // กำลังตรวจอยู่ — แก้ซ้ำระหว่างรอ ให้ตรวจรอบเดียวหลังรอบนี้จบ
+  IMP_CHECKING = true;
   try{
-    const j = await impSend({rows: IMP.rows, near: IMP.near});
-    if(j){ IMP.info = j; IMP.rows = j.rows; impMarkErrors(j); }
+    do{
+      IMP_AGAIN = false;
+      const sent = JSON.stringify(IMP.rows);
+      const j = await impSend({rows: IMP.rows, near: IMP.near});
+      if(!j) break;
+      IMP.info = j; impMarkErrors(j);
+      if(JSON.stringify(IMP.rows) === sent) IMP.rows = j.rows;   // ระหว่างรอมีแก้เพิ่ม = ไม่ทับด้วยผลเก่า (ตรวจอีกรอบ)
+      else IMP_AGAIN = true;
+    }while(IMP_AGAIN);
   }catch(e){ toast('ตรวจซ้ำไม่สำเร็จ: ' + e.message, true); }
+  IMP_CHECKING = false; IMP.checking = false;
   impRender();
 }
 
@@ -4064,7 +4077,7 @@ function impRender(){
   const ndup = (j.dups || []).length;
   if(IMP.skip === undefined) IMP.skip = ndup > 0;
   const nw = j.total - (IMP.near && IMP.skip ? ndup : 0);
-  const ok = j.can_commit && nw > 0 && !nerr;
+  const ok = j.can_commit && nw > 0 && !nerr && !IMP.checking;
   const nmaster = IMP.master ? Object.keys(IMP.master).length : 0;
   impBody(
     '<div class="box"><b>วันที่ ' + dmy(j.date) + '</b> · ' + j.total + ' แถวงาน · ปลายทาง: <b>' + esc(j.target) + '</b>' +
@@ -4075,6 +4088,7 @@ function impRender(){
     '> ดูเฉพาะแถวที่มีช่องสีแดง (' + nbad + ' แถว)</label>' +
     '<span class="mut" style="font-size:12.5px">ลากช่องไปวางบนอีกช่อง = สลับค่า · ลากจุดสีน้ำเงินที่มุมช่อง = คัดลอกลงแถวล่าง</span>' +
     '<button class="undo" id="impUndo"' + (IMP.hist && IMP.hist.length ? '' : ' disabled') + ' title="ย้อนกลับการแก้ล่าสุด (Ctrl+Z)">↶ ย้อนกลับ</button>' +
+    (IMP.checking ? ' <span class="mut" style="font-size:12.5px">⏳ กำลังตรวจข้อมูล…</span>' : '') +
     '<div class="tbl"><table><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div>' +
     '<div class="box">' + ex + '</div>' +
     (ndup ? '<div class="box"><label><input type="checkbox" id="impSkip"' + (IMP.skip ? ' checked' : '') + '> <b>ข้ามแถวที่ซ้ำกับชีต (' + ndup +
