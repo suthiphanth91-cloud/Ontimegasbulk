@@ -3863,11 +3863,33 @@ function badge(){
 
 let CARS = null;                         // เบอร์รถ → ข้อมูลรถ/พขร. จากแท็บในชีตทดลอง (อ่านอย่างเดียว)
 let PHONES = {}, DRIVERS = [];           // ชื่อ พขร. → เบอร์โทร / รายชื่อ พขร. (คนเท่านั้น) สำหรับดรอปลิสต์
-function applyDrivers(){                 // ช่อง พขร.1/พขร.2 = เลือกจากดรอปลิสต์รายชื่อคนขับเท่านั้น (ไม่ใช่พิมพ์อิสระ)
+function buildDatalists(){               // รายชื่อที่เด้งให้เลือกตอนพิมพ์ (ปลายทาง/เบอร์รถ/พขร.)
+  if(!OPTS) return;
+  let box = document.getElementById('dls');
+  if(!box){ box = document.createElement('div'); box.id = 'dls'; box.hidden = true; document.body.appendChild(box); }
+  box.innerHTML = Object.keys(OPTS.suggest).map(c => '<datalist id="dl' + c + '">' +
+    OPTS.suggest[c].map(v => '<option value="' + esc(v) + '"></option>').join('') + '</datalist>').join('');
+}
+function applyDrivers(){                 // ช่อง พขร.1/พขร.2 = พิมพ์ได้ (พิมพ์บางส่วนของชื่อ รายชื่อคนขับที่ยังทำงานเด้งให้เลือก)
   if(OPTS && DRIVERS.length){
-    OPTS.strict['18'] = DRIVERS; OPTS.strict['19'] = DRIVERS;
-    delete OPTS.suggest['18']; delete OPTS.suggest['19'];
+    OPTS.suggest['18'] = DRIVERS; OPTS.suggest['19'] = DRIVERS;
+    delete OPTS.strict['18']; delete OPTS.strict['19'];
+    buildDatalists();
   }
+}
+function resolveDriver(v){               // ชื่อที่พิมพ์ → ตรงเป๊ะ / ตรงส่วนหนึ่งของชื่อเดียว (เติมชื่อเต็มให้) / หลายคน / ไม่มีในรายชื่อ
+  v = String(v).trim();
+  if(!v || !DRIVERS.length) return {name: v, ok: true};
+  if(DRIVERS.indexOf(v) >= 0) return {name: v, ok: true};
+  const ql = v.toLowerCase(), m = DRIVERS.filter(n => n.toLowerCase().indexOf(ql) >= 0);
+  if(m.length === 1) return {name: m[0], ok: true, fixed: true};
+  return m.length > 1 ? {name: v, ok: false, many: m.slice(0, 4)} : {name: v, ok: false, none: true};
+}
+function driverOk(r, v){                 // คืนชื่อที่ใช้บันทึก หรือ null ถ้าให้ยกเลิก (มีหลายคนที่ตรง ต้องเลือกจากรายการ)
+  if(r.many){ toast('"' + v + '" ตรงกับหลายคน เช่น ' + r.many.join(', ') + ' — พิมพ์ให้ยาวขึ้นหรือเลือกจากรายการ', true); return null; }
+  if(r.none) toast('⚠ ไม่พบ "' + v + '" ในรายชื่อ พขร. — บันทึกตามที่พิมพ์ (เบอร์โทรจะไม่ถูกเติมให้)', true);
+  else if(r.fixed) toast('เลือก ' + r.name, false);
+  return r.name;
 }
 function autoPhone(x, i, oldName, newName){
   // เปลี่ยนชื่อ พขร. → เบอร์โทรต้องตรงกับชื่อใหม่ (อิงตามชื่อในรายชื่อคนขับ): ชื่อใหม่มีเบอร์ = ใส่เบอร์นั้น, ไม่มีเบอร์ = เคลียร์เฉพาะเบอร์ที่เป็นของคนเดิม
@@ -4045,11 +4067,8 @@ async function loadOpts(){              // รายการตัวเลื�
     const r = await fetch('/api/plan/options');
     if(!r.ok) return;
     OPTS = await r.json();
+    buildDatalists();
     applyDrivers();
-    let box = document.getElementById('dls');
-    if(!box){ box = document.createElement('div'); box.id = 'dls'; box.hidden = true; document.body.appendChild(box); }
-    box.innerHTML = Object.keys(OPTS.suggest).map(c => '<datalist id="dl' + c + '">' +
-      OPTS.suggest[c].map(v => '<option value="' + esc(v) + '"></option>').join('') + '</datalist>').join('');
   }catch(e){}
 }
 
@@ -4096,7 +4115,11 @@ function startEdit(td, x, i){
   if(who) toast('⚠ ' + who.name + ' กำลังแก้ช่องนี้อยู่ — ถ้าแก้พร้อมกัน ระบบจะไม่ทับกัน แต่คนที่บันทึกทีหลังจะถูกแจ้งว่ามีคนแก้ไปก่อน', true);
   CURSEL = {row: x.row, col: i};
   const idle = () => { CURSEL = {row: 0, col: -1}; };
-  openEditor(td, i, old, (v, dir) => { idle(); saveCell(x, i, old, v, false, dir); }, () => { idle(); render(); },
+  openEditor(td, i, old, (v, dir) => {
+    idle();
+    if(i === 18 || i === 19){ const nm = driverOk(resolveDriver(v), v); if(nm === null){ render(); return; } v = nm; }
+    saveCell(x, i, old, v, false, dir);
+  }, () => { idle(); render(); },
              dir => { idle(); render(); advance(x, i, dir); });
 }
 function paintPresence(){
@@ -4364,6 +4387,7 @@ function impSwap(r1, c1, r2, c2){        // ลากช่องไปวาง
 }
 function impSet(r, c, v){                // แก้ช่องในตารางนำเข้า แล้วตรวจซ้ำ
   IMP.sel = {r: r, c: c};
+  if(c === 18 || c === 19){ const nm = driverOk(resolveDriver(v), v); if(nm === null){ impRender(); return; } v = nm; }
   if(v === IMP.rows[r][c]){ impRender(); return; }
   impSnap();
   impApply(r, c, v);
