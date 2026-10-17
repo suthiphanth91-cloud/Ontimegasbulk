@@ -3374,6 +3374,14 @@ PLAN_HTML = """<!doctype html>
   .imp td[data-sel]{outline:2px solid #2563eb;outline-offset:-2px;position:relative}
   .imp td[data-sel] .fh{position:absolute;right:0;bottom:0;width:11px;height:11px;background:#2563eb;border:1px solid #fff;cursor:crosshair}
   .imp td.idrag{background:#dbeafe}
+  .imp .impsearch{display:flex;align-items:center;gap:8px;margin:8px 0;flex-wrap:wrap}
+  .imp .impsearch .sw{position:relative;display:inline-flex;align-items:center}
+  .imp .impsearch .ico{position:absolute;left:11px;pointer-events:none;opacity:.65}
+  .imp .impsearch input[type=search]{min-width:300px;padding-left:34px;padding-right:34px}
+  .imp .impsearch .clr{position:absolute;right:6px;border:0;background:transparent;padding:2px 7px;border-radius:999px;cursor:pointer;color:var(--mut)}
+  .imp .impsearch .clr:hover{background:var(--line)}
+  .imp .impsearch .cnt{background:var(--chg-bg);color:var(--chg-ink);border:1px solid var(--chg-line);border-radius:999px;padding:3px 12px;font-size:12.5px;font-weight:600}
+  .imp mark{background:#fde047;color:#111;border-radius:3px;padding:0 1px}
   .imp td[data-ir]{user-select:none}
   .imp td.idsrc{background:#fef3c7;outline:2px dashed #d97706;outline-offset:-2px}
   .imp .undo{margin:0 0 6px 8px;padding:3px 10px;border:1px solid var(--line);border-radius:8px;background:var(--card);cursor:pointer}
@@ -4206,13 +4214,16 @@ function impRender(){
     ? '<div class="box"><b class="bad">✖ มี ' + nerr + ' ช่องที่ไม่ถูกต้อง (ช่องสีแดงในตาราง เอาเมาส์ชี้ดูสาเหตุ) — ต้องแก้ก่อนเขียนลงชีต</b></div>' : '';
   const head = '<tr><th>#</th>' + IMP.headers.map((h, c) => '<th><small>' + COLS[c] + '</small>' + esc(h) + '</th>').join('') + '</tr>';
   const bad = impBadRows(), nbad = Object.keys(bad).length;
-  const body = IMP.rows.map((r, ri) => (IMP.onlyBad && !bad[ri]) ? '' : '<tr><td class="rn">' + (ri + 1) + '</td>' + r.map((v, c) => {
+  const qEl = document.getElementById('impQ'), qHad = !!qEl && document.activeElement === qEl, qPos = qHad ? qEl.selectionStart : 0;   // พิมพ์ค้นหาอยู่ → วาดใหม่แล้วคืนเคอร์เซอร์ให้
+  const hide = ri => (IMP.onlyBad && !bad[ri]) || impHidden(ri);
+  const shown = IMP.rows.filter((_, i) => !hide(i)).length;
+  const body = IMP.rows.map((r, ri) => hide(ri) ? '' : '<tr><td class="rn">' + (ri + 1) + '</td>' + r.map((v, c) => {
     const k = ri + ',' + c;
     const cls = IMP.errs[k] ? ' class="ierr" title="' + esc(IMP.errs[k]) + '"'
       : IMP.warns[k] ? ' class="iwarn" title="' + esc(IMP.warns[k]) + '"'
       : IMP.edited[k] ? ' class="ied"' : '';
     const sel = IMP.sel && IMP.sel.r === ri && IMP.sel.c === c;
-    return '<td data-ir="' + ri + '" data-ic="' + c + '"' + cls + (sel ? ' data-sel="1"' : '') + '>' + esc(v) + (sel ? '<i class="fh" title="ลากลงเพื่อคัดลอกค่าไปแถวล่าง"></i>' : '') + '</td>';
+    return '<td data-ir="' + ri + '" data-ic="' + c + '"' + cls + (sel ? ' data-sel="1"' : '') + '>' + impHl(v) + (sel ? '<i class="fh" title="ลากลงเพื่อคัดลอกค่าไปแถวล่าง"></i>' : '') + '</td>';
   }).join('') + '</tr>').join('');
   const nedit = Object.keys(IMP.edited).length;
   const ex = IMP.near ? (j.existing
@@ -4233,6 +4244,10 @@ function impRender(){
     '<b class="bad">ช่องสีแดง = มีปัญหา (เอาเมาส์ชี้ดูสาเหตุ)</b> · ช่องสีเหลือง = ที่คุณแก้</p>' + er + w +
     '<label style="display:block;margin:6px 2px"><input type="checkbox" id="impOnlyBad"' + (IMP.onlyBad ? ' checked' : '') +
     '> ดูเฉพาะแถวที่มีช่องสีแดง (' + nbad + ' แถว)</label>' +
+    '<div class="impsearch"><span class="sw"><span class="ico">🔍</span><input type="search" id="impQ" placeholder="ค้นหาในตาราง (รถ / ปลายทาง / ออเดอร์ / ชื่อคนขับ)" value="' + esc(IMP.q || '') +
+    '">' + (IMP.q ? '<button type="button" class="clr" id="impQx" title="ล้างคำค้น">✕</button>' : '') + '</span><span class="cnt">' +
+    (String(IMP.q || '').trim() ? 'พบ ' + shown + ' จาก ' + IMP.rows.length + ' แถว' : 'ทั้งหมด ' + IMP.rows.length + ' แถว') + '</span>' +
+    (IMP.near ? ' <button class="undo" id="impRenum" title="จัดเที่ยววิ่งของทุกแถวใหม่ตาม Drop (Drop 1 = เที่ยวใหม่, Drop 2+ ต่อเที่ยวเดิม) ไม่ให้ซ้ำกับงานในชีตของวันนั้น">🔢 จัดเที่ยววิ่งใหม่ตาม Drop</button>' : '') + '</div>' +
     '<span class="mut" style="font-size:12.5px">ลากช่องไปวางบนอีกช่อง = สลับค่า · ลากจุดสีน้ำเงินที่มุมช่อง = คัดลอกลงแถวล่าง</span>' +
     '<button class="undo" id="impUndo"' + (IMP.hist && IMP.hist.length ? '' : ' disabled') + ' title="ย้อนกลับการแก้ล่าสุด (Ctrl+Z)">↶ ย้อนกลับ</button>' +
     (IMP.checking ? ' <span class="mut" style="font-size:12.5px">⏳ กำลังตรวจข้อมูล…</span>' : '') +
@@ -4252,6 +4267,47 @@ function impRender(){
   document.getElementById('impOnlyBad').onchange = e => { IMP.onlyBad = e.target.checked; impRender(); };
   document.getElementById('impUndo').onclick = impUndo;
   document.getElementById('impGo').onclick = impCommit;
+  const qi = document.getElementById('impQ');
+  qi.oninput = e => { IMP.q = e.target.value; clearTimeout(IMP.qt); IMP.qt = setTimeout(impRender, 160); };
+  if(qHad){ qi.focus(); try{ qi.setSelectionRange(qPos, qPos); }catch(e){} }
+  const rn = document.getElementById('impRenum'); if(rn) rn.onclick = impRenumber;
+  const qx = document.getElementById('impQx'); if(qx) qx.onclick = () => { IMP.q = ''; impRender(); document.getElementById('impQ').focus(); };
+}
+function impHl(v){                       // แสดงค่าในช่อง พร้อมเน้นสีคำที่ค้นเจอ
+  const q = String(IMP.q || '').trim();
+  if(!q) return esc(v);
+  const s = String(v), low = s.toLowerCase(), ql = q.toLowerCase();
+  let out = '', i = 0;
+  for(;;){
+    const k = low.indexOf(ql, i);
+    if(k < 0){ out += esc(s.slice(i)); break; }
+    out += esc(s.slice(i, k)) + '<mark>' + esc(s.slice(k, k + q.length)) + '</mark>';
+    i = k + q.length;
+  }
+  return out;
+}
+function impHidden(ri){                  // ถูกซ่อนด้วยช่องค้นหาไหม (ค้นในทุกช่องของแถว ไม่สนตัวพิมพ์เล็กใหญ่)
+  const q = String(IMP.q || '').trim().toLowerCase();
+  return !!q && IMP.rows[ri].join(' ').toLowerCase().indexOf(q) < 0;
+}
+function impRenumber(){                  // จัดเที่ยววิ่งของทุกแถวที่วางใหม่ตาม Drop: Drop 1 เริ่มเที่ยวใหม่ Drop 2+ ต่อเที่ยวเดิม ไม่ซ้ำกับในชีต
+  impSnap();
+  const used = JSON.parse(JSON.stringify(IMP.usedSheet || {})), last = {};
+  IMP.rows.forEach((o, r) => {
+    const car = String(o[15] || '').trim();
+    if(!car) return;
+    const dropNo = parseInt(String(o[13]).trim(), 10) || 1, u = used[car] = used[car] || {};
+    let n = 1;
+    if(dropNo > 1){
+      if(last[car]) n = last[car];
+      else { n = 0; for(let k = 1; k <= 3; k++) if(u[k] && u[k][dropNo - 1] && !u[k][dropNo]){ n = k; break; } if(!n) n = 1; }
+    }
+    while(u[n] && u[n][dropNo]) n++;
+    (u[n] = u[n] || {})[dropNo] = 1; last[car] = n;
+    const val = n > 3 ? '' : 'เที่ยว ' + n;
+    if(o[4] !== val){ o[4] = val; IMP.edited[r + ',4'] = 1; }
+  });
+  impRecheck();
 }
 
 function impTrip(r, car){                // เที่ยววิ่งของแถวนี้: Drop 1 เริ่มเที่ยวใหม่ Drop 2+ ต่อเที่ยวเดิม ห้ามซ้ำเฉพาะ รถ+เที่ยว+Drop (ดูทั้งในชีตของวันนั้นและในชุดที่วาง)
@@ -4321,6 +4377,7 @@ function impFill(from, col, a, b){       // ลากคัดลอกค่า
   let skipped = 0, done = 0;
   for(let r = a; r <= b; r++){
     if(r === from) continue;
+    if(impHidden(r) || (IMP.onlyBad && !impBadRows()[r])) continue;                     // แถวที่ซ่อนอยู่ ไม่ทับ
     if(carCol && String(IMP.rows[r][15] || '').trim() !== car){ skipped++; continue; }
     impApply(r, col, v); done++;
   }
