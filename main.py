@@ -3280,6 +3280,10 @@ PLAN_HTML = """<!doctype html>
   .imp td[data-sel]{outline:2px solid #2563eb;outline-offset:-2px;position:relative}
   .imp td[data-sel] .fh{position:absolute;right:0;bottom:0;width:11px;height:11px;background:#2563eb;border:1px solid #fff;cursor:crosshair}
   .imp td.idrag{background:#dbeafe}
+  .imp td[data-ir]{user-select:none}
+  .imp td.idsrc{background:#fef3c7;outline:2px dashed #d97706;outline-offset:-2px}
+  .imp .undo{margin:0 0 6px 8px;padding:3px 10px;border:1px solid var(--line);border-radius:8px;background:var(--card);cursor:pointer}
+  .imp .undo:disabled{opacity:.45;cursor:default}
   .imp td.ierr{background:#fca5a5;color:#7f1d1d;outline:2px solid var(--late);outline-offset:-2px;font-weight:700}
   .imp td.iwarn{background:#fee2e2;color:#991b1b;outline:2px dashed #ef4444;outline-offset:-2px}
   .imp td.rn{color:var(--mut);font-size:11.5px}
@@ -4069,6 +4073,8 @@ function impRender(){
     '<b class="bad">ช่องสีแดง = มีปัญหา (เอาเมาส์ชี้ดูสาเหตุ)</b> · ช่องสีเหลือง = ที่คุณแก้</p>' + er + w +
     '<label style="display:block;margin:6px 2px"><input type="checkbox" id="impOnlyBad"' + (IMP.onlyBad ? ' checked' : '') +
     '> ดูเฉพาะแถวที่มีช่องสีแดง (' + nbad + ' แถว)</label>' +
+    '<span class="mut" style="font-size:12.5px">ลากช่องไปวางบนอีกช่อง = สลับค่า · ลากจุดสีน้ำเงินที่มุมช่อง = คัดลอกลงแถวล่าง</span>' +
+    '<button class="undo" id="impUndo"' + (IMP.hist && IMP.hist.length ? '' : ' disabled') + ' title="ย้อนกลับการแก้ล่าสุด (Ctrl+Z)">↶ ย้อนกลับ</button>' +
     '<div class="tbl"><table><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div>' +
     '<div class="box">' + ex + '</div>' +
     (ndup ? '<div class="box"><label><input type="checkbox" id="impSkip"' + (IMP.skip ? ' checked' : '') + '> <b>ข้ามแถวที่ซ้ำกับชีต (' + ndup +
@@ -4083,6 +4089,7 @@ function impRender(){
   const rp = document.getElementById('impReplace'); if(rp) rp.onchange = e => { IMP.replace = e.target.checked; };
   const sk = document.getElementById('impSkip'); if(sk) sk.onchange = e => { IMP.skip = e.target.checked; impRender(); };
   document.getElementById('impOnlyBad').onchange = e => { IMP.onlyBad = e.target.checked; impRender(); };
+  document.getElementById('impUndo').onclick = impUndo;
   document.getElementById('impGo').onclick = impCommit;
 }
 
@@ -4118,14 +4125,36 @@ function impApply(r, c, v){              // ใส่ค่าในแถว r 
     if(IMP.near) impTrip(r, v);
   }
 }
+function impSnap(){                     // เก็บสภาพตารางก่อนแก้ไว้ย้อนกลับ (สูงสุด 30 ครั้ง)
+  IMP.hist = IMP.hist || [];
+  IMP.hist.push(JSON.stringify([IMP.rows, IMP.edited]));
+  if(IMP.hist.length > 30) IMP.hist.shift();
+}
+function impUndo(){
+  if(!IMP || !IMP.hist || !IMP.hist.length) return;
+  const st = JSON.parse(IMP.hist.pop());
+  IMP.rows = st[0]; IMP.edited = st[1];
+  impRecheck();
+}
+function impSwap(r1, c1, r2, c2){        // ลากช่องไปวางบนอีกช่อง = สลับค่าของสองช่อง (เบอร์โทร/ข้อมูลรถตามชื่อ-เบอร์รถ)
+  const a = IMP.rows[r1][c1], b = IMP.rows[r2][c2];
+  if(a === b) return;
+  impSnap();
+  impApply(r1, c1, b); impApply(r2, c2, a);
+  IMP.sel = {r: r2, c: c2};
+  toast('สลับ "' + (a || 'ว่าง') + '" กับ "' + (b || 'ว่าง') + '" แล้ว (กด ↶ ย้อนกลับ ได้)', false);
+  impRecheck();
+}
 function impSet(r, c, v){                // แก้ช่องในตารางนำเข้า แล้วตรวจซ้ำ
   IMP.sel = {r: r, c: c};
   if(v === IMP.rows[r][c]){ impRender(); return; }
+  impSnap();
   impApply(r, c, v);
   impRecheck();
 }
 function impFill(from, col, a, b){       // ลากคัดลอกค่าของช่อง (from, col) ไปแถว a..b ของคอลัมน์เดียวกัน (ทับค่าเดิมในช่องปลายทาง)
   const v = IMP.rows[from][col];
+  impSnap();
   const car = String(IMP.rows[from][15] || '').trim();
   const carCol = col >= 16 && col <= 21;  // ประเภทรถ/ทะเบียน/พขร./เบอร์โทร เป็นของรถแต่ละคัน → ลากผ่านแถวของรถคันอื่นให้ข้าม ไม่ทับ
   let skipped = 0, done = 0;
@@ -4145,6 +4174,33 @@ document.getElementById('impBody').addEventListener('click', e => {
   const r = Number(td.dataset.ir), c = Number(td.dataset.ic);
   IMP.sel = {r: r, c: c};
   openEditor(td, c, IMP.rows[r][c], v => impSet(r, c, v), impRender);
+});
+// ลากตัวช่อง (ไม่ใช่จุดสีน้ำเงิน) ไปวางบนอีกช่อง = สลับค่า: คอลัมน์เดียวกันข้ามแถวได้ หรือ พขร.1 ↔ พขร.2
+document.getElementById('impBody').addEventListener('mousedown', e => {
+  if(e.target.closest('.fh') || e.button !== 0 || !IMP) return;
+  const src = e.target.closest('td[data-ir]');
+  if(!src || src.querySelector('input,select')) return;
+  const r1 = Number(src.dataset.ir), c1 = Number(src.dataset.ic), x0 = e.clientX, y0 = e.clientY;
+  let on = false, tgt = null;
+  const clear = () => document.querySelectorAll('#impBody td.idrag, #impBody td.idsrc').forEach(t => t.classList.remove('idrag', 'idsrc'));
+  const move = ev => {
+    if(!on){ if(Math.abs(ev.clientX - x0) + Math.abs(ev.clientY - y0) < 8) return; on = true; src.classList.add('idsrc'); }
+    const el = document.elementFromPoint(ev.clientX, ev.clientY), td = el && el.closest ? el.closest('td[data-ir]') : null;
+    document.querySelectorAll('#impBody td.idrag').forEach(t => t.classList.remove('idrag'));
+    tgt = td && td !== src ? td : null;
+    if(tgt) tgt.classList.add('idrag');
+  };
+  const up = () => {
+    document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up);
+    if(!on) return;                                                         // ไม่ได้ลาก = คลิกธรรมดา (เปิดช่องแก้)
+    clear();
+    IMP.justDragged = true; setTimeout(() => { if(IMP) IMP.justDragged = false; }, 300);
+    if(!tgt) return;
+    const r2 = Number(tgt.dataset.ir), c2 = Number(tgt.dataset.ic), pair = (c1 === 18 || c1 === 19) && (c2 === 18 || c2 === 19);
+    if(c1 !== c2 && !pair){ toast('สลับได้เฉพาะช่องคอลัมน์เดียวกัน หรือ พขร.1 ↔ พขร.2', true); return; }
+    impSwap(r1, c1, r2, c2);
+  };
+  document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
 });
 // ลากจุดสีน้ำเงินมุมขวาล่างของช่องที่เลือก ลงไปแถวล่าง (หรือขึ้นไปแถวบน) = คัดลอกค่าไปทุกช่องที่ลากผ่าน แล้วตรวจซ้ำครั้งเดียว
 document.getElementById('impBody').addEventListener('mousedown', e => {
@@ -4327,6 +4383,11 @@ function openImp(paste){
     document.getElementById('pasteTxt').focus();
   }
 }
+document.addEventListener('keydown', e => {                       // Ctrl+Z ในหน้าต่างตรวจข้อมูล (ไม่ใช่ตอนกำลังพิมพ์ในช่อง)
+  if(!IMP || document.getElementById('impBack').hidden || !(e.ctrlKey || e.metaKey) || e.key !== 'z') return;
+  if(e.target.closest && e.target.closest('input,select,textarea')) return;
+  e.preventDefault(); impUndo();
+});
 document.getElementById('pasteGo').onclick = pasteGo;
 document.getElementById('pasteOpen').onclick = () => openImp(true);
 document.getElementById('impOpen').onclick = () => openImp(false);
