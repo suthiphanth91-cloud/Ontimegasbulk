@@ -2253,6 +2253,34 @@ def _dup_rows(rows: list, date_iso: str) -> list:
     return [n for n, r in enumerate(rows) if (_dup_key(r) in have and _dup_key(r) is not None)]
 
 
+def _triple(r: list):
+    car, trip, drop = str(r[15]).strip(), str(r[4]).strip(), str(r[13]).strip() or "1"
+    return (car, trip, drop) if car and trip else None
+
+
+def _triple_conflicts(rows: list, date_iso: str) -> list:
+    """[(ลำดับแถวที่วาง, ซ้ำกับอะไร)] — รถ+เที่ยว+Drop ซ้ำกับงานในชีตของวันนั้น หรือซ้ำกันเองในชุดที่วาง"""
+    seen: dict = {}
+    try:
+        for i, r in enumerate(_fetch_sheet(PLAN_PAGE_ID, PLAN_PAGE_TAB), start=1):
+            if _parse_date(_cell(r, PLAN_DATE)) == date_iso:
+                t = _triple([_cell(r, c) for c in range(PLAN_LAST_COL)])
+                if t:
+                    seen.setdefault(t, f"แถวที่ {i} ในชีต")
+    except Exception:
+        pass
+    out = []
+    for n, r in enumerate(rows):
+        t = _triple(r)
+        if not t:
+            continue
+        if t in seen:
+            out.append((n, seen[t]))
+        else:
+            seen[t] = f"แถวที่ {n + 1} ของชุดที่วาง"
+    return out
+
+
 def _write_near(ws, head: int, hit: list, sheet_rows: list) -> dict:
     """เพิ่มงานเข้าวันที่มีอยู่แล้ว โดยไม่ลบงานเดิม: งานของรถคันที่มีแถวอยู่ในวันนั้น แทรกต่อท้ายกลุ่มแถวของรถคันนั้น
     ส่วนงานที่ยังไม่มีเบอร์รถ/เป็นรถคันใหม่ ต่อท้ายวัน (ก่อนแถวสีดำคั่นวัน) — แทรกแถว+คัดลอกสูตร+เขียนค่า รวมเป็น 3 คำสั่งเรียก Google
@@ -2369,6 +2397,12 @@ async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = 
             info["marks"] = (info.get("marks") or []) + [{"r": i, "c": 7, "msg": "ซ้ำกับงานที่มีในชีตของวันนี้แล้ว"} for i in dups]
             info["warnings"] = [f"{len(dups)} แถวซ้ำกับงานที่มีในชีตของวันนี้อยู่แล้ว (เลขออเดอร์/เลขโหลด/ต้นทาง/ปลายทาง/Drop เหมือนกัน) "
                                 "— ติ๊ก \"ข้ามแถวที่ซ้ำ\" เพื่อไม่ให้งานซ้ำ"] + list(info.get("warnings") or [])
+            info["warnings_total"] = int(info.get("warnings_total") or 0) + 1
+    if near and rv["date"]:
+        tc = _triple_conflicts(rv["rows"], rv["date"])
+        if tc:
+            info["marks"] = (info.get("marks") or []) + [{"r": n, "c": 4, "msg": f"รถ+เที่ยว+Drop ซ้ำกับ{src}"} for n, src in tc]
+            info["warnings"] = [f"{len(tc)} แถวมี รถ+เที่ยววิ่ง+Drop ซ้ำกับงานอื่นของวันนี้ (เลข JOB จะชนกัน) — แก้เที่ยววิ่งหรือ Drop ในช่องสีแดง"] + list(info.get("warnings") or [])
             info["warnings_total"] = int(info.get("warnings_total") or 0) + 1
     if not commit:
         return info
@@ -2491,6 +2525,8 @@ class PlanEdit(BaseModel):
     key: str = ""       # "เลข JOB|Drop" ของแถวที่เห็น กันแถวเลื่อน
     by: str = ""        # ชื่อผู้แก้ (ไว้บันทึกประวัติ)
     override: bool = False   # ยืนยันเขียนทับ "สูตร" ในช่องนั้นด้วยค่าที่พิมพ์
+    hint_car: str = ""       # เจตนา: เบอร์รถหลังแก้ครบ (ตอนเปลี่ยนรถ+เที่ยวพร้อมกัน ช่องแรกที่ส่งยังไม่ซ้ำกลางทาง)
+    hint_trip: str = ""      # เจตนา: เที่ยววิ่งหลังแก้ครบ
 
 
 def _edit_value(col: int, value: str) -> str:
@@ -2797,6 +2833,56 @@ def plan_cars():
     return _plan_cars()
 
 
+def _job_conflict(ws, p, new: str, cur: list):
+    """คืนเลขแถวของงานอื่นในวันเดียวกันที่ รถ+เที่ยว+Drop ซ้ำกับที่จะเป็นหลังแก้ (ไม่ซ้ำ = None)
+    เลข JOB (วันที่+รถ+เที่ยว) ซ้ำกันได้ถ้า Drop ต่างกัน (งานหลายจุดส่งของเที่ยวเดียวกัน) แต่ รถ+เที่ยว+Drop ห้ามซ้ำ
+    อ่านเฉพาะคอลัมน์ C,E,N,P สดจากชีต 1 คำขอ; อ่านไม่ได้ = ไม่บล็อก"""
+    car = p.hint_car.strip() or (new if p.col == 15 else str(cur[15]).strip())
+    trip = p.hint_trip.strip() or (new if p.col == 4 else str(cur[4]).strip())
+    drop = (new if p.col == 13 else str(cur[13])).strip() or "1"
+    day = _parse_date(str(cur[2]))
+    if not (car and trip and day):
+        return None
+    try:
+        rc = max(int(ws.row_count), 2)
+        cols = ws.batch_get([f"C1:C{rc}", f"E1:E{rc}", f"N1:N{rc}", f"P1:P{rc}"])
+    except Exception:
+        return None
+
+    def col(k: int, i: int) -> str:
+        vr = cols[k]
+        return str(vr[i][0]).strip() if i < len(vr) and vr[i] else ""
+    for i in range(max(len(c) for c in cols)):
+        if i + 1 == p.row or _parse_date(col(0, i)) != day:
+            continue
+        if col(3, i) == car and col(1, i) == trip and (col(2, i) or "1") == drop:
+            return i + 1
+    return None
+
+
+class PresenceIn(BaseModel):
+    name: str = ""       # ผู้แก้ (ว่าง = แค่ดู ไม่ลงชื่อ)
+    date: str = ""
+    row: int = 0         # แถวที่กำลังแก้ (0 = ไม่ได้แก้ช่องไหน)
+    col: int = -1
+
+
+_presence: dict = {}
+PRESENCE_TTL = 20        # วินาที — ไม่ส่งสัญญาณเกินนี้ถือว่าออกไปแล้ว
+
+
+@app.post("/api/plan/presence", include_in_schema=False)
+def plan_presence(p: PresenceIn):
+    """หน้าเว็บส่งสัญญาณทุก ~7 วินาที: ผู้แก้ลงชื่อว่ากำลังอยู่ที่ช่องไหน ได้รายชื่อคนอื่นที่ออนไลน์ในวันเดียวกันกลับไป"""
+    now, day, name = time(), p.date[:10], p.name.strip()[:40]
+    for k in [k for k, v in _presence.items() if now - v["t"] > PRESENCE_TTL]:
+        _presence.pop(k, None)
+    if name and (name in _presence or len(_presence) < 60):
+        _presence[name] = {"t": now, "date": day, "row": max(p.row, 0), "col": p.col}
+    return {"others": [{"name": k, "row": v["row"], "col": v["col"]} for k, v in _presence.items()
+                       if k != name and v["date"] == day]}
+
+
 @app.post("/api/plan/edit", include_in_schema=False)
 def plan_edit(p: PlanEdit):
     """แก้ 1 ช่อง — ยิง Google ประมาณ 5 ครั้งต่อช่อง: อ่านแถว, อ่านสูตร (รวมบรรทัดหัว), เขียน, อ่านแถวกลับ, เขียนประวัติ
@@ -2832,6 +2918,12 @@ def plan_edit(p: PlanEdit):
     if str(cur[p.col]).strip() != p.old.strip():
         return JSONResponse(status_code=409, content={"detail":
             "ช่องนี้มีคนแก้ไปก่อนแล้ว — ยังไม่เขียนทับ", "current": cur[p.col]})
+
+    if p.col in (4, 13, 15) and new:                  # เบอร์รถ/เที่ยววิ่ง/Drop: กัน รถ+เที่ยว+Drop ซ้ำกับงานอื่นของวันนั้น (กรณีจัดรถพร้อมกัน)
+        other = _job_conflict(ws, p, new, cur)
+        if other:
+            return JSONResponse(status_code=409, content={"code": "job-dup", "row": other, "current": cur[p.col], "detail":
+                f"รถ+เที่ยววิ่ง+Drop นี้ของวันนี้มีอยู่แล้วที่แถว {other} (มีคนใช้ไปก่อน) — เลือกเที่ยวหรือรถอื่น"})
 
     # ช่องที่เป็นสูตร (หรืออยู่ในคอลัมน์ ARRAYFORMULA): เขียนทับแล้วสูตรหายถาวร จึงไม่เขียนเว้นแต่คนแก้ยืนยัน (override)
     formula, in_array = "", False
@@ -3243,6 +3335,8 @@ PLAN_HTML = """<!doctype html>
   tbody tr.chg td{background:var(--chg-bg)}
   td[data-cc]{background:var(--cc-bg) !important;font-weight:700}
   td[data-pend]{opacity:.6;font-style:italic}
+  td.pres{outline:2px solid #f59e0b;outline-offset:-2px;position:relative}
+  td.pres::after{content:attr(data-who);position:absolute;top:-1px;right:0;background:#f59e0b;color:#fff;font-size:10px;line-height:13px;padding:0 4px;border-radius:3px;white-space:nowrap;font-style:normal;font-weight:600}
   .savebadge{position:fixed;left:164px;bottom:18px;background:#f59e0b;color:#fff;padding:8px 14px;border-radius:10px;
              font-weight:700;z-index:80;box-shadow:0 4px 14px rgba(0,0,0,.25)}
   .savebadge.ok{background:#16a34a}
@@ -3330,6 +3424,7 @@ PLAN_HTML = """<!doctype html>
 </div></header>
 <main>
   <div class="cards" id="cards"></div>
+  <div class="chgbar" id="presbar" hidden></div>
   <div class="chgbar" id="edithint" hidden>
     <span>✏️ <b>กำลังอยู่ในโหมดแก้ไข</b> — คลิกที่ช่องเพื่อแก้ · <b>Enter</b> = บันทึกแล้วลงช่องล่าง · <b>Tab</b> = บันทึกแล้วไปช่องขวา · <b>Esc</b> = ยกเลิก ·
       แก้ได้ทุกช่อง A–Z (ช่องที่เป็นสูตรในชีตจะถูกแทนที่ด้วยค่าที่พิมพ์)</span>
@@ -3542,7 +3637,7 @@ async function loadWho(){
 }
 
 // ── รีเฟรชอัตโนมัติ: เพื่อนแก้อะไรไป หน้าเว็บบอกเอง (ไม่ต้องกดรีเฟรช) ──
-const AUTO = {ms: 30000, last: 0};
+const AUTO = {ms: 15000, last: 0};
 async function autoTick(){
   if(document.hidden || SAVEQ.length || SAVING || !DATA) return;                        // ซ่อนแท็บ/มีคิวค้าง = ข้าม
   if(document.querySelector('#rows input, #rows select')) return;                       // กำลังพิมพ์อยู่ = ไม่รบกวน
@@ -3791,33 +3886,54 @@ function autofillCar(x, oldCar, newCar){
   if(done.length) toast('เติมจากข้อมูลรถ ' + newCar + ': ' + done.join(', '), false);
 }
 
-function autoTrip(x, car){
-  // เลข JOB = วันที่ + เบอร์รถ + เที่ยววิ่ง — ถ้าเที่ยวของแถวนี้ซ้ำกับงานอื่นของรถคันเดียวกัน เปลี่ยนเป็นเที่ยวว่างถัดไปให้
-  const used = {};
-  DATA.rows.forEach(r => { if(r !== x && String(r.cells[CAR_COL] || '').trim() === car){ const t = parseInt(String(r.cells[4] || '').split(' ')[1], 10); if(t) used[t] = 1; } });
-  const mine = parseInt(String(x.cells[4] || '').split(' ')[1], 10);
-  if(mine && !used[mine]) return;
-  let n = 1; while(used[n]) n++;
-  if(n > 3){ toast('รถ ' + car + ' มีครบ 3 เที่ยวแล้วในวันนี้ — เลือกเที่ยววิ่งเองเพื่อไม่ให้เลข JOB ซ้ำ', true); return; }
-  saveCell(x, 4, String(x.cells[4] || ''), 'เที่ยว ' + n, false, null, true);
-  toast('ปรับเที่ยววิ่งเป็น เที่ยว ' + n + ' (กันเลข JOB ซ้ำกับงานอื่นของรถ ' + car + ')', false);
+function pickTrip(list, drop, mine){     // list = งานอื่นของรถคันนี้ [{t เที่ยว, d Drop}] → เที่ยวที่ใช้ได้ (0 = ครบ 3 เที่ยวแล้ว)
+  const has = (t, d) => list.some(o => o.t === t && o.d === d);
+  if(mine && !has(mine, drop)) return mine;                                  // ไม่ซ้ำ ใช้เที่ยวเดิม (เช่น Drop 2 ของเที่ยวเดียวกัน)
+  if(drop > 1){ for(let n = 1; n <= 3; n++) if(has(n, drop - 1) && !has(n, drop)) return n; }   // Drop 2+ ต่อเที่ยวที่มี Drop ก่อนหน้า
+  for(let n = 1; n <= 3; n++) if(!has(n, drop)) return n;
+  return 0;
+}
+function tripFor(x, car){                // เที่ยววิ่งที่ควรเป็นเมื่อแถวนี้ใช้รถ car: {value, change, full}
+  const list = [];
+  DATA.rows.forEach(r => { if(r !== x && String(r.cells[CAR_COL] || '').trim() === car)
+    list.push({t: parseInt(String(r.cells[4] || '').split(' ')[1], 10) || 0, d: parseInt(String(r.cells[13] || ''), 10) || 1}); });
+  const mine = parseInt(String(x.cells[4] || '').split(' ')[1], 10) || 0, drop = parseInt(String(x.cells[13] || ''), 10) || 1;
+  const n = pickTrip(list, drop, mine);
+  if(!n) return {value: String(x.cells[4] || ''), change: false, full: true};
+  return {value: 'เที่ยว ' + n, change: n !== mine, full: false};
 }
 
-function saveCell(x, i, old, value, override, dir, auto){
+function saveCell(x, i, old, value, override, dir, auto, hints){
   value = String(value).trim();
   if(value === String(old).trim()){ render(); if(dir) advance(x, i, dir); return; }
+  let plan = null;
+  if(i === CAR_COL && !auto && value){ plan = tripFor(x, value); hints = {trip: plan.value}; }      // เลือกรถ: คำนวณเที่ยวที่ไม่ซ้ำก่อน แล้วส่งเป็น "เจตนา" ไปให้เซิร์ฟเวอร์เช็ก
   const job = {row: x.row, col: i, old: old, value: value, override: !!override, auto: !!auto,
+               hintCar: (hints && hints.car) || '', hintTrip: (hints && hints.trip) || '',
                key: x.cells[1] ? x.cells[1] + '|' + x.cells[13] : '', tries: 0};
   x.cells[i] = value;                                   // แสดงค่าที่พิมพ์ทันที (จางๆ จนกว่าชีตยืนยัน)
   PENDING[x.row + ',' + i] = true;
   SAVEQ.push(job); outboxSave(); badge();
   if((i === 18 || i === 19) && !auto) autoPhone(x, i, old, value);                           // เปลี่ยน พขร. → เบอร์โทรตามชื่อ
-  if(i === CAR_COL && !auto && value){ autoTrip(x, value); autofillCar(x, old, value); }   // เลือกเบอร์รถ → เที่ยววิ่งไม่ซ้ำ + เติมช่องที่เกี่ยวกับรถให้
+  if(plan){                                                                                    // เลือกเบอร์รถ → เที่ยววิ่งไม่ซ้ำ + เติมช่องที่เกี่ยวกับรถให้
+    if(plan.full) toast('รถ ' + value + ' ใช้ครบ 3 เที่ยวแล้วในวันนี้ — เลือกเที่ยววิ่งเอง', true);
+    else if(plan.change){
+      saveCell(x, 4, String(x.cells[4] || ''), plan.value, false, null, true, {car: value});
+      toast('ปรับเที่ยววิ่งเป็น ' + plan.value + ' (รถ ' + value + ' เที่ยวเดิม/Drop นี้มีงานอยู่แล้ว)', false);
+    }
+    autofillCar(x, old, value);
+  }
   render();
   if(dir) advance(x, i, dir);                           // ไปช่องถัดไปเลย ไม่รอเซิร์ฟเวอร์
   pump();
 }
 
+function dropDependents(job){                           // เลือกรถไม่ผ่าน → งานเติมข้อมูลรถ/ปรับเที่ยวที่รออยู่ในคิวของแถวนี้ ยกเลิกด้วย (ไม่ให้ข้อมูลของรถคันใหม่ไปลงแถวที่ยังเป็นรถเดิม)
+  if(job.col !== CAR_COL || job.auto) return;
+  const cur = DATA && DATA.rows.find(q => q.row === job.row), keep = [];
+  SAVEQ.forEach((q, i) => { if(i > 0 && q.row === job.row && q.auto) revertJob(q, cur); else keep.push(q); });
+  SAVEQ.length = 0; keep.forEach(q => SAVEQ.push(q)); outboxSave(); badge();
+}
 function revertJob(job, cur){                           // ชีตไม่รับ → คืนค่าเดิม
   delete PENDING[job.row + ',' + job.col];
   if(cur){ cur.cells[job.col] = job.old; computeChanges(); repaintRow(cur); }
@@ -3828,7 +3944,7 @@ async function runJob(job){                             // คืนค่าเ
   if(q0 && job.col !== 1 && job.col !== 13) job.key = q0.cells[1] ? q0.cells[1] + '|' + q0.cells[13] : '';   // ช่อง JOB/Drop เป็นตัวกำหนดกุญแจเอง ไม่ปรับ
   const r = await fetch('/api/plan/edit', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({row: job.row, col: job.col, old: job.old, value: job.value, key: job.key,
-                          by: editorName(), override: job.override})});
+                          by: editorName(), override: job.override, hint_car: job.hintCar || '', hint_trip: job.hintTrip || ''})});
   if(r.status === 401){ location.href = '/login'; throw new Error('ต้องล็อกอินใหม่'); }
   if(r.status >= 500) throw new Error('เซิร์ฟเวอร์/Google ตอบ ' + r.status);
   let j = {};
@@ -3847,9 +3963,10 @@ async function runJob(job){                             // คืนค่าเ
     delete PENDING[k];
     if(cur && j.current !== undefined) cur.cells[job.col] = j.current;
     computeChanges(); if(cur) repaintRow(cur);
+    dropDependents(job);
     toast((j.detail || 'ชนกับคนอื่น') + ' ค่าตอนนี้: "' + (j.current || 'ว่าง') + '"', true); return;
   }
-  if(!r.ok){ revertJob(job, cur); toast(j.detail || ('HTTP ' + r.status), true); return; }
+  if(!r.ok){ revertJob(job, cur); dropDependents(job); toast(j.detail || ('HTTP ' + r.status), true); return; }
   delete PENDING[k]; DONEN++;
   if(cur){
     ownEdit(cur, job.col, j.value, j.cells);
@@ -3964,11 +4081,41 @@ function openEditor(td, i, old, onSave, onCancel, onSkip){
   if(el.select && el.tagName === 'INPUT') el.select();
 }
 
+let CURSEL = {row: 0, col: -1}, PRES = [];       // ช่องที่ฉันกำลังแก้ / คนอื่นที่ออนไลน์ [{name,row,col}]
 function startEdit(td, x, i){
   const old = x.cells[i];
-  openEditor(td, i, old, (v, dir) => saveCell(x, i, old, v, false, dir), render,
-             dir => { render(); advance(x, i, dir); });
+  const who = PRES.find(o => o.row === x.row && o.col === i);
+  if(who) toast('⚠ ' + who.name + ' กำลังแก้ช่องนี้อยู่ — ถ้าแก้พร้อมกัน ระบบจะไม่ทับกัน แต่คนที่บันทึกทีหลังจะถูกแจ้งว่ามีคนแก้ไปก่อน', true);
+  CURSEL = {row: x.row, col: i};
+  const idle = () => { CURSEL = {row: 0, col: -1}; };
+  openEditor(td, i, old, (v, dir) => { idle(); saveCell(x, i, old, v, false, dir); }, () => { idle(); render(); },
+             dir => { idle(); render(); advance(x, i, dir); });
 }
+function paintPresence(){
+  document.querySelectorAll('td.pres').forEach(t => { t.classList.remove('pres'); t.removeAttribute('data-who'); });
+  PRES.forEach(o => {
+    if(!o.row) return;
+    const t = document.querySelector('td[data-r="' + o.row + '"][data-c="' + o.col + '"]');
+    if(t){ t.classList.add('pres'); t.setAttribute('data-who', o.name); }
+  });
+  const bar = document.getElementById('presbar');
+  bar.hidden = !PRES.length;
+  bar.textContent = PRES.length ? '👥 ออนไลน์ตอนนี้: ' + PRES.map(o => o.name + (o.row ? ' (กำลังแก้แถว ' + o.row + ')' : '')).join(' · ') : '';
+}
+const _renderBase = render;
+render = function(){ _renderBase(); paintPresence(); };
+async function beat(){                   // ส่งสัญญาณ + รับรายชื่อคนอื่น (ไม่ยิง Google)
+  if(document.hidden || !DATA) return;
+  let name = '';
+  try{ name = EDITING ? (localStorage.getItem('gb_plan_editor') || '') : ''; }catch(e){}
+  try{
+    const r = await fetch('/api/plan/presence', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: name, date: DATA.date, row: CURSEL.row, col: CURSEL.col})});
+    if(r.ok){ PRES = (await r.json()).others || []; paintPresence(); }
+  }catch(e){}
+}
+setInterval(beat, 7000);
+setTimeout(beat, 1500);
 
 document.getElementById('rows').addEventListener('click', e => {
   if(!EDITING) return;
@@ -4107,15 +4254,15 @@ function impRender(){
   document.getElementById('impGo').onclick = impCommit;
 }
 
-function impTrip(r, car){                // เที่ยววิ่งของแถวนี้ต้องไม่ซ้ำกับงานอื่นของรถคันเดียวกัน (กันเลข JOB ซ้ำ): ดูทั้งในชีตของวันนั้นและในชุดที่วางนี้
-  const used = {};
+function impTrip(r, car){                // เที่ยววิ่งของแถวนี้: Drop 1 เริ่มเที่ยวใหม่ Drop 2+ ต่อเที่ยวเดิม ห้ามซ้ำเฉพาะ รถ+เที่ยว+Drop (ดูทั้งในชีตของวันนั้นและในชุดที่วาง)
+  const list = [];
   const us = (IMP.usedSheet || {})[car] || {};
-  Object.keys(us).forEach(k => { used[k] = 1; });
-  IMP.rows.forEach((o, i) => { if(i !== r && String(o[15] || '').trim() === car){ const t = parseInt(String(o[4] || '').split(' ')[1], 10); if(t) used[t] = 1; } });
-  const mine = parseInt(String(IMP.rows[r][4] || '').split(' ')[1], 10);
-  if(mine && !used[mine]) return;
-  let n = 1; while(used[n]) n++;
-  IMP.rows[r][4] = n > 3 ? '' : 'เที่ยว ' + n; IMP.edited[r + ',4'] = 1;
+  Object.keys(us).forEach(t => Object.keys(us[t]).forEach(d => list.push({t: Number(t), d: Number(d)})));
+  IMP.rows.forEach((o, i) => { if(i !== r && String(o[15] || '').trim() === car)
+    list.push({t: parseInt(String(o[4] || '').split(' ')[1], 10) || 0, d: parseInt(String(o[13] || ''), 10) || 1}); });
+  const mine = parseInt(String(IMP.rows[r][4] || '').split(' ')[1], 10) || 0, drop = parseInt(String(IMP.rows[r][13] || ''), 10) || 1;
+  const n = pickTrip(list, drop, mine), val = n ? 'เที่ยว ' + n : '';
+  if(IMP.rows[r][4] !== val){ IMP.rows[r][4] = val; IMP.edited[r + ',4'] = 1; }
 }
 function impApply(r, c, v){              // ใส่ค่าในแถว r ช่อง c พร้อมผลที่ตามมา
   const row = IMP.rows[r], old = row[c];
@@ -4325,16 +4472,28 @@ function pasteParse(txt, iso, used){
   }else if(Math.max.apply(null, grid.map(r => r.length)) > 10){
     return {err: 'ข้อมูลที่วางมี ' + Math.max.apply(null, grid.map(r => r.length)) + ' คอลัมน์ แต่ต้องเป็น 10 คอลัมน์ตามลำดับ (หรือวางพร้อมบรรทัดหัวตาราง)'};
   }
-  const trips = {}, rows = []; let tripFull = 0; used = used || {};
+  const last = {}, rows = []; let tripFull = 0; used = used || {};
   body.forEach(r => {
     const out = new Array(26).fill('');
     PASTE_MAP.forEach((m, k) => { if(pos[k] >= 0 && pos[k] < r.length) out[m[1]] = r[pos[k]]; });
     if(!out.some((v, i) => i >= 6 && i <= 15 && v !== '')) return;      // แถวว่างทั้งแถว
     PASTE_EXTRA.forEach((m, k) => { if(epos[k] >= 0 && epos[k] < r.length && r[epos[k]] !== '') out[m[1]] = r[epos[k]]; });
     const car = out[15];
-    let n = 1;                                                          // เที่ยวว่างเที่ยวแรกของรถคันนี้ (นับรวมที่มีในชีตแล้ว + ที่วางมาก่อนหน้า)
+    let n = 1;
     const given = parseInt(String(out[4]).split(' ')[1], 10);           // ถ้าลูกค้า/คุณใส่เที่ยววิ่งมาในหัวตาราง ใช้ตามนั้น
-    if(car){ const u = used[car] = used[car] || {}; if(given){ n = given; } else { while(u[n]) n++; } u[n] = 1; }
+    const dropNo = parseInt(String(out[13]).trim(), 10) || 1;
+    if(car){
+      const u = used[car] = used[car] || {};                            // u[เที่ยว][Drop] = ใช้แล้ว (จากชีตของวันนั้น + แถวที่วางมาก่อนหน้า)
+      if(given){ n = given; }
+      else{
+        if(dropNo > 1){                                                 // Drop 2+ = จุดส่งถัดไปของเที่ยวเดิม: ต่อเที่ยวล่าสุดของรถคันนี้ในชุดที่วาง หรือเที่ยวที่มี Drop ก่อนหน้าแต่ยังไม่มี Drop นี้
+          if(last[car]) n = last[car];
+          else { n = 0; for(let k = 1; k <= 3; k++) if(u[k] && u[k][dropNo - 1] && !u[k][dropNo]){ n = k; break; } if(!n) n = 1; }
+        }
+        while(u[n] && u[n][dropNo]) n++;                                // เที่ยวนี้ Drop นี้ถูกใช้แล้ว → เที่ยวถัดไป
+      }
+      (u[n] = u[n] || {})[dropNo] = 1; last[car] = n;
+    }
     if(!given){
       if(n > 3) tripFull++;                                             // เกิน 3 เที่ยว: เว้นว่างให้เลือกเอง ดีกว่าให้เลข JOB ซ้ำ
       out[4] = n > 3 ? '' : 'เที่ยว ' + n;
@@ -4375,7 +4534,8 @@ async function pasteGo(){
       const pr = await fetch('/api/plan?date=' + iso);
       if(pr.ok) ((await pr.json()).rows || []).forEach(x => {
         const car = String(x.cells[15] || '').trim(), t = parseInt(String(x.cells[4] || '').split(' ')[1], 10);
-        if(car && t) (used[car] = used[car] || {})[t] = 1;
+        const dn = parseInt(String(x.cells[13] || ''), 10) || 1;
+        if(car && t) ((used[car] = used[car] || {})[t] = used[car][t] || {})[dn] = 1;      // used[รถ][เที่ยว][Drop]
       });
     }catch(e){}
     const usedSheet = JSON.parse(JSON.stringify(used));
