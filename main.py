@@ -112,6 +112,8 @@ PLAN_LEAVE   = 32  # AG เวลาออกปลายทาง
 PLAN_GPS_ST  = 33  # AH สถานะจัดส่ง GPS
 PLAN_ONTIME  = 47  # AV On Time  (PASS / Delay) — ผลตัดสินจากชีตเอง
 PLAN_ONTIME_M= 48  # AW On Time(m) จำนวนนาทีที่ช้า
+PLAN_TYPE    = 103 # CZ TYPE (Station / Industry / โรงบรรจุ / Tranfer)
+PLAN_JOBTYPE = 105 # DB ประเภทงาน (เช่น "OLP : Station", "ลูกค้า : Industry", "ATL : โรงบรรจุ")
 
 # Sheet 3: ข้อมูลปลายทาง — พิกัดของแต่ละจุดส่ง (อยู่ในไฟล์ต้นทางเดียวกับแผนงาน SOURCE_ID)
 DEST_ID      = SOURCE_ID
@@ -3082,6 +3084,13 @@ def _stat(vals: list) -> dict:
             "avg": round(sum(vals) / len(vals), 1) if vals else None}
 
 
+def _group(items: list, key: str) -> dict:
+    out: dict = {}
+    for x in items:
+        out.setdefault(x[key], []).append(x)
+    return out
+
+
 def build_ontime_report(rows: list, d_from: str, d_to: str, f: dict) -> dict:
     """rows = แถวของชีตแผนงาน (รวมหัวตาราง) → สรุปรายงาน On Time ของวันที่ d_from..d_to ตามตัวกรอง f"""
     dist = _rep_distances()
@@ -3115,12 +3124,15 @@ def build_ontime_report(rows: list, d_from: str, d_to: str, f: dict) -> dict:
               "arrive": arr.strftime("%d/%m/%Y %H:%M:%S") if arr else "", "ontime": ontime,
               "late": _cell(r, PLAN_ONTIME_M),
               "wait": _rep_gap(yard, lin), "load": _rep_gap(lin, lout), "travel": _rep_gap(dep, arr), "unload": _rep_gap(arr, leave),
-              "km": km, "cls": _rep_class(km)}
+              "km": km, "cls": _rep_class(km),
+              "jtype": _cell(r, PLAN_JOBTYPE).strip() or _cell(r, PLAN_TYPE).strip()}
         if f.get("status") and ontime != f["status"]:
             continue
         if f.get("dest") and dest != f["dest"]:
             continue
         if f.get("cls") and it["cls"] != f["cls"]:
+            continue
+        if f.get("jtype") is not None and f.get("jtype") != "" and it["jtype"] != (f["jtype"] if f["jtype"] != "(ไม่ระบุ)" else ""):
             continue
         items.append(it)
 
@@ -3139,7 +3151,7 @@ def build_ontime_report(rows: list, d_from: str, d_to: str, f: dict) -> dict:
         if x["vtype"]:
             by_vtype.setdefault(x["vtype"], set()).add(x["job"] or x["row"])
         if x["dest"]:
-            by_dest.setdefault(x["dest"], []).append(x)
+            by_dest.setdefault((x["jtype"], x["dest"]), []).append(x)
         if x["ontime"] or x["travel"] is not None:
             by_class[x["cls"]] = by_class.get(x["cls"], 0) + 1
     avg = lambda vals: round(sum(vals) / len(vals), 1) if vals else None
@@ -3151,9 +3163,11 @@ def build_ontime_report(rows: list, d_from: str, d_to: str, f: dict) -> dict:
         "by_origin": [{"origin": k, "trips": len({y["job"] or y["row"] for y in v}),
                        "wait": _stat(col("wait", v)), "load": _stat(col("load", v))} for k, v in sorted(by_origin.items())],
         "by_vtype": [{"vtype": k, "trips": len(v)} for k, v in sorted(by_vtype.items())],
-        "by_dest": sorted([{"dest": k, "drops": len(v), "n": len(col("unload", v)), "travel": avg(col("travel", v)), "unload": avg(col("unload", v))}
-                           for k, v in by_dest.items() if col("unload", v)],
-                          key=lambda d: -(d["unload"] or 0))[:12],
+        "by_dest": sorted([{"jtype": k[0], "dest": k[1], "drops": len(v), "n": len(col("unload", v)), "travel": avg(col("travel", v)),
+                            "unload": avg(col("unload", v))} for k, v in by_dest.items() if col("unload", v)],
+                          key=lambda d: -(d["unload"] or 0))[:400],
+        "by_jtype": sorted([{"jtype": jt, "drops": len(v), "n": len(col("unload", v)), "unload": avg(col("unload", v))}
+                            for jt, v in _group(items, "jtype").items()], key=lambda d: -d["drops"]),
         "by_class": [{"cls": k, "n": v} for k, v in sorted(by_class.items())],
         "rows": sorted(items, key=lambda x: (x["date"], x["origin"], x["car"], x["row"]))[:600],
         "av_values": sorted(([k or "(ว่าง)", v] for k, v in av_seen.items()), key=lambda kv: -kv[1])[:12],
@@ -3167,7 +3181,7 @@ def build_ontime_report(rows: list, d_from: str, d_to: str, f: dict) -> dict:
 @app.get("/api/report/ontime", include_in_schema=False)
 def report_ontime(date_from: str = Query(None, alias="from"), date_to: str = Query(None, alias="to"),
                   origin: str = "", vtype: str = "", car: str = "", drop: str = "", status: str = "",
-                  dest: str = "", cls: str = ""):
+                  dest: str = "", cls: str = "", jtype: str = ""):
     """รายงาน On Time ของช่วงวันที่ (ค่าเริ่มต้น = วันนี้) — อ่านชีตแผนงานจริงอย่างเดียว แคช 5 นาทีตามปกติ"""
     d_from = _parse_date(date_from or "") or _today_thai()
     d_to = _parse_date(date_to or "") or d_from
@@ -3180,7 +3194,7 @@ def report_ontime(date_from: str = Query(None, alias="from"), date_to: str = Que
     except Exception as e:
         raise HTTPException(502, f"อ่านชีตแผนงานไม่ได้ — {type(e).__name__}")
     return build_ontime_report(rows, d_from, d_to, {"origin": origin, "vtype": vtype, "car": car, "drop": drop, "status": status,
-                                                    "dest": dest, "cls": cls})
+                                                    "dest": dest, "cls": cls, "jtype": jtype})
 
 
 @app.get("/report", response_class=HTMLResponse, include_in_schema=False)
@@ -3625,6 +3639,17 @@ REPORT_HTML = """<!doctype html>
   th.cs.act{color:#1d4ed8}
   th.cs.act .ar{opacity:1}
   @media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])) th.cs.act{color:#9ec5f4}}
+  /* เวลาอยู่ในสถานี: แยกกลุ่มตามประเภทงาน */
+  .dgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(440px,100%),1fr));gap:18px 30px}
+  .dgrp{min-width:0}
+  .dgh{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 8px;margin-bottom:4px;border-radius:8px;cursor:pointer;
+       background:color-mix(in srgb,var(--oc) 10%,transparent);border-left:4px solid var(--oc)}
+  .dgh:hover{background:color-mix(in srgb,var(--oc) 18%,transparent)}
+  .dgh.on{outline:2px solid #2563eb;outline-offset:1px}
+  .dgh b{font-size:14px}
+  .dgh .m{font-size:12px;color:var(--mut)}
+  .dgh .m b{font-size:12.5px;color:var(--ink)}
+  .dmore{font-size:12px;color:var(--mut);padding:6px 6px 0}
   [hidden]{display:none !important}
 </style>
 </head>
@@ -3664,7 +3689,7 @@ REPORT_HTML = """<!doctype html>
         <div id="cClass"></div></section>
       <section class="panel"><div class="ph"><h3>จำนวนเที่ยวตามประเภทรถ</h3><span class="sub">เที่ยว</span></div><div id="cVtype"></div></section>
     </div>
-    <section class="panel w12"><div class="ph"><h3>เวลาที่อยู่ในสถานี (เฉลี่ย)</h3><span class="sub">นาที · เข้าปลายทาง → ออกปลายทาง · 12 สถานีที่อยู่นานสุด</span></div><div id="cDest"></div></section>
+    <section class="panel w12"><div class="ph"><h3>เวลาที่อยู่ในสถานี (เฉลี่ย)</h3><span class="sub">นาที · เข้าปลายทาง → ออกปลายทาง · แยกตามประเภทงาน · กดหัวกลุ่มเพื่อกรอง</span></div><div id="cDest"></div></section>
     <section class="panel w12"><div class="ph"><h3>สรุปตามต้นทาง</h3><span class="sub">นาที</span></div>
       <div class="tw" style="max-height:none"><table><thead><tr id="oHead"></tr></thead><tbody id="tOrigin"></tbody></table></div></section>
     <section class="panel w12"><div class="tools"><h3 style="margin:0;font-size:15px">รายการทั้งหมด</h3><span class="sub" id="rowCount" style="font-size:12.5px;color:var(--mut)"></span><span class="grow"></span>
@@ -3677,9 +3702,9 @@ REPORT_HTML = """<!doctype html>
 <div id="tip"></div>
 <script>
 let REP = null;
-const XF = {dest: '', cls: ''};
+const XF = {dest: '', cls: '', jtype: ''};
 const SELMAP = {origin: 'fOrigin', vtype: 'fVtype', car: 'fCar', drop: 'fDrop', status: 'fStatus'};
-const FNAME = {origin: 'ต้นทาง', vtype: 'ประเภทรถ', car: 'เบอร์รถ', drop: 'Drop', status: 'On Time', dest: 'ปลายทาง', cls: 'สาย'};
+const FNAME = {origin: 'ต้นทาง', vtype: 'ประเภทรถ', car: 'เบอร์รถ', drop: 'Drop', status: 'On Time', jtype: 'ประเภทงาน', dest: 'ปลายทาง', cls: 'สาย'};
 const CLS = [['สายใกล้', '#1baf7a'], ['สายกลาง', '#eda100'], ['สายไกล', '#6250d6'], ['ไม่ทราบระยะ', 'var(--o0)']];
 const CAT = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948'];   // ชุดสีที่ผ่านการตรวจตาบอดสี (ลำดับคงที่)
 const ORIGINS = ['SC BPK', 'BSRC', 'PTT TANK', 'IRPC', 'UAC', 'PTT KK', 'PTT NSW', 'PTT SRT'];
@@ -3715,7 +3740,7 @@ function markPreset(){
 }
 async function load(keepFilters){
   const q = new URLSearchParams({from: document.getElementById('dFrom').value, to: document.getElementById('dTo').value,
-    origin: getF('origin'), vtype: getF('vtype'), car: getF('car'), drop: getF('drop'), status: getF('status'), dest: XF.dest, cls: XF.cls});
+    origin: getF('origin'), vtype: getF('vtype'), car: getF('car'), drop: getF('drop'), status: getF('status'), dest: XF.dest, cls: XF.cls, jtype: XF.jtype});
   const err = document.getElementById('err'); err.hidden = true;
   const main = document.getElementById('main'); main.classList.add('busy');
   try{
@@ -3766,8 +3791,7 @@ function render(){
     tile('อยู่ที่สถานี / ส่งสินค้า (เฉลี่ย)', num(k.unload), 'นาที', hm(k.unload), '', '#eda100', '🏁');
   drawOrigin(); drawClass();
   bars('cVtype', REP.by_vtype, x => x.vtype, x => x.trips, ' เที่ยว', 'vtype', x => x.vtype + ': ' + x.trips + ' เที่ยว', x => vcol(x.vtype));
-  bars('cDest', REP.by_dest.filter(d => d.unload != null), x => x.dest, x => x.unload, ' นาที', 'dest',
-       x => x.dest + ' · อยู่ที่สถานีเฉลี่ย ' + num(x.unload) + ' นาที · ' + x.n + ' drop', x => '#eda100');
+  drawDest();
   drawOriginTable();
   drawRows();
 }
@@ -3795,7 +3819,7 @@ const OCOLS = [
   {k: 'lmin', t: 'โหลด ต่ำสุด', n: 1, v: o => o.load.min}, {k: 'lmax', t: 'สูงสุด', n: 1, v: o => o.load.max}, {k: 'lavg', t: 'เฉลี่ย', n: 1, v: o => o.load.avg}];
 const RCOLS = [
   {k: 'car', t: 'เบอร์รถ', v: x => x.car}, {k: 'date', t: 'วันที่', v: x => x.date}, {k: 'order', t: 'เลขออเดอร์', v: x => x.order},
-  {k: 'origin', t: 'ต้นทาง', v: x => x.origin}, {k: 'dest', t: 'ปลายทาง', v: x => x.dest}, {k: 'vtype', t: 'ประเภท', v: x => x.vtype},
+  {k: 'origin', t: 'ต้นทาง', v: x => x.origin}, {k: 'jtype', t: 'ประเภทงาน', v: x => x.jtype}, {k: 'dest', t: 'ปลายทาง', v: x => x.dest}, {k: 'vtype', t: 'ประเภท', v: x => x.vtype},
   {k: 'drop', t: 'Drop', n: 1, v: x => toNum(x.drop)}, {k: 'weight', t: 'น้ำหนัก', n: 1, v: x => toNum(x.weight)},
   {k: 'sched', t: 'เวลาส่ง', v: x => hhmm(x.sched)},
   {k: 'arrive', t: 'ถึงปลายทาง', v: x => x.arrive ? x.arrive.slice(6, 10) + x.arrive.slice(3, 5) + x.arrive.slice(0, 2) + x.arrive.slice(10) : ''},
@@ -3844,6 +3868,29 @@ function drawClass(){
     '<div class="clist">' + parts.map(c => '<div class="row' + (sel === c[0] ? ' on' : '') + '" data-k="cls" data-v="' + c[0] + '"><span class="sw" style="background:' + c[1] + '"></span><span>' + c[0] +
       '</span><span class="n">' + num(m[c[0]], 0) + '</span><span class="p">' + Math.round(m[c[0]] / tot * 100) + '%</span></div>').join('') + '</div>';
 }
+// สีประจำประเภทงาน (ติดตัวประเภท ไม่เปลี่ยนตามลำดับ)
+const JCOL = {'OLP : Station': '#2a78d6', 'ลูกค้า : Industry': '#eb6834', 'ATL : โรงบรรจุ': '#1baf7a', 'ATL : Tranfer': '#eda100',
+              'ลูกค้า : Station': '#e87ba4', 'ลูกค้า : โรงบรรจุ': '#008300'};
+function jname(j){ return j || '(ไม่ระบุ)'; }
+function jcol(j){ return j ? (JCOL[j] || hashc(j)) : '#9ca3af'; }
+function drawDest(){
+  const el = document.getElementById('cDest'), TOP = 8;
+  const list = REP.by_dest.filter(d => d.unload != null);
+  if(!list.length){ el.innerHTML = '<div class="empty">ไม่มีข้อมูลเวลาเข้า–ออกปลายทาง</div>'; return; }
+  const mx = Math.max.apply(null, list.map(d => d.unload).concat([1])), sel = getF('dest'), jsel = getF('jtype');
+  const groups = (REP.by_jtype || []).filter(g => list.some(d => d.jtype === g.jtype));
+  el.innerHTML = '<div class="dgrid">' + groups.map(g => {
+    const ds = list.filter(d => d.jtype === g.jtype), c = jcol(g.jtype), nm = jname(g.jtype);
+    return '<div class="dgrp" style="--oc:' + c + '">' +
+      '<div class="dgh' + (jsel === nm ? ' on' : '') + '" data-k="jtype" data-v="' + esc(nm) + '" data-tip="' + esc(nm + ' · อยู่ที่สถานีเฉลี่ย ' + num(g.unload) + ' นาที · ' + g.drops + ' drop') + '">' +
+        '<b>' + esc(nm) + '</b><span class="m">เฉลี่ย <b>' + num(g.unload) + '</b> นาที · ' + ds.length + ' ปลายทาง · ' + g.drops + ' drop</span></div>' +
+      '<div class="bars">' + ds.slice(0, TOP).map(x =>
+        '<div class="brow' + (sel === x.dest ? ' on' : '') + '" style="--oc:' + c + '" data-k="dest" data-v="' + esc(x.dest) + '" data-tip="' + esc(nm + ' · ' + x.dest + ' · อยู่ที่สถานีเฉลี่ย ' + num(x.unload) + ' นาที · ' + x.n + ' drop') + '">' +
+        '<div class="blab"><i></i>' + esc(x.dest) + '</div><div class="btrack"><div class="bfill" style="width:' + Math.max(0.5, x.unload / mx * 100) + '%"></div></div>' +
+        '<div class="bval"><b>' + num(x.unload) + '</b> นาที</div></div>').join('') + '</div>' +
+      (ds.length > TOP ? '<div class="dmore">+ อีก ' + (ds.length - TOP) + ' ปลายทาง (ดูในตารางด้านล่าง)</div>' : '') + '</div>';
+  }).join('') + '</div>';
+}
 function bars(el, list, label, val, unit, key, tip, color){
   if(!list.length){ document.getElementById(el).innerHTML = '<div class="empty">ไม่มีข้อมูล</div>'; return; }
   const mx = Math.max.apply(null, list.map(val).concat([1])), sel = getF(key);
@@ -3861,12 +3908,12 @@ function drawRows(){
   const rows = sortList(REP.rows.filter(x => !q || [x.car, x.dest, x.order, x.origin, x.job].join(' ').toLowerCase().indexOf(q) >= 0), RCOLS, SORTS.r);
   document.getElementById('rowCount').textContent = 'แสดง ' + num(rows.length, 0) + ' จาก ' + num(REP.n_rows, 0) + ' แถว' + (REP.n_rows > REP.rows.length ? ' (สูงสุด ' + REP.rows.length + ' แถวแรก)' : '');
   document.getElementById('rows').innerHTML = rows.map(x => '<tr><td class="k" data-k="car" data-v="' + esc(x.car) + '">' + esc(x.car) + '</td><td>' + dmy(x.date) + '</td><td>' + esc(x.order) +
-    '</td><td>' + esc(x.origin) + '</td><td title="' + esc(x.dest) + '">' + esc(x.dest.length > 30 ? x.dest.slice(0, 29) + '…' : x.dest) + '</td><td>' + esc(x.vtype) + '</td><td class="n">' + esc(x.drop) +
+    '</td><td>' + esc(x.origin) + '</td><td><span style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:' + jcol(x.jtype) + '"></span>' + esc(jname(x.jtype)) + '</td><td title="' + esc(x.dest) + '">' + esc(x.dest.length > 30 ? x.dest.slice(0, 29) + '…' : x.dest) + '</td><td>' + esc(x.vtype) + '</td><td class="n">' + esc(x.drop) +
     '</td><td class="n">' + esc(x.weight) + '</td><td>' + esc(x.sched) + '</td><td>' + esc(x.arrive) + '</td><td>' +
     (x.ontime === 'PASS' ? '<span class="pill ok">✓ PASS</span>' : x.ontime === 'Delay' ? '<span class="pill bad">! Delay</span>' : '<span style="color:var(--mut)">–</span>') +
     '</td><td class="n">' + esc(x.late) + '</td><td class="n' + heat(x.wait) + '">' + num(x.wait) + '</td><td class="n' + heat(x.load) + '">' + num(x.load) +
     '</td><td class="n">' + num(x.travel) + '</td><td class="n">' + num(x.unload) + '</td></tr>').join('') ||
-    '<tr><td colspan="16" class="empty">ไม่มีงานในช่วงวันที่/ตัวกรองที่เลือก</td></tr>';
+    '<tr><td colspan="17" class="empty">ไม่มีงานในช่วงวันที่/ตัวกรองที่เลือก</td></tr>';
 }
 // ทูลทิป: ชี้ที่กราฟ/แท่งเพื่อดูตัวเลข (ตัวเลขเดียวกันมีในตารางด้านล่างด้วย)
 const TIP = document.getElementById('tip');
