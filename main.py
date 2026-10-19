@@ -3905,7 +3905,7 @@ const RCOLS = [
   {k: 'drop', t: 'Drop', n: 1, v: x => toNum(x.drop)}, {k: 'weight', t: 'น้ำหนัก', n: 1, v: x => toNum(x.weight)},
   {k: 'sched', t: 'เวลาส่ง', v: x => hhmm(x.sched)},
   {k: 'arrive', t: 'ถึงปลายทาง', v: x => x.arrive ? x.arrive.slice(6, 10) + x.arrive.slice(3, 5) + x.arrive.slice(0, 2) + x.arrive.slice(10) : ''},
-  {k: 'ontime', t: 'On Time', v: x => x.ontime}, {k: 'why', t: 'สาเหตุ', v: x => x.why}, {k: 'late', t: 'ช้า (นาที)', n: 1, v: x => toNum(x.late)},
+  {k: 'ontime', t: 'On Time', v: x => x.ontime}, {k: 'late', t: 'ช้า (นาที)', n: 1, v: x => toNum(x.late)},
   {k: 'wait', t: 'รอโหลด', n: 1, g: 'w', v: x => x.wait}, {k: 'load', t: 'โหลด', n: 1, g: 'l', v: x => x.load},
   {k: 'travel', t: 'เดินทาง', n: 1, v: x => x.travel}, {k: 'unload', t: 'ส่งสินค้า', n: 1, v: x => x.unload}];
 document.addEventListener('click', e => {
@@ -4023,9 +4023,9 @@ function drawRows(){
     '</td><td>' + esc(x.origin) + '</td><td><span style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:' + jcol(x.jtype) + '"></span>' + esc(jname(x.jtype)) + '</td><td title="' + esc(x.dest) + '">' + esc(x.dest.length > 30 ? x.dest.slice(0, 29) + '…' : x.dest) + '</td><td>' + esc(x.vtype) + '</td><td class="n">' + esc(x.drop) +
     '</td><td class="n">' + esc(x.weight) + '</td><td>' + esc(x.sched) + '</td><td>' + esc(x.arrive) + '</td><td>' +
     (x.ontime === 'PASS' ? '<span class="pill ok">✓ PASS</span>' : x.ontime === 'Delay' ? '<span class="pill bad">! Delay</span>' : '<span style="color:var(--mut)">–</span>') +
-    '</td><td' + (x.why ? ' class="k" data-k="why" data-v="' + esc(x.why) + '"' : '') + '>' + esc(x.why) + '</td><td class="n">' + esc(x.late) + '</td><td class="n' + heat(x.wait) + '">' + num(x.wait) + '</td><td class="n' + heat(x.load) + '">' + num(x.load) +
+    '</td><td class="n">' + esc(x.late) + '</td><td class="n' + heat(x.wait) + '">' + num(x.wait) + '</td><td class="n' + heat(x.load) + '">' + num(x.load) +
     '</td><td class="n">' + num(x.travel) + '</td><td class="n">' + num(x.unload) + '</td></tr>').join('') ||
-    '<tr><td colspan="18" class="empty">ไม่มีงานในช่วงวันที่/ตัวกรองที่เลือก</td></tr>';
+    '<tr><td colspan="17" class="empty">ไม่มีงานในช่วงวันที่/ตัวกรองที่เลือก</td></tr>';
 }
 // ทูลทิป: ชี้ที่กราฟ/แท่งเพื่อดูตัวเลข (ตัวเลขเดียวกันมีในตารางด้านล่างด้วย)
 const TIP = document.getElementById('tip');
