@@ -3520,7 +3520,7 @@ REPORT_HTML = """<!doctype html>
 <style>
   :root{color-scheme:light;
     --plane:#f4f5f7;--card:#ffffff;--surface:#fcfcfb;--line:#e6e8ec;--hair:#eceae4;--axis:#c3c2b7;
-    --ink:#0b0b0b;--ink2:#52514e;--mut:#898781;--hover:#f3f6fb;
+    --ink:#0b0b0b;--ink2:#3f3e3b;--mut:#6b6964;--hover:#f3f6fb;
     --s1:#2a78d6;--s1-soft:#cde2fb;--acc:#2563eb;
     --good:#0ca30c;--good-ink:#006300;--good-bg:#e9f7e9;--crit:#d03b3b;--crit-ink:#b42318;--crit-bg:#fdecec;
     --o1:#86b6ef;--o2:#3987e5;--o3:#184f95;--o0:#c3c2b7;
@@ -3529,63 +3529,63 @@ REPORT_HTML = """<!doctype html>
   @media (prefers-color-scheme:dark){
     :root:where(:not([data-theme="light"])){color-scheme:dark;
       --plane:#0d0d0d;--card:#161616;--surface:#1a1a19;--line:#2a2a28;--hair:#2c2c2a;--axis:#383835;
-      --ink:#f0efec;--ink2:#c3c2b7;--mut:#898781;--hover:#1f2733;
+      --ink:#f0efec;--ink2:#d6d5cc;--mut:#a9a7a0;--hover:#1f2733;
       --s1:#3987e5;--s1-soft:#1c3554;--acc:#3b82f6;
       --good:#0ca30c;--good-ink:#3fcf3f;--good-bg:#10260f;--crit:#d03b3b;--crit-ink:#ff8a80;--crit-bg:#2d1414;
       --o1:#9ec5f4;--o2:#3987e5;--o3:#1c5cab;--o0:#4a4a46;
       --h1:#143a1c;--h2:#3d3210;--h3:#45260f;--h4:#4a1a1c;--shadow:none}}
   :root[data-theme="dark"]{color-scheme:dark;
       --plane:#0d0d0d;--card:#161616;--surface:#1a1a19;--line:#2a2a28;--hair:#2c2c2a;--axis:#383835;
-      --ink:#f0efec;--ink2:#c3c2b7;--mut:#898781;--hover:#1f2733;
+      --ink:#f0efec;--ink2:#d6d5cc;--mut:#a9a7a0;--hover:#1f2733;
       --s1:#3987e5;--s1-soft:#1c3554;--acc:#3b82f6;
       --good:#0ca30c;--good-ink:#3fcf3f;--good-bg:#10260f;--crit:#d03b3b;--crit-ink:#ff8a80;--crit-bg:#2d1414;
       --o1:#9ec5f4;--o2:#3987e5;--o3:#1c5cab;--o0:#4a4a46;
       --h1:#143a1c;--h2:#3d3210;--h3:#45260f;--h4:#4a1a1c;--shadow:none}
   *{box-sizing:border-box}
-  body{margin:0;background:var(--plane);color:var(--ink);font-family:'Noto Sans Thai',system-ui,-apple-system,"Segoe UI",sans-serif;font-size:14.5px;padding-left:148px}
+  body{margin:0;background:var(--plane);color:var(--ink);font-family:'Noto Sans Thai',system-ui,-apple-system,"Segoe UI",sans-serif;font-size:15.5px;padding-left:148px}
   /* เมนูหลัก (เหมือนหน้าอื่น) */
   .side{position:fixed;left:0;top:0;bottom:0;width:148px;background:var(--card);border-right:1px solid var(--line);padding:14px 10px;display:flex;flex-direction:column;gap:6px;z-index:20}
-  .side .menu{display:flex;align-items:center;gap:9px;text-decoration:none;font-weight:700;font-size:15px;color:var(--ink);padding:11px 12px;border-radius:10px}
+  .side .menu{display:flex;align-items:center;gap:9px;text-decoration:none;font-weight:700;font-size:16px;color:var(--ink);padding:11px 12px;border-radius:10px}
   .side .menu:hover{background:var(--hover)}
   .side .menu.on{background:#2563eb;color:#fff}
   @media (max-width:820px){body{padding-left:0}
     .side{position:static;width:auto;flex-direction:row;border-right:0;border-bottom:1px solid var(--line);padding:8px 10px}
-    .side .menu{flex:1;justify-content:center;padding:9px 6px;font-size:13px}}
+    .side .menu{flex:1;justify-content:center;padding:9px 6px;font-size:14.5px}}
   header{background:var(--card);border-bottom:1px solid var(--line);padding:14px 22px;position:sticky;top:0;z-index:10}
   .hd{display:flex;flex-wrap:wrap;gap:12px 18px;align-items:center}
-  .ttl h1{font-size:20px;margin:0;font-weight:700;letter-spacing:-.2px}
-  .ttl p{margin:2px 0 0;font-size:12.5px;color:var(--mut)}
+  .ttl h1{font-size:21px;margin:0;font-weight:700;letter-spacing:-.2px}
+  .ttl p{margin:2px 0 0;font-size:14px;color:var(--mut)}
   .grow{flex:1}
   .seg{display:inline-flex;background:var(--plane);border:1px solid var(--line);border-radius:10px;padding:3px}
-  .seg button{border:0;background:transparent;padding:6px 12px;border-radius:7px;font:inherit;font-size:13px;font-weight:600;color:var(--ink2);cursor:pointer}
+  .seg button{border:0;background:transparent;padding:6px 12px;border-radius:7px;font:inherit;font-size:14.5px;font-weight:600;color:var(--ink2);cursor:pointer}
   .seg button.on{background:var(--card);color:var(--ink);box-shadow:var(--shadow)}
   .rng{display:flex;align-items:center;gap:6px}
-  input,select{font:inherit;font-size:13.5px;padding:7px 10px;border-radius:9px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
-  .btn{font:inherit;font-size:13.5px;font-weight:600;padding:7px 14px;border-radius:9px;border:1px solid var(--acc);background:var(--acc);color:#fff;cursor:pointer}
+  input,select{font:inherit;font-size:15px;padding:7px 10px;border-radius:9px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
+  .btn{font:inherit;font-size:15px;font-weight:600;padding:7px 14px;border-radius:9px;border:1px solid var(--acc);background:var(--acc);color:#fff;cursor:pointer}
   main{padding:18px 22px 40px;transition:opacity .15s}
   main.busy{opacity:.55;pointer-events:none}
   .fbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
-  .fbar .lbl{font-size:12.5px;color:var(--mut);margin-right:2px}
+  .fbar .lbl{font-size:14px;color:var(--mut);margin-right:2px}
   .chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:14px;min-height:4px}
-  .chip{font:inherit;font-size:12.5px;font-weight:600;border-radius:999px;padding:4px 10px;border:1px solid var(--line);background:var(--card);color:var(--ink2);cursor:pointer}
+  .chip{font:inherit;font-size:14px;font-weight:600;border-radius:999px;padding:4px 10px;border:1px solid var(--line);background:var(--card);color:var(--ink2);cursor:pointer}
   .chip.f{background:#eaf1fe;border-color:#bfd5fb;color:#1d4ed8}
   @media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])) .chip.f{background:#14243a;border-color:#24497a;color:#9ec5f4}}
   /* การ์ด */
   .tiles{display:grid;grid-template-columns:minmax(300px,1.4fr) repeat(3,minmax(0,1fr));gap:12px;margin-bottom:12px}
   .tile{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;box-shadow:var(--shadow);min-width:0}
-  .tile .l{font-size:12.5px;color:var(--ink2);font-weight:600}
-  .tile .v{font-size:27px;font-weight:700;line-height:1.15;margin-top:6px;letter-spacing:-.3px}
-  .tile .v small{font-size:13px;font-weight:600;color:var(--mut);margin-left:4px;letter-spacing:0}
-  .tile .s{font-size:12px;color:var(--mut);margin-top:3px}
+  .tile .l{font-size:14px;color:var(--ink2);font-weight:600}
+  .tile .v{font-size:28.5px;font-weight:700;line-height:1.15;margin-top:6px;letter-spacing:-.3px}
+  .tile .v small{font-size:14.5px;font-weight:600;color:var(--mut);margin-left:4px;letter-spacing:0}
+  .tile .s{font-size:13.5px;color:var(--mut);margin-top:3px}
   .tile.hero{grid-row:span 2;display:flex;flex-direction:column;justify-content:center}
-  .hero .v{font-size:40px}
+  .hero .v{font-size:42.5px}
   .pbar{display:flex;gap:2px;height:8px;border-radius:4px;overflow:hidden;background:var(--hair);margin:10px 0 8px}
   .pbar i{display:block;height:100%}
-  .leg2{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--ink2)}
+  .leg2{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:14.5px;color:var(--ink2)}
   .leg2 span{cursor:pointer;border-radius:6px;padding:1px 4px}
   .leg2 span:hover{background:var(--hover)}
   .leg2 b{color:var(--ink);font-variant-numeric:tabular-nums}
-  .ico{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;font-size:10px;font-weight:700;color:#fff;margin-right:5px;vertical-align:-2px}
+  .ico{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;font-size:11px;font-weight:700;color:#fff;margin-right:5px;vertical-align:-2px}
   @media (max-width:1100px){.tiles{grid-template-columns:repeat(3,minmax(0,1fr))}.tile.hero{grid-column:1/-1;grid-row:auto}}
   @media (max-width:640px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
   .panels{display:grid;grid-template-columns:repeat(12,1fr);gap:12px;margin-bottom:12px}
@@ -3595,9 +3595,9 @@ REPORT_HTML = """<!doctype html>
   .col2 .panel{flex:1}
   @media (max-width:1100px){.w8,.w4{grid-column:span 12}}
   .ph{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:12px}
-  .ph h3{margin:0;font-size:15px;font-weight:700}
-  .ph .sub{font-size:12.5px;color:var(--mut)}
-  .legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--ink2);margin-left:auto}
+  .ph h3{margin:0;font-size:16px;font-weight:700}
+  .ph .sub{font-size:14px;color:var(--mut)}
+  .legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:14px;color:var(--ink2);margin-left:auto}
   .legend i{display:inline-block;vertical-align:-1px;margin-right:6px}
   /* กราฟช่วงเวลา (ต่ำสุด–สูงสุด + จุดเฉลี่ย) */
   .rc{display:grid;grid-template-columns:110px 1fr 150px;align-items:center;gap:12px}
@@ -3606,15 +3606,15 @@ REPORT_HTML = """<!doctype html>
   .rrow:hover > *{background:var(--hover)}
   .rrow.on > *{background:#eaf1fe}
   @media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])) .rrow.on > *{background:#14243a}}
-  .rname{font-weight:700;font-size:13.5px;padding-left:6px !important;cursor:pointer}
+  .rname{font-weight:700;font-size:15px;padding-left:6px !important;cursor:pointer}
   .rplot{position:relative;height:30px;cursor:pointer}
   .grid i{position:absolute;top:0;bottom:0;width:1px;background:var(--hair)}
   .rband{position:absolute;top:12px;height:6px;border-radius:3px;background:var(--s1-soft)}
   .rdot{position:absolute;top:9px;width:12px;height:12px;margin-left:-6px;border-radius:50%;background:var(--s1);box-shadow:0 0 0 2px var(--card)}
   .rend{position:absolute;top:10px;width:2px;height:10px;background:var(--s1);opacity:.55;margin-left:-1px}
-  .rstat{font-size:12.5px;color:var(--ink2);text-align:right;padding-right:6px !important;font-variant-numeric:tabular-nums;cursor:pointer}
+  .rstat{font-size:14px;color:var(--ink2);text-align:right;padding-right:6px !important;font-variant-numeric:tabular-nums;cursor:pointer}
   .rstat b{color:var(--ink)}
-  .axis{position:relative;height:18px;font-size:11px;color:var(--mut);font-variant-numeric:tabular-nums}
+  .axis{position:relative;height:18px;font-size:12.5px;color:var(--mut);font-variant-numeric:tabular-nums}
   .axis span{position:absolute;transform:translateX(-50%)}
   /* แท่งแนวนอนชุดเดียว */
   .bars{display:grid;grid-template-columns:minmax(80px,180px) 1fr 84px;align-items:center;column-gap:12px}
@@ -3623,15 +3623,15 @@ REPORT_HTML = """<!doctype html>
   .brow:hover > *{background:var(--hover)}
   .brow.on > *{background:#eaf1fe}
   @media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])) .brow.on > *{background:#14243a}}
-  .blab{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-left:6px !important;cursor:pointer}
+  .blab{font-size:14.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-left:6px !important;cursor:pointer}
   .btrack{position:relative;height:24px;cursor:pointer}
   .bfill{position:absolute;left:0;top:7px;height:10px;background:var(--s1);border-radius:0 4px 4px 0;min-width:2px}
-  .bval{font-size:12.5px;color:var(--ink2);text-align:right;padding-right:6px !important;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .bval{font-size:14px;color:var(--ink2);text-align:right;padding-right:6px !important;font-variant-numeric:tabular-nums;white-space:nowrap}
   .bval b{color:var(--ink)}
   /* สัดส่วนสาย */
   .stack{display:flex;gap:2px;height:14px;border-radius:4px;overflow:hidden;margin:6px 0 14px}
   .stack i{display:block;height:100%;cursor:pointer}
-  .clist{display:grid;grid-template-columns:auto 1fr auto auto;gap:8px 12px;font-size:13px;align-items:center}
+  .clist{display:grid;grid-template-columns:auto 1fr auto auto;gap:8px 12px;font-size:14.5px;align-items:center}
   .clist .sw{width:11px;height:11px;border-radius:3px}
   .clist .n{font-variant-numeric:tabular-nums;font-weight:700;text-align:right}
   .clist .p{font-variant-numeric:tabular-nums;color:var(--mut);text-align:right;min-width:40px}
@@ -3640,26 +3640,26 @@ REPORT_HTML = """<!doctype html>
   .clist .row.on > *{text-decoration:underline}
   /* ตาราง */
   .tw{border:1px solid var(--line);border-radius:10px;overflow:auto;max-height:560px;background:var(--card)}
-  table{border-collapse:separate;border-spacing:0;width:100%;font-size:13px}
+  table{border-collapse:separate;border-spacing:0;width:100%;font-size:14.5px}
   th,td{padding:8px 11px;border-bottom:1px solid var(--hair);text-align:left;white-space:nowrap}
-  th{position:sticky;top:0;background:var(--card);z-index:1;font-size:11.5px;font-weight:700;color:var(--mut);letter-spacing:.3px;border-bottom:1px solid var(--line)}
+  th{position:sticky;top:0;background:var(--card);z-index:1;font-size:13px;font-weight:700;color:var(--mut);letter-spacing:.3px;border-bottom:1px solid var(--line)}
   tbody tr:hover td{background:var(--hover)}
   td.n,th.n{text-align:right}
   td.n{font-variant-numeric:tabular-nums}
   td.k{cursor:pointer;font-weight:700}
   td.k:hover{text-decoration:underline}
-  .pill{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:700;padding:2px 8px;border-radius:999px}
+  .pill{display:inline-flex;align-items:center;gap:4px;font-size:13px;font-weight:700;padding:2px 8px;border-radius:999px}
   .pill.ok{background:var(--good-bg);color:var(--good-ink)}
   .pill.bad{background:var(--crit-bg);color:var(--crit-ink)}
   td.h1{background:var(--h1)}td.h2{background:var(--h2)}td.h3{background:var(--h3)}td.h4{background:var(--h4)}
   .tools{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
-  .empty{padding:30px;text-align:center;color:var(--mut);font-size:13.5px}
+  .empty{padding:30px;text-align:center;color:var(--mut);font-size:15px}
   .err{background:var(--crit-bg);color:var(--crit-ink);padding:10px 14px;border-radius:10px;margin-bottom:12px}
-  .note{color:var(--mut);font-size:12.5px;margin:4px 0 0}
+  .note{color:var(--mut);font-size:14px;margin:4px 0 0}
   @media (max-width:820px){
     header{padding:10px 12px;position:static}
     .hd{gap:8px}
-    .ttl h1{font-size:18px}
+    .ttl h1{font-size:19px}
     .hd .grow{display:none}
     .seg{width:100%}.seg button{flex:1;padding:7px 4px}
     .rng{width:100%}.rng input{flex:1;min-width:0}
@@ -3667,21 +3667,21 @@ REPORT_HTML = """<!doctype html>
     main{padding:12px 10px 30px}
     .fbar select{flex:1 1 45%;min-width:0}
     .fbar .lbl{width:100%}
-    .tile{padding:12px}.tile .v{font-size:23px}.hero .v{font-size:34px}
+    .tile{padding:12px}.tile .v{font-size:24.5px}.hero .v{font-size:36px}
     .panel{padding:12px}
     .rc{grid-template-columns:72px 1fr 92px;gap:8px}
-    .rname{font-size:12.5px}.rstat{font-size:11.5px}
+    .rname{font-size:14px}.rstat{font-size:13px}
     .bars{grid-template-columns:minmax(70px,110px) 1fr 72px;column-gap:8px}
-    .blab{font-size:12px}.bval{font-size:11.5px}
+    .blab{font-size:13.5px}.bval{font-size:13px}
     .legend{margin-left:0;width:100%}
     #q{min-width:0 !important;width:100%}
   }
-  #tip{position:fixed;z-index:50;pointer-events:none;background:#111827;color:#f9fafb;font-size:12.5px;line-height:1.5;padding:7px 10px;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.25);max-width:280px;display:none}
+  #tip{position:fixed;z-index:50;pointer-events:none;background:#111827;color:#f9fafb;font-size:14px;line-height:1.5;padding:7px 10px;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.25);max-width:280px;display:none}
   /* สีแยกตามสิ่งที่แสดง (สีติดตัวต้นทาง/ประเภทรถ เสมอ ไม่เปลี่ยนตามลำดับ) + แถบสีบนการ์ด */
   .tile{position:relative;overflow:hidden}
   .tile::before{content:"";position:absolute;left:0;right:0;top:0;height:3px;background:var(--tc,#2a78d6)}
   .tile .l{display:flex;align-items:center;gap:8px}
-  .tile .ic{width:28px;height:28px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;font-size:15px;
+  .tile .ic{width:28px;height:28px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;font-size:16px;
             background:color-mix(in srgb,var(--tc,#2a78d6) 14%,transparent)}
   .tile.hero{background:linear-gradient(135deg,var(--hb,var(--good-bg)) 0%,var(--card) 70%)}
   .tile.hero::before{background:var(--hc,var(--good))}
@@ -3693,7 +3693,7 @@ REPORT_HTML = """<!doctype html>
   /* หัวคอลัมน์: กดครั้งแรกเรียงน้อย→มาก กดอีกครั้งมาก→น้อย */
   th.cs{cursor:pointer;user-select:none}
   th.cs:hover{color:var(--ink)}
-  th.cs .ar{display:inline-block;width:12px;margin-left:3px;font-size:10px;opacity:.35}
+  th.cs .ar{display:inline-block;width:12px;margin-left:3px;font-size:11px;opacity:.35}
   th.cs:hover .ar{opacity:.7}
   th.cs.act{color:#1d4ed8}
   th.cs.act .ar{opacity:1}
@@ -3708,10 +3708,10 @@ REPORT_HTML = """<!doctype html>
        background:color-mix(in srgb,var(--oc) 9%,var(--card))}
   .dgh:hover{background:color-mix(in srgb,var(--oc) 16%,var(--card))}
   .dgh.on{box-shadow:inset 0 0 0 2px #2563eb}
-  .dgh .nm{font-size:14.5px;font-weight:700;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .dgh .nm{font-size:15.5px;font-weight:700;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .dgh .st{margin-left:auto;text-align:right;line-height:1.25;white-space:nowrap}
-  .dgh .st b{font-size:17px}
-  .dgh .st small{display:block;font-size:11.5px;color:var(--mut)}
+  .dgh .st b{font-size:18px}
+  .dgh .st small{display:block;font-size:13px;color:var(--mut)}
   .dgrp .bars{grid-template-columns:minmax(150px,42%) 1fr 78px;column-gap:0;padding:4px 6px 6px}
   .dgrp .brow > *{padding:8px 0}
   .dgrp .brow:last-child > *{border-bottom:0}
@@ -3719,8 +3719,8 @@ REPORT_HTML = """<!doctype html>
   .dgrp .btrack{height:auto;align-self:stretch}
   .dgrp .bfill{top:50%;margin-top:-5px}
   .dgrp .bval{padding-left:10px !important}
-  .dmore{font-size:12px;color:var(--mut);padding:2px 14px 10px}
-  @media (max-width:820px){ .dgrid{flex-direction:column;gap:16px} .dgrp .bars{grid-template-columns:minmax(96px,40%) 1fr 66px} .dgh .st b{font-size:15px} }
+  .dmore{font-size:13.5px;color:var(--mut);padding:2px 14px 10px}
+  @media (max-width:820px){ .dgrid{flex-direction:column;gap:16px} .dgrp .bars{grid-template-columns:minmax(96px,40%) 1fr 66px} .dgh .st b{font-size:16px} }
   /* เวลารอโหลดแยกต้นทาง: แถวละต้นทาง ตัวเลขชัด แท่ง = เฉลี่ย ใต้แท่ง = ต่ำสุด/สูงสุด · แถวยืดเต็มการ์ด */
   .fillp{display:flex;flex-direction:column}
   .fillp > #cOrigin{flex:1;display:flex;flex-direction:column}
@@ -3729,23 +3729,23 @@ REPORT_HTML = """<!doctype html>
         padding:10px 14px;border:1px solid var(--line);border-radius:10px;cursor:pointer;background:var(--card)}
   .orow:hover{background:var(--hover)}
   .orow.on{box-shadow:0 0 0 2px #2563eb}
-  .orow .on1{font-size:15px;font-weight:700}
-  .orow .on2{font-size:12px;color:var(--mut);margin-top:2px}
+  .orow .on1{font-size:16px;font-weight:700}
+  .orow .on2{font-size:13.5px;color:var(--mut);margin-top:2px}
   .orow .otr{display:flex;height:24px;border-radius:7px;background:var(--plane);overflow:hidden}
-  .orow .osg{height:100%;display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;min-width:2px}
+  .orow .osg{height:100%;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;min-width:2px}
   .orow .osg.w{background:var(--wc)}
   .orow .osg.l{background:var(--lc);box-shadow:inset 2px 0 0 var(--card)}
   .orow .omm .w b{color:var(--wc)} .orow .omm .l b{color:var(--lc)}
   .legend i.lw{width:12px;height:12px;border-radius:3px;background:var(--wc)}
   .legend i.ll{width:12px;height:12px;border-radius:3px;background:var(--lc)}
-  .orow .omm{display:flex;justify-content:space-between;font-size:12px;color:var(--ink2);margin-top:6px}
+  .orow .omm{display:flex;justify-content:space-between;font-size:13.5px;color:var(--ink2);margin-top:6px}
   .orow .omm b{font-weight:700;color:var(--ink)}
   .orow .oav{text-align:right;line-height:1.15}
-  .orow .oav b{font-size:24px;font-weight:700}
-  .orow .oav small{display:block;font-size:11.5px;color:var(--mut)}
-  @media (max-width:820px){ .orow{grid-template-columns:1fr 92px;gap:6px 10px} .orow .obar{grid-column:1 / -1;grid-row:2} .orow .oav b{font-size:20px} }
+  .orow .oav b{font-size:25.5px;font-weight:700}
+  .orow .oav small{display:block;font-size:13px;color:var(--mut)}
+  @media (max-width:820px){ .orow{grid-template-columns:1fr 92px;gap:6px 10px} .orow .obar{grid-column:1 / -1;grid-row:2} .orow .oav b{font-size:21px} }
   /* คำอธิบายใต้หัวกราฟ ให้คนอ่านครั้งแรกเข้าใจ */
-  .hint{margin:-4px 0 12px;font-size:12.5px;line-height:1.55;color:var(--ink2);background:var(--plane);border-radius:8px;padding:7px 11px}
+  .hint{margin:-4px 0 12px;font-size:14px;line-height:1.55;color:var(--ink2);background:var(--plane);border-radius:8px;padding:7px 11px}
   .hint b{color:var(--ink)}
   .hk{display:inline-block;padding:0 7px;border-radius:5px;margin:0 2px;color:var(--ink);font-weight:600}
   /* แยกสีกลุ่มคอลัมน์แบบ Looker: รอโหลด = ม่วงอ่อน · โหลด = ชมพู */
@@ -3756,7 +3756,7 @@ REPORT_HTML = """<!doctype html>
   th.gl{background:var(--clh) !important;color:var(--ink) !important}
   td.cw{background:var(--cw)}
   td.cl{background:var(--cl)}
-  tr.grp th{position:static;text-align:center;font-size:12px;border-bottom:0}
+  tr.grp th{position:static;text-align:center;font-size:13.5px;border-bottom:0}
   .w6{grid-column:span 6}
   @media (max-width:1100px){.w6{grid-column:span 12}}
   .pie{display:flex;align-items:center;gap:22px;flex-wrap:wrap}
@@ -3764,24 +3764,24 @@ REPORT_HTML = """<!doctype html>
   .pie svg circle{cursor:pointer;transition:opacity .15s}
   .pie svg:hover circle{opacity:.55}
   .pie svg circle:hover{opacity:1}
-  .pie .ctr1{font-size:26px;font-weight:700;fill:var(--ink)}
-  .pie .ctr2{font-size:12px;fill:var(--mut)}
+  .pie .ctr1{font-size:27.5px;font-weight:700;fill:var(--ink)}
+  .pie .ctr2{font-size:13.5px;fill:var(--mut)}
   .plist{flex:1;min-width:220px;display:flex;flex-direction:column;gap:2px}
-  .plist .pr{display:grid;grid-template-columns:14px 1fr auto 46px;gap:8px;align-items:center;padding:6px 8px;border-radius:8px;font-size:13px;cursor:pointer}
+  .plist .pr{display:grid;grid-template-columns:14px 1fr auto 46px;gap:8px;align-items:center;padding:6px 8px;border-radius:8px;font-size:14.5px;cursor:pointer}
   .plist .pr:hover{background:var(--hover)}
   .plist .pr.on{background:#eaf1fe}
   .plist .pr .sw{width:12px;height:12px;border-radius:3px}
   .plist .pr .n{font-weight:700;text-align:right}
   .plist .pr .pc{color:var(--mut);text-align:right}
-  .pdly{display:inline-block;margin-left:6px;padding:0 6px;border-radius:999px;font-size:11px;font-weight:700;background:var(--crit-bg);color:var(--crit)}
-  .btn2{font:inherit;font-size:13.5px;font-weight:600;padding:7px 14px;border-radius:9px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+  .pdly{display:inline-block;margin-left:6px;padding:0 6px;border-radius:999px;font-size:12.5px;font-weight:700;background:var(--crit-bg);color:var(--crit)}
+  .btn2{font:inherit;font-size:15px;font-weight:600;padding:7px 14px;border-radius:9px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
   .btn2:hover{background:var(--hover)}
   .btn2:disabled{opacity:.6;cursor:wait}
   @media (max-width:820px){ .btn2{width:100%} }
   .snapcap{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline;padding:4px 2px 12px}
-  .snapcap b{font-size:18px}
-  .snapcap span{font-size:12.5px;color:var(--mut)}
-  .side .menu.out{margin-top:auto;color:var(--mut);font-size:13px}
+  .snapcap b{font-size:19px}
+  .snapcap span{font-size:14px;color:var(--mut)}
+  .side .menu.out{margin-top:auto;color:var(--mut);font-size:14.5px;white-space:nowrap}
   @media (max-width:820px){ .side .menu.out{flex:0 0 auto;margin-top:0} .side .menu.out span{display:none} }
   [hidden]{display:none !important}
 </style>
@@ -3831,7 +3831,7 @@ REPORT_HTML = """<!doctype html>
     <section class="panel w6"><div class="ph"><h3>สาเหตุ On Time / ล่าช้า</h3><span class="sub" id="whySub"></span></div><p class="hint">💡 จากคอลัมน์ <b>สาเหตุ On Time</b> ในชีต · นับเป็นจำนวนงาน · กดชื่อสาเหตุเพื่อดูงานนั้น</p><div id="cWhy"></div></section>
     <section class="panel w6"><div class="ph"><h3>สาเหตุแก้ไขงาน</h3><span class="sub" id="fixSub"></span></div><p class="hint">💡 จากคอลัมน์ <b>สาเหตุแก้ไขงาน</b> ในชีต · เช่น ลูกค้ายกเลิก, ปลายทางใหม่ · กดชื่อสาเหตุเพื่อดูงานนั้น</p><div id="cFix"></div></section>
     <section class="panel w12"><div class="ph"><h3>เวลาที่อยู่ในสถานี (เฉลี่ย)</h3><span class="sub">นาที</span></div><p class="hint">💡 รถจอดอยู่ที่ปลายทางนานเท่าไร (<b>ถึงปลายทาง → ออกจากปลายทาง</b>) แยกตามประเภทงาน · <b>ตัวเลขมาก = ลงของนาน</b> · เรียงจากนานสุดลงมา · กดหัวการ์ดหรือชื่อปลายทางเพื่อกรอง</p><div id="cDest"></div></section>
-    <section class="panel w12" data-nosnap="1"><div class="tools"><h3 style="margin:0;font-size:15px">รายการทั้งหมด</h3><span class="sub" id="rowCount" style="font-size:12.5px;color:var(--mut)"></span><span class="grow"></span>
+    <section class="panel w12" data-nosnap="1"><div class="tools"><h3 style="margin:0;font-size:16px">รายการทั้งหมด</h3><span class="sub" id="rowCount" style="font-size:14px;color:var(--mut)"></span><span class="grow"></span>
       <input type="search" id="q" placeholder="ค้นหา รถ / ปลายทาง / ออเดอร์" style="min-width:260px"></div>
       <p class="hint">💡 ทุกงาน (drop) ในช่วงวันที่ที่เลือก · <b>กดหัวคอลัมน์</b> เพื่อเรียงน้อย→มาก / มาก→น้อย · <b>กดเบอร์รถ</b> เพื่อดูเฉพาะคันนั้น · ช่องค้นหาด้านบนพิมพ์เบอร์รถ/ปลายทาง/ออเดอร์ได้</p>
       <div class="tw"><table><thead><tr id="rowsHead"></tr></thead>
