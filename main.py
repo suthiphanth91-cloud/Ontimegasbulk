@@ -201,13 +201,78 @@ def _app_password() -> str:
     return os.environ.get("APP_PASSWORD", "")
 
 
-def _report_password() -> str:
-    """รหัสผ่านชุดที่ 2 (ตั้งที่ Vercel → REPORT_PASSWORD) — ล็อกอินด้วยรหัสนี้ ดูได้เฉพาะหน้ารายงาน On Time"""
-    return os.environ.get("REPORT_PASSWORD", "")
+# ผู้ใช้แต่ละคนอยู่ในแท็บ "User" ของไฟล์ ChaseLog (PLAN_ID) — อ่านอย่างเดียว ไม่เขียนกลับ
+# หัวตาราง: ชื่อผู้ใช้ | รหัสผ่าน | เช็กรถ | แผนงาน | รายงาน | ใช้งาน   (ติ๊ก = เปิดหน้านั้นได้)
+# รหัสกลาง APP_PASSWORD ยังเข้าได้ทุกหน้าเสมอ (กันล็อกตัวเองออกถ้าชีตมีปัญหา)
+USERS_TAB  = os.environ.get("USERS_TAB", "User")
+USERS_TTL  = 60                                      # อ่านชีตผู้ใช้ใหม่ทุก 1 นาที (ปิดบัญชีแล้วมีผลเร็ว)
+PERMS_ALL  = frozenset({"car", "plan", "report"})
+PERM_PAGES = [("car", "/"), ("plan", "/plan"), ("report", "/report")]
+_TRUE_MARKS = {"✓", "✔", "☑", "true", "yes", "y", "1", "x", "ใช่", "/"}
+_users_cache: dict = {"ts": 0.0, "data": None}
 
 
-ROLE_REPORT = "r"                                   # ผู้ใช้ที่ดูได้เฉพาะรายงาน
-REPORT_ONLY_PATHS = {"/report", "/api/report/ontime", "/logout", "/favicon.ico"}
+def _users_sheet_id() -> str:
+    return os.environ.get("USERS_SHEET_ID") or PLAN_ID
+
+
+def _load_users_rows() -> list:
+    gc = gspread.authorize(_build_creds())
+    return gc.open_by_key(_users_sheet_id()).worksheet(USERS_TAB).get_all_values()
+
+
+def _parse_users(rows: list) -> dict:
+    """แถวจากชีต → {ชื่อผู้ใช้ (ตัวเล็ก): {"pw": รหัส, "perms": {...}}} — ข้ามคนที่ไม่ได้ติ๊ก "ใช้งาน" หรือไม่ได้ติ๊กหน้าไหนเลย"""
+    hdr = next((n for n, r in enumerate(rows[:10]) if any("ชื่อผู้ใช้" in c or c.strip().lower() in ("user", "username") for c in r)), None)
+    if hdr is None:
+        return {}
+    h = [c.strip().lower() for c in rows[hdr]]
+    find = lambda *keys: next((n for n, c in enumerate(h) if any(k in c for k in keys)), None)
+    cu, cp, ca = find("ชื่อผู้ใช้", "user"), find("รหัส", "pass"), find("ใช้งาน", "active")
+    cols = {"car": find("เช็กรถ", "เช็ครถ"), "plan": find("แผนงาน"), "report": find("รายงาน")}
+    if cu is None or cp is None:
+        return {}
+    out = {}
+    for r in rows[hdr + 1:]:
+        cell = lambda n: r[n].strip() if n is not None and n < len(r) else ""
+        on = lambda n: cell(n).lower() in _TRUE_MARKS
+        user, pw = cell(cu).lower(), cell(cp)
+        if not user or not pw or (ca is not None and not on(ca)):
+            continue
+        perms = frozenset(k for k, n in cols.items() if on(n))
+        if perms:
+            out[user] = {"pw": pw, "perms": perms}
+    return out
+
+
+def _users() -> dict:
+    """ผู้ใช้จากชีต (แคช 1 นาที) — อ่านไม่ได้ใช้ของเดิม ถ้าไม่เคยอ่านได้เลย = ไม่มีผู้ใช้"""
+    now = time()
+    if _users_cache["data"] is not None and now - _users_cache["ts"] < USERS_TTL:
+        return _users_cache["data"]
+    try:
+        data = _parse_users(_with_retry(_load_users_rows))
+    except Exception:
+        return _users_cache["data"] or {}
+    _users_cache.update(ts=now, data=data)
+    return data
+
+
+def _need_perm(path: str) -> str:
+    """หน้า/API นี้ต้องมีสิทธิ์อะไร: car / plan / report / "" (ทุกคน) / admin (ต้องมีครบทุกหน้า)"""
+    if path in ("/logout", "/favicon.ico"):
+        return ""
+    if path == "/" or path in ("/api/trips", "/api/chase", "/api/timeline", "/api/match"):
+        return "car"
+    if path in ("/plan", "/api/plan") or path.startswith("/api/plan/"):
+        return "plan"
+    if path == "/report" or path.startswith("/api/report/"):
+        return "report"
+    return "admin"                                   # ตั้งค่า / debug / docs ฯลฯ
+
+
+def _home_for(perms) -> str:
+    return next((url for k, url in PERM_PAGES if k in perms), "/logout")
 
 
 CRON_SECRET = os.environ.get("CRON_SECRET", "")   # ตั้งที่ Vercel — ใช้กันคนนอกยิง /api/cron/hourly-status เล่น
@@ -223,35 +288,60 @@ def _sign(msg: str) -> str:
     return base64.urlsafe_b64encode(sig).decode().rstrip("=")
 
 
-def _make_token(role: str = "") -> str:
-    """token = "หมดอายุ.ลายเซ็น" (เข้าได้ทุกหน้า) หรือ "หมดอายุ.r.ลายเซ็น" (ดูได้เฉพาะรายงาน) — สิทธิ์อยู่ในลายเซ็น แก้เองไม่ได้"""
+def _make_token(user: str = "") -> str:
+    """token = "หมดอายุ.ลายเซ็น" (รหัสกลาง เข้าได้ทุกหน้า) หรือ "หมดอายุ.u.ชื่อผู้ใช้.ลายเซ็น" (ผู้ใช้จากชีต)
+    ชื่อผู้ใช้อยู่ในลายเซ็น แก้เองไม่ได้ · สิทธิ์ดูจากชีตทุกครั้ง (ปิดในชีต = หลุดภายใน 1 นาที)"""
     exp = str(int(time()) + SESSION_HOURS * 3600)
-    if role:
-        return exp + "." + role + "." + _sign(exp + "|" + role)
+    if user:
+        u = base64.urlsafe_b64encode(user.encode()).decode().rstrip("=")
+        return exp + ".u." + u + "." + _sign(exp + "|u|" + user)
     return exp + "." + _sign(exp)
 
 
-def _token_role(token: str) -> Optional[str]:
-    """"" = เข้าได้ทุกหน้า · "r" = ดูได้เฉพาะรายงาน · None = ไม่ผ่าน/หมดอายุ"""
+def _token_user(token: str) -> Optional[str]:
+    """"" = รหัสกลาง (ทุกหน้า) · "ชื่อ" = ผู้ใช้จากชีต · None = ไม่ผ่าน/หมดอายุ"""
     try:
         parts = (token or "").split(".")
         if len(parts) == 2:
             exp, sig = parts
-            role, msg = "", parts[0]
-        elif len(parts) == 3 and parts[1] == ROLE_REPORT:
-            exp, role, sig = parts
-            msg = exp + "|" + role
+            user, msg = "", exp
+        elif len(parts) == 4 and parts[1] == "u":
+            exp, _, u, sig = parts
+            user = base64.urlsafe_b64decode(u + "=" * (-len(u) % 4)).decode()
+            if not user:
+                return None
+            msg = exp + "|u|" + user
         else:
             return None
         if int(exp) < int(time()):
             return None
-        return role if hmac.compare_digest(sig, _sign(msg)) else None
-    except (ValueError, AttributeError):
+        return user if hmac.compare_digest(sig, _sign(msg)) else None
+    except (ValueError, AttributeError, UnicodeDecodeError):
         return None
 
 
 def _token_ok(token: str) -> bool:
-    return _token_role(token) == ""
+    return _token_user(token) == ""
+
+
+def _perms_of(token: str):
+    """สิทธิ์ของ cookie นี้ — None = ยังไม่ได้ล็อกอิน / บัญชีถูกปิด"""
+    user = _token_user(token)
+    if user == "":
+        return PERMS_ALL
+    if user:
+        u = _users().get(user)
+        return u["perms"] if u else None
+    return None
+
+
+def _nav(html: str, request: Request) -> str:
+    """ซ่อนเมนูหน้าที่ผู้ใช้ไม่มีสิทธิ์"""
+    perms = getattr(request.state, "perms", PERMS_ALL)
+    for k, url in PERM_PAGES + [("admin", "/settings")]:
+        if (k == "admin" and not perms >= PERMS_ALL) or (k != "admin" and k not in perms):
+            html = re.sub(r'<a\b[^>]*\bhref="' + re.escape(url) + r'"[^>]*>.*?</a>\s*', "", html)
+    return html
 
 # ─── APP ─────────────────────────────────────────────────────────────────────
 
@@ -297,15 +387,15 @@ async def require_login(request: Request, call_next):
     if not _app_password() or path in OPEN_PATHS:
         return await call_next(request)          # ยังไม่ตั้งรหัส → เปิดตามเดิม
 
-    role = _token_role(request.cookies.get(COOKIE_NAME, ""))
-    if role == "":
-        return await call_next(request)
-    if role == ROLE_REPORT:                       # บัญชีดูรายงานอย่างเดียว
-        if path in REPORT_ONLY_PATHS:
+    perms = _perms_of(request.cookies.get(COOKIE_NAME, ""))
+    if perms is not None:
+        request.state.perms = perms
+        need = _need_perm(path)
+        if not need or need in perms or (need == "admin" and perms >= PERMS_ALL):
             return await call_next(request)
         if path.startswith("/api/"):
-            return JSONResponse({"detail": "บัญชีนี้ดูได้เฉพาะรายงาน On Time"}, status_code=403)
-        return RedirectResponse("/report", status_code=303)
+            return JSONResponse({"detail": "บัญชีนี้ไม่มีสิทธิ์ดูส่วนนี้"}, status_code=403)
+        return RedirectResponse(_home_for(perms), status_code=303)
 
     if path.startswith("/api/"):
         return JSONResponse({"detail": "ต้องล็อกอินก่อน"}, status_code=401)
@@ -1890,9 +1980,9 @@ def match(date_str: str = Query(None, alias="date")):
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-def dashboard():
+def dashboard(request: Request):
     warn = "" if _app_password() else "1"
-    return DASHBOARD_HTML.replace("__NOPASS__", warn)
+    return _nav(DASHBOARD_HTML.replace("__NOPASS__", warn), request)
 
 
 PLAN_LAST_COL = 26   # แสดงคอลัมน์ A–Z ของชีตแผนงาน
@@ -3246,19 +3336,12 @@ def report_ontime(date_from: str = Query(None, alias="from"), date_to: str = Que
 
 @app.get("/report", response_class=HTMLResponse, include_in_schema=False)
 def report_page(request: Request):
-    if _app_password() and _token_role(request.cookies.get(COOKIE_NAME, "")) == ROLE_REPORT:
-        return REPORT_HTML.replace(NAV_FULL, "")             # บัญชีดูรายงาน: ไม่แสดงเมนูหน้าอื่น
-    return REPORT_HTML
-
-
-NAV_FULL = '''  <a class="menu" href="/">🚛 เช็กรถ</a>
-  <a class="menu" href="/plan">📋 แผนงาน</a>
-'''
+    return _nav(REPORT_HTML, request)
 
 
 @app.get("/plan", response_class=HTMLResponse, include_in_schema=False)
-def plan_page():
-    return PLAN_HTML
+def plan_page(request: Request):
+    return _nav(PLAN_HTML, request)
 
 
 @app.get("/login", response_class=HTMLResponse, include_in_schema=False)
@@ -3266,7 +3349,7 @@ def login_page(error: str = ""):
     if not _app_password():
         return RedirectResponse("/", status_code=303)
     msg = ('<p class="err">ลองผิดหลายครั้งเกินไป — รอ 5 นาทีแล้วลองใหม่</p>' if error == "2"
-           else '<p class="err">รหัสผ่านไม่ถูกต้อง</p>' if error else "")
+           else '<p class="err">ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง</p>' if error else "")
     return LOGIN_HTML.replace("__ERR__", msg)
 
 
@@ -3308,17 +3391,18 @@ def _pw_equal(a: str, b: str) -> bool:
 
 
 @app.post("/api/login", include_in_schema=False)
-def do_login(request: Request, password: str = Form("")):
+def do_login(request: Request, password: str = Form(""), username: str = Form("")):
     pw = _app_password()
     ip = _client_ip(request)
     wait = _login_gate(ip)
     if wait:
         return RedirectResponse("/login?error=2", status_code=303)
-    rpw = _report_password()
-    if pw and _pw_equal(password, pw):
-        role, dest = "", "/"
-    elif pw and rpw and _pw_equal(password, rpw):
-        role, dest = ROLE_REPORT, "/report"          # รหัสชุดดูรายงาน → เข้าได้แค่หน้ารายงาน
+    uname = (username or "").strip().lower()
+    u = _users().get(uname) if (pw and uname) else None
+    if u and _pw_equal(password, u["pw"]):
+        role, dest = uname, _home_for(u["perms"])    # ผู้ใช้จากชีต → หน้าแรกที่มีสิทธิ์
+    elif pw and _pw_equal(password, pw):
+        role, dest = "", "/"                         # รหัสกลาง → ทุกหน้า
     else:
         _login_failed(ip)
         sleep(0.8)                                   # หน่วงเล็กน้อยทุกครั้งที่ผิด ให้เดาได้ช้าลง
@@ -3379,8 +3463,11 @@ LOGIN_HTML = """<!doctype html>
     <h1>🚛 Gasbulk Track</h1>
     <p class="sub">ระบบติดตามรถขนส่ง — กรุณาเข้าสู่ระบบ</p>
     __ERR__
+    <label for="un">ชื่อผู้ใช้</label>
+    <input id="un" name="username" type="text" autofocus autocomplete="username" autocapitalize="none"
+           placeholder="ชื่อผู้ใช้ (เว้นว่างได้ถ้าใช้รหัสกลาง)" style="margin-bottom:14px">
     <label for="pw">รหัสผ่าน</label>
-    <input id="pw" name="password" type="password" autofocus required
+    <input id="pw" name="password" type="password" required
            autocomplete="current-password" placeholder="ใส่รหัสผ่าน">
     <button type="submit">เข้าสู่ระบบ</button>
   </form>
@@ -4198,6 +4285,8 @@ PLAN_HTML = """<!doctype html>
               font-size:15px;color:var(--ink);padding:11px 12px;border-radius:10px}
   .side .menu:hover{background:var(--tr-bg)}
   .side .menu.on{background:#2563eb;color:#fff}
+  .side .menu.out{margin-top:auto;color:var(--mut);font-size:13px;white-space:nowrap}
+  @media (max-width:820px){ .side .menu.out{flex:0 0 auto;margin-top:0} .side .menu.out span{display:none} }
   @media (max-width:820px){
     body{padding-left:0}
     .side{position:static;width:auto;flex-direction:row;border-right:0;
@@ -4330,6 +4419,7 @@ PLAN_HTML = """<!doctype html>
   <a class="menu" href="/">🚛 เช็กรถ</a>
   <a class="menu on" href="/plan">📋 แผนงาน</a>
   <a class="menu" href="/report">📊 รายงาน On Time</a>
+  <a class="menu out" href="/logout" title="ออกจากระบบ">🚪<span>ออกจากระบบ</span></a>
 </aside>
 <header><div class="bar">
   <h1>📋 แผนงาน</h1>
@@ -5715,6 +5805,8 @@ DASHBOARD_HTML = """<!doctype html>
               font-size:15px;color:var(--ink);padding:11px 12px;border-radius:10px}
   .side .menu:hover{background:var(--tr-bg)}
   .side .menu.on{background:#2563eb;color:#fff}
+  .side .menu.out{margin-top:auto;color:var(--mut);font-size:13px;white-space:nowrap}
+  @media (max-width:820px){ .side .menu.out{flex:0 0 auto;margin-top:0} .side .menu.out span{display:none} }
   @media (max-width:820px){
     body{padding-left:0}
     .side{position:static;width:auto;flex-direction:row;border-right:0;
@@ -5799,6 +5891,7 @@ DASHBOARD_HTML = """<!doctype html>
   <a class="menu on" href="/">🚛 เช็กรถ</a>
   <a class="menu" href="/plan">📋 แผนงาน</a>
   <a class="menu" href="/report">📊 รายงาน On Time</a>
+  <a class="menu out" href="/logout" title="ออกจากระบบ">🚪<span>ออกจากระบบ</span></a>
 </aside>
 <header>
   <div class="bar">
