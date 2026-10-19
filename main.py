@@ -2998,6 +2998,174 @@ def plan_recent(n: int = Query(300)):
     return {"edits": out[-n:]}
 
 
+# ─── รายงาน On Time (อ่านอย่างเดียวจากชีตแผนงานจริง ไม่มีการเขียนใดๆ) ───────────────────────────────
+# เวลาในชีตรูปแบบ "19/10/2026, 8:56:04" (นับถึงวินาที) · คอลัมน์: AB เข้าลาน, AC เข้าโหลด, AD ออกโหลด, AE ออกคลัง, AF เข้าปลายทาง, AG ออกปลายทาง,
+# AV On Time (PASS/Delay), AW นาทีที่ช้า
+REPORT_MAX_MIN = 24 * 60          # ช่วงเวลาที่เกินนี้ถือว่าบันทึกผิด ไม่นำมาเฉลี่ย
+_rep_dist_cache: tuple = (0.0, None)
+
+
+def _rep_dt(raw: str):
+    """'19/10/2026, 8:56:04' / '2026-10-19 08:56:04' → datetime (รวมวินาที รองรับปี พ.ศ.) ไม่ใช่เวลา = None"""
+    t = str(raw or "").strip()
+    m = re.search(r"(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{4})\D+(\d{1,2}):(\d{2})(?::(\d{2}))?", t)
+    if m:
+        d, mo, y, h, mi, sec = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)), int(m.group(5)), int(m.group(6) or 0)
+    else:
+        m = re.match(r"(\d{4})-(\d{2})-(\d{2})[T ](\d{1,2}):(\d{2})(?::(\d{2}))?", t)
+        if not m:
+            return None
+        y, mo, d, h, mi, sec = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)), int(m.group(5)), int(m.group(6) or 0)
+    if y > 2400:
+        y -= 543
+    try:
+        return datetime(y, mo, d, h, mi, sec)
+    except ValueError:
+        return None
+
+
+def _rep_gap(a, b):
+    """นาที (b − a) ถ้าเป็นช่วงที่สมเหตุสมผล (0..24 ชม.) ไม่งั้น None"""
+    if not a or not b:
+        return None
+    m = (b - a).total_seconds() / 60
+    return round(m, 2) if 0 <= m <= REPORT_MAX_MIN else None
+
+
+def _rep_distances() -> dict:
+    """ปลายทาง → {คลังต้นทาง: กม.} จากแท็บ "ข้อมูลปลายทาง" (หัวคอลัมน์ที่เป็นชื่อคลัง) — ไม่มี/อ่านไม่ได้ = ว่าง"""
+    global _rep_dist_cache
+    ts, hit = _rep_dist_cache
+    if hit is not None and time() - ts < 600:
+        return hit
+    out: dict = {}
+    try:
+        rows = _fetch_sheet(DEST_ID, DEST_TAB)
+        head = [str(c).strip() for c in (rows[0] if rows else [])]
+        cols = {i: h for i, h in enumerate(head) if h in DEPOTS}
+        for r in rows[1:]:
+            name = _cell(r, DEST_NAME)
+            if not name:
+                continue
+            d = {}
+            for i, dep in cols.items():
+                v = _cell(r, i).replace(",", "")
+                if re.fullmatch(r"\d+(\.\d+)?", v):
+                    d[dep] = float(v)
+            if d:
+                out[name] = d
+    except Exception:
+        out = {}
+    _rep_dist_cache = (time(), out)
+    return out
+
+
+def _rep_class(km):
+    return "ไม่ทราบระยะ" if km is None else ("สายใกล้" if km <= 80 else ("สายกลาง" if km <= 250 else "สายไกล"))
+
+
+def _stat(vals: list) -> dict:
+    return {"n": len(vals), "min": round(min(vals), 1) if vals else None, "max": round(max(vals), 1) if vals else None,
+            "avg": round(sum(vals) / len(vals), 1) if vals else None}
+
+
+def build_ontime_report(rows: list, d_from: str, d_to: str, f: dict) -> dict:
+    """rows = แถวของชีตแผนงาน (รวมหัวตาราง) → สรุปรายงาน On Time ของวันที่ d_from..d_to ตามตัวกรอง f"""
+    dist = _rep_distances()
+    items = []
+    for i, r in enumerate(rows[1:], start=2):
+        day = _parse_date(_cell(r, PLAN_DATE))
+        if not day or day < d_from or day > d_to:
+            continue
+        car, origin, vt, drop = _cell(r, PLAN_CARNO), _cell(r, PLAN_SOURCE), _cell(r, PLAN_VTYPE), _cell(r, PLAN_DROP)
+        status = _cell(r, PLAN_STATUS)
+        if not (car or origin or _cell(r, PLAN_DEST)):
+            continue
+        if f.get("origin") and origin != f["origin"]:
+            continue
+        if f.get("vtype") and vt != f["vtype"]:
+            continue
+        if f.get("car") and car != f["car"]:
+            continue
+        if f.get("drop") and drop != f["drop"]:
+            continue
+        yard, lin, lout = _rep_dt(_cell(r, PLAN_YARD)), _rep_dt(_cell(r, PLAN_LOAD_IN)), _rep_dt(_cell(r, PLAN_LOAD_OUT))
+        dep, arr, leave = _rep_dt(_cell(r, PLAN_DEPART)), _rep_dt(_cell(r, PLAN_ARRIVE)), _rep_dt(_cell(r, PLAN_LEAVE))
+        ontime = _cell(r, PLAN_ONTIME).strip()
+        ontime = "PASS" if ontime.upper() == "PASS" else ("Delay" if ontime.lower() == "delay" else "")
+        dest = _cell(r, PLAN_DEST)
+        km = (dist.get(dest) or {}).get(origin)
+        it = {"row": i, "date": day, "job": _cell(r, 1), "car": car, "origin": origin, "dest": dest, "vtype": vt, "drop": drop,
+              "order": _cell(r, PLAN_INVOICE), "weight": _cell(r, PLAN_VOLUME), "sched": _cell(r, PLAN_SCHED), "status": status,
+              "arrive": arr.strftime("%d/%m/%Y %H:%M:%S") if arr else "", "ontime": ontime,
+              "late": _cell(r, PLAN_ONTIME_M),
+              "wait": _rep_gap(yard, lin), "load": _rep_gap(lin, lout), "travel": _rep_gap(dep, arr), "unload": _rep_gap(arr, leave),
+              "km": km, "cls": _rep_class(km)}
+        if f.get("status") and ontime != f["status"]:
+            continue
+        items.append(it)
+
+    def col(key: str, rowset=None) -> list:
+        return [x[key] for x in (rowset if rowset is not None else items) if x[key] is not None]
+    trips = {x["job"] or f'{x["car"]}|{x["date"]}|{x["row"]}' for x in items if x["car"] and not x["status"].strip()}
+    judged = [x for x in items if x["ontime"]]
+    by_origin: dict = {}
+    for x in items:
+        if x["origin"]:
+            by_origin.setdefault(x["origin"], []).append(x)
+    by_vtype: dict = {}
+    by_dest: dict = {}
+    by_class: dict = {}
+    for x in items:
+        if x["vtype"]:
+            by_vtype.setdefault(x["vtype"], set()).add(x["job"] or x["row"])
+        if x["dest"]:
+            by_dest.setdefault(x["dest"], []).append(x)
+        if x["ontime"] or x["travel"] is not None:
+            by_class[x["cls"]] = by_class.get(x["cls"], 0) + 1
+    avg = lambda vals: round(sum(vals) / len(vals), 1) if vals else None
+    return {
+        "from": d_from, "to": d_to, "n_rows": len(items),
+        "kpi": {"trips": len(trips), "drops": len(judged), "pass": sum(1 for x in judged if x["ontime"] == "PASS"),
+                "delay": sum(1 for x in judged if x["ontime"] == "Delay"),
+                "wait": avg(col("wait")), "load": avg(col("load")), "travel": avg(col("travel")), "unload": avg(col("unload"))},
+        "by_origin": [{"origin": k, "trips": len({y["job"] or y["row"] for y in v}),
+                       "wait": _stat(col("wait", v)), "load": _stat(col("load", v))} for k, v in sorted(by_origin.items())],
+        "by_vtype": [{"vtype": k, "trips": len(v)} for k, v in sorted(by_vtype.items())],
+        "by_dest": sorted([{"dest": k, "drops": len(v), "travel": avg(col("travel", v)), "unload": avg(col("unload", v))}
+                           for k, v in by_dest.items() if col("travel", v) or col("unload", v)],
+                          key=lambda d: -(d["travel"] or 0))[:12],
+        "by_class": [{"cls": k, "n": v} for k, v in sorted(by_class.items())],
+        "rows": sorted(items, key=lambda x: (x["date"], x["origin"], x["car"], x["row"]))[:600],
+        "filters": {"origins": sorted({x["origin"] for x in items if x["origin"]}),
+                    "vtypes": sorted({x["vtype"] for x in items if x["vtype"]}),
+                    "cars": sorted({x["car"] for x in items if x["car"]}),
+                    "drops": sorted({x["drop"] for x in items if x["drop"]})},
+    }
+
+
+@app.get("/api/report/ontime", include_in_schema=False)
+def report_ontime(date_from: str = Query(None, alias="from"), date_to: str = Query(None, alias="to"),
+                  origin: str = "", vtype: str = "", car: str = "", drop: str = "", status: str = ""):
+    """รายงาน On Time ของช่วงวันที่ (ค่าเริ่มต้น = วันนี้) — อ่านชีตแผนงานจริงอย่างเดียว แคช 5 นาทีตามปกติ"""
+    d_from = _parse_date(date_from or "") or _today_thai()
+    d_to = _parse_date(date_to or "") or d_from
+    if d_to < d_from:
+        d_from, d_to = d_to, d_from
+    if (datetime.strptime(d_to, "%Y-%m-%d") - datetime.strptime(d_from, "%Y-%m-%d")).days > 93:
+        raise HTTPException(400, "เลือกช่วงวันที่ได้ไม่เกิน 3 เดือน")
+    try:
+        rows = _fetch_sheet(SOURCE_ID, PLAN_TAB)
+    except Exception as e:
+        raise HTTPException(502, f"อ่านชีตแผนงานไม่ได้ — {type(e).__name__}")
+    return build_ontime_report(rows, d_from, d_to, {"origin": origin, "vtype": vtype, "car": car, "drop": drop, "status": status})
+
+
+@app.get("/report", response_class=HTMLResponse, include_in_schema=False)
+def report_page():
+    return REPORT_HTML
+
+
 @app.get("/plan", response_class=HTMLResponse, include_in_schema=False)
 def plan_page():
     return PLAN_HTML
@@ -3247,6 +3415,233 @@ SETTINGS_HTML = """<!doctype html>
 """
 
 
+REPORT_HTML = """<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>รายงาน On Time — Gasbulk Track</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{--bg:#f1f5f9;--card:#fff;--line:#e2e8f0;--ink:#0f172a;--mut:#64748b;--tr-bg:#eff6ff;--pd-bg:#f8fafc;
+        --late:#dc2626;--ok:#16a34a;--c1:#a78bfa;--c2:#f472b6;--c3:#60a5fa;--c4:#818cf8;--chg-bg:#fffbeb;--chg-line:#fcd34d;--chg-ink:#92400e}
+  @media (prefers-color-scheme:dark){
+    :root{--bg:#0b1220;--card:#131c2e;--line:#243044;--ink:#e8eef8;--mut:#93a3b8;--tr-bg:#0f2340;--pd-bg:#1a2434;
+          --chg-bg:#2b2410;--chg-line:#92400e;--chg-ink:#fcd34d}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:'Noto Sans Thai',system-ui,-apple-system,sans-serif;font-size:15px;padding-left:148px}
+  header{background:var(--card);border-bottom:1px solid var(--line);padding:14px 18px;position:sticky;top:0;z-index:10}
+  .bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+  h1{font-size:19px;margin:0;font-weight:700}
+  .grow{flex:1}
+  input,select,button{font-family:inherit;font-size:14px;padding:8px 12px;border-radius:9px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
+  button{cursor:pointer;font-weight:600}
+  button.primary{background:#2563eb;border-color:#2563eb;color:#fff}
+  button.chip{border-radius:999px;padding:6px 14px;font-size:13px}
+  .side{position:fixed;left:0;top:0;bottom:0;width:148px;background:var(--card);border-right:1px solid var(--line);padding:14px 10px;display:flex;flex-direction:column;gap:6px;z-index:20}
+  .side .menu{display:flex;align-items:center;gap:9px;text-decoration:none;font-weight:700;font-size:15px;color:var(--ink);padding:11px 12px;border-radius:10px}
+  .side .menu:hover{background:var(--tr-bg)}
+  .side .menu.on{background:#2563eb;color:#fff}
+  @media (max-width:820px){
+    body{padding-left:0}
+    .side{position:static;width:auto;flex-direction:row;border-right:0;border-bottom:1px solid var(--line);padding:8px 10px}
+    .side .menu{flex:1;justify-content:center;padding:9px 6px;font-size:13px}
+  }
+  main{padding:16px;max-width:1500px}
+  .mut{color:var(--mut)}
+  .filters{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;margin-bottom:14px}
+  .k{border-radius:14px;padding:12px 14px;border:1px solid var(--line);background:var(--card)}
+  .k span{font-size:12.5px;color:var(--mut);display:block}
+  .k b{font-size:28px;line-height:1.15;display:block;margin-top:2px}
+  .k small{font-size:12px;color:var(--mut)}
+  .k.p1{background:#ede9fe;border-color:#ddd6fe}.k.p2{background:#fce7f3;border-color:#fbcfe8}.k.p3{background:#dbeafe;border-color:#bfdbfe}.k.p4{background:#ffedd5;border-color:#fed7aa}.k.p5{background:#dcfce7;border-color:#bbf7d0}
+  @media (prefers-color-scheme:dark){.k.p1,.k.p2,.k.p3,.k.p4,.k.p5{background:var(--card);border-color:var(--line)}}
+  .k.p1 span,.k.p2 span,.k.p3 span,.k.p4 span,.k.p5 span{color:#475569}
+  @media (prefers-color-scheme:dark){.k.p1 span,.k.p2 span,.k.p3 span,.k.p4 span,.k.p5 span{color:var(--mut)}}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px;margin-bottom:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px}
+  .card h3{margin:0 0 10px;font-size:15px}
+  .legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--mut);margin-bottom:8px}
+  .legend i{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+  .og{margin-bottom:11px}
+  .og .nm{font-weight:700;font-size:13.5px;margin-bottom:3px;display:flex;justify-content:space-between}
+  .br{display:grid;grid-template-columns:1fr 64px;align-items:center;gap:8px;margin:3px 0}
+  .br2{display:grid;grid-template-columns:minmax(90px,170px) 1fr 76px;align-items:center;gap:8px;margin:6px 0}
+  .tk{background:var(--pd-bg);border-radius:6px;height:12px;overflow:hidden}
+  .tk .bar2{height:12px;border-radius:6px;min-width:2px}
+  .br2 .lb{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .br .v,.br2 .v{font-size:12.5px;color:var(--mut);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+  .pie{display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+  .pie .disc{width:150px;height:150px;border-radius:50%;flex:none;position:relative}
+  .pie .disc::after{content:"";position:absolute;inset:34px;border-radius:50%;background:var(--card)}
+  .pie .ctr{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:20px;z-index:1}
+  .pie ul{list-style:none;margin:0;padding:0;font-size:13.5px}
+  .pie li{margin:4px 0}
+  .pie li i{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:7px}
+  .wrap{background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:auto;max-height:520px}
+  table{border-collapse:separate;border-spacing:0;width:100%;font-size:13.5px}
+  th,td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+  th{position:sticky;top:0;background:#e0ecff;color:#1e3a8a;z-index:1;font-weight:700}
+  @media (prefers-color-scheme:dark){th{background:#1b2a4a;color:#bfdbfe}}
+  tbody tr:nth-child(even) td{background:var(--pd-bg)}
+  th.n{text-align:right}
+  td.n{text-align:right;font-variant-numeric:tabular-nums}
+  .pass{color:var(--ok);font-weight:700}.delay{color:var(--late);font-weight:700}
+  .empty{padding:36px;text-align:center;color:var(--mut)}
+  .note{background:var(--chg-bg);border:1px solid var(--chg-line);color:var(--chg-ink);border-radius:12px;padding:9px 14px;margin-bottom:12px;font-size:13.5px}
+  .err{background:#fef2f2;color:#b91c1c;padding:10px 14px;border-radius:10px;margin-bottom:12px}
+  [hidden]{display:none !important}
+</style>
+</head>
+<body>
+<aside class="side">
+  <a class="menu" href="/">🚛 เช็กรถ</a>
+  <a class="menu" href="/plan">📋 แผนงาน</a>
+  <a class="menu on" href="/report">📊 รายงาน On Time</a>
+</aside>
+<header><div class="bar">
+  <h1>📊 รายงาน On Time</h1>
+  <span class="mut" id="stamp"></span>
+  <span class="grow"></span>
+  <button class="chip" id="rToday">วันนี้</button>
+  <button class="chip" id="rYest">เมื่อวาน</button>
+  <button class="chip" id="r7">7 วันล่าสุด</button>
+  <input type="date" id="dFrom"> <span class="mut">ถึง</span> <input type="date" id="dTo">
+  <button class="primary" id="go">ดูรายงาน</button>
+</div></header>
+<main>
+  <div class="filters">
+    <select id="fOrigin"><option value="">ต้นทาง: ทั้งหมด</option></select>
+    <select id="fVtype"><option value="">ประเภทรถ: ทั้งหมด</option></select>
+    <select id="fCar"><option value="">เบอร์รถ: ทั้งหมด</option></select>
+    <select id="fDrop"><option value="">Drop: ทั้งหมด</option></select>
+    <select id="fStatus"><option value="">On Time: ทั้งหมด</option><option value="PASS">PASS</option><option value="Delay">Delay</option></select>
+  </div>
+  <div id="err" class="err" hidden></div>
+  <div id="note" class="note" hidden></div>
+  <div class="kpis" id="kpis"></div>
+  <div class="grid">
+    <div class="card" style="grid-column:1/-1"><h3>เวลารอโหลดสินค้า (นาที) แยกตามต้นทาง</h3>
+      <div class="legend"><span><i style="background:var(--c2)"></i>Min</span><span><i style="background:var(--c3)"></i>Max</span><span><i style="background:var(--c4)"></i>Avg</span><span><i style="background:var(--c1)"></i>จำนวนเที่ยว (ตัวเลข)</span></div>
+      <div id="cOrigin"></div></div>
+    <div class="card"><h3>สถานะ On Time</h3><div class="pie" id="cOntime"></div></div>
+    <div class="card"><h3>สายใกล้ / สายกลาง / สายไกล <span class="mut" style="font-weight:400;font-size:12.5px">(≤80 / 81–250 / &gt;250 กม.)</span></h3><div class="pie" id="cClass"></div></div>
+    <div class="card"><h3>จำนวนเที่ยวตามประเภทรถ</h3><div id="cVtype"></div></div>
+    <div class="card"><h3>เวลาเดินทางไปปลายทาง (นาที) — ปลายทางที่ใช้นานสุด</h3><div id="cDest"></div></div>
+  </div>
+  <div class="card" style="margin-bottom:14px"><h3>รายละเอียดต้นทาง</h3><div class="wrap" style="max-height:none"><table><thead><tr>
+    <th>ต้นทาง</th><th class="n">เที่ยว</th><th class="n">รอโหลด Min</th><th class="n">Max</th><th class="n">Avg</th><th class="n">โหลด Min</th><th class="n">Max</th><th class="n">Avg</th></tr></thead><tbody id="tOrigin"></tbody></table></div></div>
+  <div class="bar" style="margin-bottom:8px"><b>รายการทั้งหมด</b><span class="mut" id="rowCount"></span><span class="grow"></span>
+    <input type="search" id="q" placeholder="🔍 ค้นหาในตาราง (รถ / ปลายทาง / ออเดอร์)" style="min-width:260px"></div>
+  <div class="wrap"><table><thead><tr>
+    <th>เบอร์รถ</th><th>วันที่</th><th>เลขออเดอร์</th><th>ต้นทาง</th><th>ปลายทาง</th><th>ประเภท</th><th>Drop</th><th class="n">น้ำหนัก</th><th>เวลาส่ง</th><th>ถึงปลายทาง</th>
+    <th>On Time</th><th class="n">ช้า (นาที)</th><th class="n">รอโหลด</th><th class="n">โหลด</th><th class="n">เดินทาง</th><th class="n">ส่งสินค้า</th></tr></thead>
+    <tbody id="rows"></tbody></table></div>
+</main>
+<script>
+let REP = null;
+function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function iso(d){ return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+function num(v, d){ return v == null ? '–' : Number(v).toLocaleString('en-US', {maximumFractionDigits: d == null ? 1 : d}); }
+function setRange(a, b){ document.getElementById('dFrom').value = iso(a); document.getElementById('dTo').value = iso(b); }
+function fill(sel, vals, label){
+  const el = document.getElementById(sel), cur = el.value;
+  el.innerHTML = '<option value="">' + label + ': ทั้งหมด</option>' + vals.map(v => '<option>' + esc(v) + '</option>').join('');
+  el.value = vals.indexOf(cur) >= 0 ? cur : '';
+}
+async function load(keepFilters){
+  const q = new URLSearchParams({from: document.getElementById('dFrom').value, to: document.getElementById('dTo').value,
+    origin: document.getElementById('fOrigin').value, vtype: document.getElementById('fVtype').value, car: document.getElementById('fCar').value,
+    drop: document.getElementById('fDrop').value, status: document.getElementById('fStatus').value});
+  const err = document.getElementById('err'); err.hidden = true;
+  document.getElementById('go').textContent = 'กำลังอ่านชีต...';
+  try{
+    const r = await fetch('/api/report/ontime?' + q.toString());
+    if(r.status === 401){ location.href = '/login'; return; }
+    if(!r.ok){ let m = 'HTTP ' + r.status; try{ m = (await r.json()).detail || m; }catch(e){} throw new Error(m); }
+    REP = await r.json();
+    if(!keepFilters){
+      fill('fOrigin', REP.filters.origins, 'ต้นทาง'); fill('fVtype', REP.filters.vtypes, 'ประเภทรถ');
+      fill('fCar', REP.filters.cars, 'เบอร์รถ'); fill('fDrop', REP.filters.drops, 'Drop');
+    }
+    render();
+    document.getElementById('stamp').textContent = 'อ่านจากชีตแผนงานจริง (อ่านอย่างเดียว) · ' + new Date().toLocaleTimeString('th-TH');
+  }catch(e){ err.textContent = 'โหลดรายงานไม่สำเร็จ: ' + e.message; err.hidden = false; }
+  finally{ document.getElementById('go').textContent = 'ดูรายงาน'; }
+}
+function kpi(cls, label, val, sub){ return '<div class="k ' + cls + '"><span>' + label + '</span><b>' + val + '</b>' + (sub ? '<small>' + sub + '</small>' : '') + '</div>'; }
+function pie(el, parts, center){
+  const total = parts.reduce((a, p) => a + p.n, 0);
+  if(!total){ document.getElementById(el).innerHTML = '<div class="empty">ไม่มีข้อมูล</div>'; return; }
+  let acc = 0, grad = [];
+  parts.forEach(p => { const a = acc / total * 360; acc += p.n; grad.push(p.c + ' ' + a + 'deg ' + (acc / total * 360) + 'deg'); });
+  document.getElementById(el).innerHTML = '<div class="disc" style="background:conic-gradient(' + grad.join(',') + ')"><div class="ctr">' + center + '</div></div><ul>' +
+    parts.map(p => '<li><i style="background:' + p.c + '"></i>' + esc(p.t) + ' <b>' + p.n + '</b> (' + Math.round(p.n / total * 100) + '%)</li>').join('') + '</ul>';
+}
+function hbars(el, list, label, val, color, unit){
+  const mx = Math.max.apply(null, list.map(val).concat([1]));
+  document.getElementById(el).innerHTML = list.length ? list.map(x => {
+    const v = val(x);
+    return '<div class="br2"><span class="lb" title="' + esc(label(x)) + '">' + esc(label(x)) + '</span><div class="tk"><div class="bar2" style="width:' +
+      Math.max(2, (v || 0) / mx * 100) + '%;background:' + color + '"></div></div><span class="v">' + num(v) + (unit || '') + '</span></div>';
+  }).join('') : '<div class="empty">ไม่มีข้อมูล</div>';
+}
+function render(){
+  const k = REP.kpi, judged = k.pass + k.delay;
+  const note = document.getElementById('note');
+  note.hidden = REP.n_rows > 0;
+  note.textContent = 'ไม่พบงานในช่วงวันที่/ตัวกรองที่เลือก';
+  document.getElementById('kpis').innerHTML =
+    kpi('', 'จำนวนเที่ยว', num(k.trips, 0), REP.from === REP.to ? REP.from : REP.from + ' ถึง ' + REP.to) +
+    kpi('', 'จำนวน Drop ที่วัดผลแล้ว', num(k.drops, 0), 'จากทั้งหมด ' + num(REP.n_rows, 0) + ' แถว') +
+    kpi('p5', 'On Time (PASS)', judged ? Math.round(k.pass / judged * 100) + '%' : '–', 'PASS ' + k.pass + ' · Delay ' + k.delay) +
+    kpi('p1', 'เวลารอโหลดสินค้า (นาที)', num(k.wait), 'เฉลี่ย') +
+    kpi('p2', 'เวลาโหลดสินค้า (นาที)', num(k.load), 'เฉลี่ย') +
+    kpi('p3', 'เวลาเดินทางไปปลายทาง (นาที)', num(k.travel), 'เฉลี่ย') +
+    kpi('p4', 'เวลาส่งสินค้า (นาที)', num(k.unload), 'เฉลี่ย');
+  // ต้นทาง: กราฟ Min/Max/Avg ของเวลารอโหลด
+  const mx = Math.max.apply(null, REP.by_origin.map(o => o.wait.max || 0).concat([1]));
+  const bar = (v, c) => '<div class="br"><div class="tk"><div class="bar2" style="width:' + Math.max(2, (v || 0) / mx * 100) + '%;background:' + c + '"></div></div><span class="v">' + num(v) + '</span></div>';
+  document.getElementById('cOrigin').innerHTML = REP.by_origin.length ? REP.by_origin.map(o =>
+    '<div class="og"><div class="nm"><span>' + esc(o.origin) + '</span><span style="color:var(--c1)">' + o.trips + ' เที่ยว</span></div>' +
+    bar(o.wait.min, 'var(--c2)') + bar(o.wait.max, 'var(--c3)') + bar(o.wait.avg, 'var(--c4)') + '</div>').join('') : '<div class="empty">ไม่มีข้อมูล</div>';
+  document.getElementById('tOrigin').innerHTML = REP.by_origin.map(o => '<tr><td><b>' + esc(o.origin) + '</b></td><td class="n">' + o.trips + '</td>' +
+    '<td class="n">' + num(o.wait.min) + '</td><td class="n">' + num(o.wait.max) + '</td><td class="n">' + num(o.wait.avg) + '</td>' +
+    '<td class="n">' + num(o.load.min) + '</td><td class="n">' + num(o.load.max) + '</td><td class="n">' + num(o.load.avg) + '</td></tr>').join('') ||
+    '<tr><td colspan="8" class="empty">ไม่มีข้อมูล</td></tr>';
+  pie('cOntime', [{t: 'PASS', n: k.pass, c: '#22c55e'}, {t: 'Delay', n: k.delay, c: '#fb923c'}], judged ? Math.round(k.pass / judged * 100) + '%' : '–');
+  const cc = {'สายใกล้': '#a78bfa', 'สายกลาง': '#fbbf24', 'สายไกล': '#38bdf8', 'ไม่ทราบระยะ': '#cbd5e1'};
+  pie('cClass', REP.by_class.map(c => ({t: c.cls, n: c.n, c: cc[c.cls] || '#94a3b8'})), String(REP.by_class.reduce((a, c) => a + c.n, 0)));
+  hbars('cVtype', REP.by_vtype, x => x.vtype, x => x.trips, '#be185d', ' เที่ยว');
+  hbars('cDest', REP.by_dest.filter(d => d.travel != null), x => x.dest, x => x.travel, '#16a34a', ' นาที');
+  drawRows();
+}
+function drawRows(){
+  const q = document.getElementById('q').value.trim().toLowerCase();
+  const rows = REP.rows.filter(x => !q || [x.car, x.dest, x.order, x.origin, x.job].join(' ').toLowerCase().indexOf(q) >= 0);
+  document.getElementById('rowCount').textContent = '· แสดง ' + rows.length + ' จาก ' + REP.n_rows + ' แถว' + (REP.n_rows > REP.rows.length ? ' (แสดงสูงสุด ' + REP.rows.length + ' แถวแรก)' : '');
+  document.getElementById('rows').innerHTML = rows.map(x => '<tr><td><b>' + esc(x.car) + '</b></td><td>' + esc(x.date) + '</td><td>' + esc(x.order) + '</td><td>' + esc(x.origin) +
+    '</td><td title="' + esc(x.dest) + '">' + esc(x.dest.length > 28 ? x.dest.slice(0, 27) + '…' : x.dest) + '</td><td>' + esc(x.vtype) + '</td><td>' + esc(x.drop) +
+    '</td><td class="n">' + esc(x.weight) + '</td><td>' + esc(x.sched) + '</td><td>' + esc(x.arrive) + '</td><td class="' + (x.ontime === 'PASS' ? 'pass' : x.ontime === 'Delay' ? 'delay' : '') + '">' + esc(x.ontime) +
+    '</td><td class="n">' + esc(x.late) + '</td><td class="n">' + num(x.wait) + '</td><td class="n">' + num(x.load) + '</td><td class="n">' + num(x.travel) + '</td><td class="n">' + num(x.unload) + '</td></tr>').join('') ||
+    '<tr><td colspan="16" class="empty">ไม่มีข้อมูล</td></tr>';
+}
+const today = new Date();
+setRange(today, today);
+document.getElementById('rToday').onclick = () => { setRange(new Date(), new Date()); load(); };
+document.getElementById('rYest').onclick = () => { const y = new Date(); y.setDate(y.getDate() - 1); setRange(y, y); load(); };
+document.getElementById('r7').onclick = () => { const a = new Date(); a.setDate(a.getDate() - 6); setRange(a, new Date()); load(); };
+document.getElementById('go').onclick = () => load();
+['fOrigin', 'fVtype', 'fCar', 'fDrop', 'fStatus'].forEach(id => { document.getElementById(id).onchange = () => load(true); });
+['dFrom', 'dTo'].forEach(id => { document.getElementById(id).onchange = () => load(); });
+document.getElementById('q').oninput = () => { if(REP) drawRows(); };
+load();
+</script>
+</body></html>
+"""
+
+
 PLAN_HTML = """<!doctype html>
 <html lang="th">
 <head>
@@ -3415,6 +3810,7 @@ PLAN_HTML = """<!doctype html>
 <aside class="side">
   <a class="menu" href="/">🚛 เช็กรถ</a>
   <a class="menu on" href="/plan">📋 แผนงาน</a>
+  <a class="menu" href="/report">📊 รายงาน On Time</a>
 </aside>
 <header><div class="bar">
   <h1>📋 แผนงาน</h1>
@@ -4883,6 +5279,7 @@ DASHBOARD_HTML = """<!doctype html>
 <aside class="side">
   <a class="menu on" href="/">🚛 เช็กรถ</a>
   <a class="menu" href="/plan">📋 แผนงาน</a>
+  <a class="menu" href="/report">📊 รายงาน On Time</a>
 </aside>
 <header>
   <div class="bar">
