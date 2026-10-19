@@ -3617,6 +3617,14 @@ REPORT_HTML = """<!doctype html>
   .rend{background:var(--oc,var(--s1))}
   .rname i,.blab i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px;vertical-align:1px;background:var(--oc,var(--s1))}
   .bfill{background:var(--oc,var(--s1))}
+  /* หัวคอลัมน์: กดครั้งแรกเรียงน้อย→มาก กดอีกครั้งมาก→น้อย */
+  th.cs{cursor:pointer;user-select:none}
+  th.cs:hover{color:var(--ink)}
+  th.cs .ar{display:inline-block;width:12px;margin-left:3px;font-size:10px;opacity:.35}
+  th.cs:hover .ar{opacity:.7}
+  th.cs.act{color:#1d4ed8}
+  th.cs.act .ar{opacity:1}
+  @media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])) th.cs.act{color:#9ec5f4}}
   [hidden]{display:none !important}
 </style>
 </head>
@@ -3658,12 +3666,10 @@ REPORT_HTML = """<!doctype html>
     </div>
     <section class="panel w12"><div class="ph"><h3>เวลาที่อยู่ในสถานี (เฉลี่ย)</h3><span class="sub">นาที · เข้าปลายทาง → ออกปลายทาง · 12 สถานีที่อยู่นานสุด</span></div><div id="cDest"></div></section>
     <section class="panel w12"><div class="ph"><h3>สรุปตามต้นทาง</h3><span class="sub">นาที</span></div>
-      <div class="tw" style="max-height:none"><table><thead><tr><th>ต้นทาง</th><th class="n">เที่ยว</th><th class="n">รอโหลด ต่ำสุด</th><th class="n">สูงสุด</th><th class="n">เฉลี่ย</th><th class="n">โหลด ต่ำสุด</th><th class="n">สูงสุด</th><th class="n">เฉลี่ย</th></tr></thead><tbody id="tOrigin"></tbody></table></div></section>
+      <div class="tw" style="max-height:none"><table><thead><tr id="oHead"></tr></thead><tbody id="tOrigin"></tbody></table></div></section>
     <section class="panel w12"><div class="tools"><h3 style="margin:0;font-size:15px">รายการทั้งหมด</h3><span class="sub" id="rowCount" style="font-size:12.5px;color:var(--mut)"></span><span class="grow"></span>
       <input type="search" id="q" placeholder="ค้นหา รถ / ปลายทาง / ออเดอร์" style="min-width:260px"></div>
-      <div class="tw"><table><thead><tr>
-        <th>เบอร์รถ</th><th>วันที่</th><th>เลขออเดอร์</th><th>ต้นทาง</th><th>ปลายทาง</th><th>ประเภท</th><th class="n">Drop</th><th class="n">น้ำหนัก</th><th>เวลาส่ง</th><th>ถึงปลายทาง</th>
-        <th>On Time</th><th class="n">ช้า (นาที)</th><th class="n">รอโหลด</th><th class="n">โหลด</th><th class="n">เดินทาง</th><th class="n">ส่งสินค้า</th></tr></thead>
+      <div class="tw"><table><thead><tr id="rowsHead"></tr></thead>
         <tbody id="rows"></tbody></table></div>
       <p class="note">ช่องรอโหลด/โหลด ไล่สีตามความนาน: &lt;30 · 30–60 · 60–120 · &gt;120 นาที</p></section>
   </div>
@@ -3762,11 +3768,53 @@ function render(){
   bars('cVtype', REP.by_vtype, x => x.vtype, x => x.trips, ' เที่ยว', 'vtype', x => x.vtype + ': ' + x.trips + ' เที่ยว', x => vcol(x.vtype));
   bars('cDest', REP.by_dest.filter(d => d.unload != null), x => x.dest, x => x.unload, ' นาที', 'dest',
        x => x.dest + ' · อยู่ที่สถานีเฉลี่ย ' + num(x.unload) + ' นาที · ' + x.n + ' drop', x => '#eda100');
-  document.getElementById('tOrigin').innerHTML = REP.by_origin.map(o => '<tr><td class="k" data-k="origin" data-v="' + esc(o.origin) + '">' + esc(o.origin) + '</td><td class="n">' + o.trips + '</td>' +
+  drawOriginTable();
+  drawRows();
+}
+// ── เรียงตาราง: กดหัวคอลัมน์ ครั้งแรก น้อย→มาก · อีกครั้ง มาก→น้อย (ค่าว่างอยู่ท้ายเสมอ) ──
+function toNum(v){ if(v == null || v === '') return null; const n = Number(String(v).replace(/,/g, '')); return isNaN(n) ? null : n; }
+function hhmm(v){ const m = String(v || '').split(':'); return m.length > 1 ? String(m[0]).trim().padStart(2, '0') + ':' + m[1].slice(0, 2) : String(v || ''); }
+const SORTS = {o: null, r: null};
+function sortList(list, cols, st){
+  if(!st) return list;
+  const c = cols.find(x => x.k === st.k);
+  return list.slice().sort((a, b) => {
+    const va = c.v(a), vb = c.v(b), ea = va == null || va === '', eb = vb == null || vb === '';
+    if(ea || eb) return ea === eb ? 0 : ea ? 1 : -1;
+    return (c.n ? va - vb : String(va).localeCompare(String(vb), 'th', {numeric: true})) * st.dir;
+  });
+}
+function headHtml(cols, tbl){
+  const st = SORTS[tbl];
+  return cols.map(c => '<th class="cs' + (c.n ? ' n' : '') + (st && st.k === c.k ? ' act' : '') + '" data-tbl="' + tbl + '" data-col="' + c.k + '" title="กดเพื่อเรียง">' +
+    c.t + '<span class="ar">' + (st && st.k === c.k ? (st.dir > 0 ? '▲' : '▼') : '⇅') + '</span></th>').join('');
+}
+const OCOLS = [
+  {k: 'origin', t: 'ต้นทาง', v: o => o.origin}, {k: 'trips', t: 'เที่ยว', n: 1, v: o => o.trips},
+  {k: 'wmin', t: 'รอโหลด ต่ำสุด', n: 1, v: o => o.wait.min}, {k: 'wmax', t: 'สูงสุด', n: 1, v: o => o.wait.max}, {k: 'wavg', t: 'เฉลี่ย', n: 1, v: o => o.wait.avg},
+  {k: 'lmin', t: 'โหลด ต่ำสุด', n: 1, v: o => o.load.min}, {k: 'lmax', t: 'สูงสุด', n: 1, v: o => o.load.max}, {k: 'lavg', t: 'เฉลี่ย', n: 1, v: o => o.load.avg}];
+const RCOLS = [
+  {k: 'car', t: 'เบอร์รถ', v: x => x.car}, {k: 'date', t: 'วันที่', v: x => x.date}, {k: 'order', t: 'เลขออเดอร์', v: x => x.order},
+  {k: 'origin', t: 'ต้นทาง', v: x => x.origin}, {k: 'dest', t: 'ปลายทาง', v: x => x.dest}, {k: 'vtype', t: 'ประเภท', v: x => x.vtype},
+  {k: 'drop', t: 'Drop', n: 1, v: x => toNum(x.drop)}, {k: 'weight', t: 'น้ำหนัก', n: 1, v: x => toNum(x.weight)},
+  {k: 'sched', t: 'เวลาส่ง', v: x => hhmm(x.sched)},
+  {k: 'arrive', t: 'ถึงปลายทาง', v: x => x.arrive ? x.arrive.slice(6, 10) + x.arrive.slice(3, 5) + x.arrive.slice(0, 2) + x.arrive.slice(10) : ''},
+  {k: 'ontime', t: 'On Time', v: x => x.ontime}, {k: 'late', t: 'ช้า (นาที)', n: 1, v: x => toNum(x.late)},
+  {k: 'wait', t: 'รอโหลด', n: 1, v: x => x.wait}, {k: 'load', t: 'โหลด', n: 1, v: x => x.load},
+  {k: 'travel', t: 'เดินทาง', n: 1, v: x => x.travel}, {k: 'unload', t: 'ส่งสินค้า', n: 1, v: x => x.unload}];
+document.addEventListener('click', e => {
+  const th = e.target.closest ? e.target.closest('th.cs') : null;
+  if(!th || !REP) return;
+  const t = th.dataset.tbl, k = th.dataset.col, st = SORTS[t];
+  SORTS[t] = {k: k, dir: st && st.k === k && st.dir > 0 ? -1 : 1};
+  if(t === 'o') drawOriginTable(); else drawRows();
+});
+function drawOriginTable(){
+  document.getElementById('oHead').innerHTML = headHtml(OCOLS, 'o');
+  document.getElementById('tOrigin').innerHTML = sortList(REP.by_origin, OCOLS, SORTS.o).map(o => '<tr><td class="k" data-k="origin" data-v="' + esc(o.origin) + '">' + esc(o.origin) + '</td><td class="n">' + o.trips + '</td>' +
     '<td class="n">' + num(o.wait.min) + '</td><td class="n">' + num(o.wait.max) + '</td><td class="n"><b>' + num(o.wait.avg) + '</b></td>' +
     '<td class="n">' + num(o.load.min) + '</td><td class="n">' + num(o.load.max) + '</td><td class="n"><b>' + num(o.load.avg) + '</b></td></tr>').join('') ||
     '<tr><td colspan="8" class="empty">ไม่มีข้อมูล</td></tr>';
-  drawRows();
 }
 function dmy(s){ return s ? s.slice(8, 10) + '/' + s.slice(5, 7) + '/' + s.slice(0, 4) : ''; }
 function drawOrigin(){
@@ -3809,7 +3857,8 @@ function bars(el, list, label, val, unit, key, tip, color){
 function heat(v){ return v == null ? '' : v < 30 ? ' h1' : v < 60 ? ' h2' : v < 120 ? ' h3' : ' h4'; }
 function drawRows(){
   const q = document.getElementById('q').value.trim().toLowerCase();
-  const rows = REP.rows.filter(x => !q || [x.car, x.dest, x.order, x.origin, x.job].join(' ').toLowerCase().indexOf(q) >= 0);
+  document.getElementById('rowsHead').innerHTML = headHtml(RCOLS, 'r');
+  const rows = sortList(REP.rows.filter(x => !q || [x.car, x.dest, x.order, x.origin, x.job].join(' ').toLowerCase().indexOf(q) >= 0), RCOLS, SORTS.r);
   document.getElementById('rowCount').textContent = 'แสดง ' + num(rows.length, 0) + ' จาก ' + num(REP.n_rows, 0) + ' แถว' + (REP.n_rows > REP.rows.length ? ' (สูงสุด ' + REP.rows.length + ' แถวแรก)' : '');
   document.getElementById('rows').innerHTML = rows.map(x => '<tr><td class="k" data-k="car" data-v="' + esc(x.car) + '">' + esc(x.car) + '</td><td>' + dmy(x.date) + '</td><td>' + esc(x.order) +
     '</td><td>' + esc(x.origin) + '</td><td title="' + esc(x.dest) + '">' + esc(x.dest.length > 30 ? x.dest.slice(0, 29) + '…' : x.dest) + '</td><td>' + esc(x.vtype) + '</td><td class="n">' + esc(x.drop) +
