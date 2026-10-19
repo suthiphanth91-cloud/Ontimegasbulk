@@ -3923,7 +3923,7 @@ REPORT_HTML = """<!doctype html>
       <p class="hint">💡 ทุกงาน (drop) ในช่วงวันที่ที่เลือก · <b>กดหัวคอลัมน์</b> เพื่อเรียงน้อย→มาก / มาก→น้อย · <b>กดเบอร์รถ</b> เพื่อดูเฉพาะคันนั้น · ช่องค้นหาด้านบนพิมพ์เบอร์รถ/ปลายทาง/ออเดอร์ได้</p>
       <div class="tw"><table><thead><tr id="rowsHead"></tr></thead>
         <tbody id="rows"></tbody></table></div>
-      <p class="note">สีช่องรอโหลด/โหลด: <span class="hk" style="background:var(--h1)">ไม่ถึง 30 นาที</span><span class="hk" style="background:var(--h2)">30–60</span><span class="hk" style="background:var(--h3)">60–120</span><span class="hk" style="background:var(--h4)">เกิน 120 นาที</span></p></section>
+</section>
   </div>
 </main>
 <div id="tip"></div>
@@ -4051,7 +4051,7 @@ const RCOLS = [
   {k: 'sched', t: 'เวลาส่ง', v: x => hhmm(x.sched)},
   {k: 'arrive', t: 'ถึงปลายทาง', v: x => x.arrive ? x.arrive.slice(6, 10) + x.arrive.slice(3, 5) + x.arrive.slice(0, 2) + x.arrive.slice(10) : ''},
   {k: 'ontime', t: 'On Time', v: x => x.ontime}, {k: 'late', t: 'ช้า (นาที)', n: 1, v: x => toNum(x.late)},
-  {k: 'wait', t: 'รอโหลด', n: 1, g: 'w', v: x => x.wait}, {k: 'load', t: 'โหลด', n: 1, g: 'l', v: x => x.load},
+  {k: 'wait', t: 'รอโหลด', n: 1, v: x => x.wait}, {k: 'load', t: 'โหลด', n: 1, v: x => x.load},
   {k: 'travel', t: 'เดินทาง', n: 1, v: x => x.travel}, {k: 'unload', t: 'ส่งสินค้า', n: 1, v: x => x.unload}];
 document.addEventListener('click', e => {
   const th = e.target.closest ? e.target.closest('th.cs') : null;
@@ -4158,7 +4158,6 @@ function bars(el, list, label, val, unit, key, tip, color){
       '<div class="bval"><b>' + num(v) + '</b>' + unit + '</div></div>';
   }).join('') + '</div>';
 }
-function heat(v){ return v == null ? '' : v < 30 ? ' h1' : v < 60 ? ' h2' : v < 120 ? ' h3' : ' h4'; }
 function drawRows(){
   const q = document.getElementById('q').value.trim().toLowerCase();
   document.getElementById('rowsHead').innerHTML = headHtml(RCOLS, 'r');
@@ -4168,7 +4167,7 @@ function drawRows(){
     '</td><td>' + esc(x.origin) + '</td><td><span style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:' + jcol(x.jtype) + '"></span>' + esc(jname(x.jtype)) + '</td><td title="' + esc(x.dest) + '">' + esc(x.dest.length > 30 ? x.dest.slice(0, 29) + '…' : x.dest) + '</td><td>' + esc(x.vtype) + '</td><td class="n">' + esc(x.drop) +
     '</td><td class="n">' + esc(x.weight) + '</td><td>' + esc(x.sched) + '</td><td>' + esc(x.arrive) + '</td><td>' +
     (x.ontime === 'PASS' ? '<span class="pill ok">✓ PASS</span>' : x.ontime === 'Delay' ? '<span class="pill bad">! Delay</span>' : '<span style="color:var(--mut)">–</span>') +
-    '</td><td class="n">' + esc(x.late) + '</td><td class="n' + heat(x.wait) + '">' + num(x.wait) + '</td><td class="n' + heat(x.load) + '">' + num(x.load) +
+    '</td><td class="n">' + esc(x.late) + '</td><td class="n">' + num(x.wait) + '</td><td class="n">' + num(x.load) +
     '</td><td class="n">' + num(x.travel) + '</td><td class="n">' + num(x.unload) + '</td></tr>').join('') ||
     '<tr><td colspan="17" class="empty">ไม่มีงานในช่วงวันที่/ตัวกรองที่เลือก</td></tr>';
 }
