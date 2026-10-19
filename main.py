@@ -3002,6 +3002,7 @@ def plan_recent(n: int = Query(300)):
 # เวลาในชีตรูปแบบ "19/10/2026, 8:56:04" (นับถึงวินาที) · คอลัมน์: AB เข้าลาน, AC เข้าโหลด, AD ออกโหลด, AE ออกคลัง, AF เข้าปลายทาง, AG ออกปลายทาง,
 # AV On Time (PASS/Delay), AW นาทีที่ช้า
 REPORT_MAX_MIN = 24 * 60          # ช่วงเวลาที่เกินนี้ถือว่าบันทึกผิด ไม่นำมาเฉลี่ย
+ONTIME_TOL_MIN = float(os.environ.get("ONTIME_TOL_MIN", "30") or 30)   # ถึงช้ากว่าเวลาส่งมอบเกินกี่นาที = Delay (ตั้งที่ Vercel ได้)
 _rep_dist_cache: tuple = (0.0, None)
 
 
@@ -3107,13 +3108,24 @@ def build_ontime_report(rows: list, d_from: str, d_to: str, f: dict) -> dict:
         dep, arr, leave = _rep_dt(_cell(r, PLAN_DEPART)), _rep_dt(_cell(r, PLAN_ARRIVE)), _rep_dt(_cell(r, PLAN_LEAVE))
         raw_ot = _cell(r, PLAN_ONTIME).strip()
         av_seen[raw_ot] = av_seen.get(raw_ot, 0) + 1
-        ontime = _rep_ontime(raw_ot)
+        late_m = None                      # นาทีที่ช้า (ติดลบ = ถึงก่อน): AW ถ้าเป็นตัวเลข ไม่งั้นคำนวณจากเวลาถึงจริง − เวลาส่งมอบ
+        aw = _cell(r, PLAN_ONTIME_M).replace(",", "").strip()
+        if re.fullmatch(r"-?\d+(\.\d+)?", aw):
+            late_m = float(aw)
+        else:
+            sched = _sched_dt(_parse_date(_cell(r, PLAN_DUE)) or day, _cell_time(_cell(r, PLAN_SCHED)) or "")
+            if arr and sched:
+                late_m = round((arr - sched).total_seconds() / 60, 1)
+        if late_m is not None and arr:     # ถึงแล้ว: ตัดสินจากเวลาที่ช้าเทียบเกณฑ์ (ชีตเขียนแค่ PASS/ว่าง ไม่มีคำว่า Delay)
+            ontime = "Delay" if (late_m > ONTIME_TOL_MIN or _rep_ontime(raw_ot) == "Delay") else "PASS"
+        else:
+            ontime = _rep_ontime(raw_ot)
         dest = _cell(r, PLAN_DEST)
         km = (dist.get(dest) or {}).get(origin)
         it = {"row": i, "date": day, "job": _cell(r, 1), "car": car, "origin": origin, "dest": dest, "vtype": vt, "drop": drop,
               "order": _cell(r, PLAN_INVOICE), "weight": _cell(r, PLAN_VOLUME), "sched": _cell(r, PLAN_SCHED), "status": status,
               "arrive": arr.strftime("%d/%m/%Y %H:%M:%S") if arr else "", "ontime": ontime,
-              "late": _cell(r, PLAN_ONTIME_M),
+              "late": "" if late_m is None else (int(late_m) if float(late_m).is_integer() else late_m),
               "wait": _rep_gap(yard, lin), "load": _rep_gap(lin, lout), "travel": _rep_gap(dep, arr), "unload": _rep_gap(arr, leave),
               "km": km, "cls": _rep_class(km)}
         if f.get("status") and ontime != f["status"]:
@@ -3151,9 +3163,10 @@ def build_ontime_report(rows: list, d_from: str, d_to: str, f: dict) -> dict:
         "by_origin": [{"origin": k, "trips": len({y["job"] or y["row"] for y in v}),
                        "wait": _stat(col("wait", v)), "load": _stat(col("load", v))} for k, v in sorted(by_origin.items())],
         "by_vtype": [{"vtype": k, "trips": len(v)} for k, v in sorted(by_vtype.items())],
-        "by_dest": sorted([{"dest": k, "drops": len(v), "travel": avg(col("travel", v)), "unload": avg(col("unload", v))}
-                           for k, v in by_dest.items() if col("travel", v) or col("unload", v)],
-                          key=lambda d: -(d["travel"] or 0))[:12],
+        "by_dest": sorted([{"dest": k, "drops": len(v), "n": len(col("unload", v)), "travel": avg(col("travel", v)), "unload": avg(col("unload", v))}
+                           for k, v in by_dest.items() if col("unload", v)],
+                          key=lambda d: -(d["unload"] or 0))[:12],
+        "tol": ONTIME_TOL_MIN,
         "by_class": [{"cls": k, "n": v} for k, v in sorted(by_class.items())],
         "rows": sorted(items, key=lambda x: (x["date"], x["origin"], x["car"], x["row"]))[:600],
         "av_values": sorted(([k or "(ว่าง)", v] for k, v in av_seen.items()), key=lambda kv: -kv[1])[:12],
@@ -3604,6 +3617,19 @@ REPORT_HTML = """<!doctype html>
     #q{min-width:0 !important;width:100%}
   }
   #tip{position:fixed;z-index:50;pointer-events:none;background:#111827;color:#f9fafb;font-size:12.5px;line-height:1.5;padding:7px 10px;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.25);max-width:280px;display:none}
+  /* สีแยกตามสิ่งที่แสดง (สีติดตัวต้นทาง/ประเภทรถ เสมอ ไม่เปลี่ยนตามลำดับ) + แถบสีบนการ์ด */
+  .tile{position:relative;overflow:hidden}
+  .tile::before{content:"";position:absolute;left:0;right:0;top:0;height:3px;background:var(--tc,#2a78d6)}
+  .tile .l{display:flex;align-items:center;gap:8px}
+  .tile .ic{width:28px;height:28px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;font-size:15px;
+            background:color-mix(in srgb,var(--tc,#2a78d6) 14%,transparent)}
+  .tile.hero{background:linear-gradient(135deg,var(--hb,var(--good-bg)) 0%,var(--card) 70%)}
+  .tile.hero::before{background:var(--hc,var(--good))}
+  .rband{background:color-mix(in srgb,var(--oc,var(--s1)) 28%,transparent)}
+  .rdot{background:var(--oc,var(--s1))}
+  .rend{background:var(--oc,var(--s1))}
+  .rname i,.blab i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px;vertical-align:1px;background:var(--oc,var(--s1))}
+  .bfill{background:var(--oc,var(--s1))}
   [hidden]{display:none !important}
 </style>
 </head>
@@ -3636,14 +3662,14 @@ REPORT_HTML = """<!doctype html>
   <div class="tiles" id="tiles"></div>
   <div class="panels">
     <section class="panel w8"><div class="ph"><h3>เวลารอโหลดสินค้า แยกตามต้นทาง</h3><span class="sub">นาที · คลิกแถวเพื่อกรอง</span>
-      <div class="legend"><span><i style="width:18px;height:6px;border-radius:3px;background:var(--s1-soft)"></i>ต่ำสุด–สูงสุด</span><span><i style="width:10px;height:10px;border-radius:50%;background:var(--s1)"></i>เฉลี่ย</span></div></div>
+      <div class="legend"><span><i style="width:18px;height:6px;border-radius:3px;background:#cfd8e3"></i>ต่ำสุด–สูงสุด</span><span><i style="width:10px;height:10px;border-radius:50%;background:#6b7280"></i>เฉลี่ย</span><span style="color:var(--mut)">(สีตามต้นทาง)</span></div></div>
       <div id="cOrigin"></div></section>
     <div class="w4 col2">
       <section class="panel"><div class="ph"><h3>สัดส่วนตามระยะทาง</h3><span class="sub">สายใกล้ ≤80 · กลาง 81–250 · ไกล &gt;250 กม.</span></div>
         <div id="cClass"></div></section>
       <section class="panel"><div class="ph"><h3>จำนวนเที่ยวตามประเภทรถ</h3><span class="sub">เที่ยว</span></div><div id="cVtype"></div></section>
     </div>
-    <section class="panel w12"><div class="ph"><h3>เวลาเดินทางเฉลี่ยไปปลายทาง</h3><span class="sub">นาที · 12 ปลายทางที่ใช้เวลานานสุด</span></div><div id="cDest"></div></section>
+    <section class="panel w12"><div class="ph"><h3>เวลาที่อยู่ในสถานี (เฉลี่ย)</h3><span class="sub">นาที · เข้าปลายทาง → ออกปลายทาง · 12 สถานีที่อยู่นานสุด</span></div><div id="cDest"></div></section>
     <section class="panel w12"><div class="ph"><h3>สรุปตามต้นทาง</h3><span class="sub">นาที</span></div>
       <div class="tw" style="max-height:none"><table><thead><tr><th>ต้นทาง</th><th class="n">เที่ยว</th><th class="n">รอโหลด ต่ำสุด</th><th class="n">สูงสุด</th><th class="n">เฉลี่ย</th><th class="n">โหลด ต่ำสุด</th><th class="n">สูงสุด</th><th class="n">เฉลี่ย</th></tr></thead><tbody id="tOrigin"></tbody></table></div></section>
     <section class="panel w12"><div class="tools"><h3 style="margin:0;font-size:15px">รายการทั้งหมด</h3><span class="sub" id="rowCount" style="font-size:12.5px;color:var(--mut)"></span><span class="grow"></span>
@@ -3661,7 +3687,13 @@ let REP = null;
 const XF = {dest: '', cls: ''};
 const SELMAP = {origin: 'fOrigin', vtype: 'fVtype', car: 'fCar', drop: 'fDrop', status: 'fStatus'};
 const FNAME = {origin: 'ต้นทาง', vtype: 'ประเภทรถ', car: 'เบอร์รถ', drop: 'Drop', status: 'On Time', dest: 'ปลายทาง', cls: 'สาย'};
-const CLS = [['สายใกล้', 'var(--o1)'], ['สายกลาง', 'var(--o2)'], ['สายไกล', 'var(--o3)'], ['ไม่ทราบระยะ', 'var(--o0)']];
+const CLS = [['สายใกล้', '#1baf7a'], ['สายกลาง', '#eda100'], ['สายไกล', '#6250d6'], ['ไม่ทราบระยะ', 'var(--o0)']];
+const CAT = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948'];   // ชุดสีที่ผ่านการตรวจตาบอดสี (ลำดับคงที่)
+const ORIGINS = ['SC BPK', 'BSRC', 'PTT TANK', 'IRPC', 'UAC', 'PTT KK', 'PTT NSW', 'PTT SRT'];
+const VCOL = {'08 Tons': '#1baf7a', '10 Tons': '#2a78d6', 'Trailer': '#eb6834'};
+function hashc(s){ let h = 0; for(let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 997; return CAT[h % CAT.length]; }
+function ocol(o){ const i = ORIGINS.indexOf(o); return i >= 0 ? CAT[i] : hashc(o); }          // สีติดตัวต้นทาง
+function vcol(v){ return VCOL[v] || hashc(v); }
 function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function iso(d){ return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
 function num(v, d){ return v == null ? '–' : Number(v).toLocaleString('en-US', {maximumFractionDigits: d == null ? 1 : d}); }
@@ -3713,8 +3745,8 @@ function renderActive(){
     keys.map(k => '<button class="chip f" data-clr="' + k + '">' + FNAME[k] + ': ' + esc(getF(k)) + '  ✕</button>').join('') +
     '<button class="chip" data-clr="*">ล้างตัวกรองทั้งหมด</button>' : '';
 }
-function tile(label, value, unit, sub, extra){
-  return '<div class="tile' + (extra || '') + '"><div class="l">' + label + '</div><div class="v">' + value + (unit ? '<small>' + unit + '</small>' : '') + '</div>' +
+function tile(label, value, unit, sub, extra, color, icon){
+  return '<div class="tile' + (extra || '') + '" style="--tc:' + (color || '#2a78d6') + '"><div class="l">' + (icon ? '<span class="ic">' + icon + '</span>' : '') + label + '</div><div class="v">' + value + (unit ? '<small>' + unit + '</small>' : '') + '</div>' +
     (sub ? '<div class="s">' + sub + '</div>' : '') + '</div>';
 }
 function niceStep(mx){
@@ -3726,22 +3758,23 @@ function render(){
   const k = REP.kpi, judged = k.pass + k.delay, pct = judged ? k.pass / judged * 100 : null;
   const av = (REP.av_values || []).slice(0, 4).map(a => esc(a[0]) + ' ' + a[1]).join(' · ');
   document.getElementById('tiles').innerHTML =
-    '<div class="tile hero"><div class="l">On Time</div><div class="v">' + (pct == null ? '–' : Math.round(pct * 10) / 10 + '%') + '</div>' +
+    '<div class="tile hero" style="' + (pct != null && pct < 90 ? '--hb:var(--crit-bg);--hc:var(--crit)' : '') + '"><div class="l"><span class="ic" style="background:var(--good-bg)">⏱️</span>On Time</div><div class="v">' + (pct == null ? '–' : Math.round(pct * 10) / 10 + '%') + '</div>' +
       '<div class="pbar" data-tip="PASS ' + k.pass + ' · Delay ' + k.delay + '"><i style="width:' + (pct || 0) + '%;background:var(--good)"></i><i style="width:' + (judged ? 100 - pct : 0) + '%;background:var(--crit)"></i></div>' +
       '<div class="leg2"><span data-k="status" data-v="PASS"><span class="ico" style="background:var(--good)">✓</span>PASS <b>' + num(k.pass, 0) + '</b></span>' +
       '<span data-k="status" data-v="Delay"><span class="ico" style="background:var(--crit)">!</span>Delay <b>' + num(k.delay, 0) + '</b></span>' +
-      '<span style="cursor:default;color:var(--mut)">จาก ' + num(judged, 0) + ' drop ที่วัดผล</span></div>' +
+      '<span style="cursor:default;color:var(--mut)">จาก ' + num(judged, 0) + ' drop ที่ถึงแล้ว</span></div>' +
+      '<div class="s" style="margin-top:6px">เกณฑ์: ถึงช้ากว่าเวลาส่งมอบเกิน ' + num(REP.tol, 0) + ' นาที = Delay</div>' +
       (av ? '<div class="s" style="margin-top:6px" title="คำที่พบในช่อง On Time (คอลัมน์ AV) ของชีต">คำในชีต: ' + av + '</div>' : '') + '</div>' +
-    tile('จำนวนเที่ยว', num(k.trips, 0), '', REP.from === REP.to ? dmy(REP.from) : dmy(REP.from) + ' – ' + dmy(REP.to)) +
-    tile('งานทั้งหมด (drop)', num(REP.n_rows, 0), '', 'วัดผลแล้ว ' + num(judged, 0)) +
-    tile('รอโหลดสินค้า (เฉลี่ย)', num(k.wait), 'นาที', hm(k.wait)) +
-    tile('โหลดสินค้า (เฉลี่ย)', num(k.load), 'นาที', hm(k.load)) +
-    tile('เดินทางไปปลายทาง (เฉลี่ย)', num(k.travel), 'นาที', hm(k.travel)) +
-    tile('ส่งสินค้า (เฉลี่ย)', num(k.unload), 'นาที', hm(k.unload));
+    tile('จำนวนเที่ยว', num(k.trips, 0), '', REP.from === REP.to ? dmy(REP.from) : dmy(REP.from) + ' – ' + dmy(REP.to), '', '#2a78d6', '🚚') +
+    tile('งานทั้งหมด (drop)', num(REP.n_rows, 0), '', 'ถึงปลายทางแล้ว ' + num(judged, 0), '', '#6250d6', '📦') +
+    tile('รอโหลดสินค้า (เฉลี่ย)', num(k.wait), 'นาที', hm(k.wait), '', '#eb6834', '⏳') +
+    tile('โหลดสินค้า (เฉลี่ย)', num(k.load), 'นาที', hm(k.load), '', '#e87ba4', '⛽') +
+    tile('เดินทางไปปลายทาง (เฉลี่ย)', num(k.travel), 'นาที', hm(k.travel), '', '#1baf7a', '🛣️') +
+    tile('อยู่ที่สถานี / ส่งสินค้า (เฉลี่ย)', num(k.unload), 'นาที', hm(k.unload), '', '#eda100', '🏁');
   drawOrigin(); drawClass();
-  bars('cVtype', REP.by_vtype, x => x.vtype, x => x.trips, ' เที่ยว', 'vtype', x => x.vtype + ': ' + x.trips + ' เที่ยว');
-  bars('cDest', REP.by_dest.filter(d => d.travel != null), x => x.dest, x => x.travel, ' นาที', 'dest',
-       x => x.dest + ' · เดินทางเฉลี่ย ' + num(x.travel) + ' นาที · ' + x.drops + ' drop');
+  bars('cVtype', REP.by_vtype, x => x.vtype, x => x.trips, ' เที่ยว', 'vtype', x => x.vtype + ': ' + x.trips + ' เที่ยว', x => vcol(x.vtype));
+  bars('cDest', REP.by_dest.filter(d => d.unload != null), x => x.dest, x => x.unload, ' นาที', 'dest',
+       x => x.dest + ' · อยู่ที่สถานีเฉลี่ย ' + num(x.unload) + ' นาที · ' + x.n + ' drop', x => '#eda100');
   document.getElementById('tOrigin').innerHTML = REP.by_origin.map(o => '<tr><td class="k" data-k="origin" data-v="' + esc(o.origin) + '">' + esc(o.origin) + '</td><td class="n">' + o.trips + '</td>' +
     '<td class="n">' + num(o.wait.min) + '</td><td class="n">' + num(o.wait.max) + '</td><td class="n"><b>' + num(o.wait.avg) + '</b></td>' +
     '<td class="n">' + num(o.load.min) + '</td><td class="n">' + num(o.load.max) + '</td><td class="n"><b>' + num(o.load.avg) + '</b></td></tr>').join('') ||
@@ -3759,8 +3792,8 @@ function drawOrigin(){
   const sel = getF('origin');
   document.getElementById('cOrigin').innerHTML = '<div class="rc">' + list.map(o => {
     const w = o.wait, tip = esc(o.origin) + ' · ' + o.trips + ' เที่ยว · รอโหลด ต่ำสุด ' + num(w.min) + ' / เฉลี่ย ' + num(w.avg) + ' / สูงสุด ' + num(w.max) + ' นาที';
-    return '<div class="rrow' + (sel === o.origin ? ' on' : '') + '" data-k="origin" data-v="' + esc(o.origin) + '" data-tip="' + tip + '">' +
-      '<div class="rname">' + esc(o.origin) + '</div>' +
+    return '<div class="rrow' + (sel === o.origin ? ' on' : '') + '" style="--oc:' + ocol(o.origin) + '" data-k="origin" data-v="' + esc(o.origin) + '" data-tip="' + tip + '">' +
+      '<div class="rname"><i></i>' + esc(o.origin) + '</div>' +
       '<div class="rplot">' + grid + '<div class="rband" style="left:' + pos(w.min) + ';width:' + ((w.max - w.min) / mx * 100) + '%"></div>' +
         '<div class="rend" style="left:' + pos(w.min) + '"></div><div class="rend" style="left:' + pos(w.max) + '"></div><div class="rdot" style="left:' + pos(w.avg) + '"></div></div>' +
       '<div class="rstat">เฉลี่ย <b>' + num(w.avg) + '</b> · ' + o.trips + ' เที่ยว</div></div>';
@@ -3776,13 +3809,13 @@ function drawClass(){
     '<div class="clist">' + parts.map(c => '<div class="row' + (sel === c[0] ? ' on' : '') + '" data-k="cls" data-v="' + c[0] + '"><span class="sw" style="background:' + c[1] + '"></span><span>' + c[0] +
       '</span><span class="n">' + num(m[c[0]], 0) + '</span><span class="p">' + Math.round(m[c[0]] / tot * 100) + '%</span></div>').join('') + '</div>';
 }
-function bars(el, list, label, val, unit, key, tip){
+function bars(el, list, label, val, unit, key, tip, color){
   if(!list.length){ document.getElementById(el).innerHTML = '<div class="empty">ไม่มีข้อมูล</div>'; return; }
   const mx = Math.max.apply(null, list.map(val).concat([1])), sel = getF(key);
   document.getElementById(el).innerHTML = '<div class="bars">' + list.map(x => {
     const v = val(x);
-    return '<div class="brow' + (sel === label(x) ? ' on' : '') + '" data-k="' + key + '" data-v="' + esc(label(x)) + '" data-tip="' + esc(tip(x)) + '">' +
-      '<div class="blab">' + esc(label(x)) + '</div><div class="btrack"><div class="bfill" style="width:' + Math.max(0.5, v / mx * 100) + '%"></div></div>' +
+    return '<div class="brow' + (sel === label(x) ? ' on' : '') + '" style="--oc:' + color(x) + '" data-k="' + key + '" data-v="' + esc(label(x)) + '" data-tip="' + esc(tip(x)) + '">' +
+      '<div class="blab"><i></i>' + esc(label(x)) + '</div><div class="btrack"><div class="bfill" style="width:' + Math.max(0.5, v / mx * 100) + '%"></div></div>' +
       '<div class="bval"><b>' + num(v) + '</b>' + unit + '</div></div>';
   }).join('') + '</div>';
 }
