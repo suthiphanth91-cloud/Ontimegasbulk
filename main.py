@@ -3940,7 +3940,7 @@ REPORT_HTML = """<!doctype html>
   <div class="cmpnote" id="cmpNote"></div>
   <div class="tiles" id="tiles"></div>
   <section class="panel" id="trendP" hidden style="margin-bottom:12px"><div class="ph"><h3>แนวโน้มรายวัน</h3><span class="sub" id="trendSub"></span></div>
-    <p class="hint">💡 ดูว่าแต่ละวันดีขึ้นหรือแย่ลง · <b>On Time ยิ่งสูงยิ่งดี</b> · <b>เวลารอโหลด/โหลด ยิ่งต่ำยิ่งดี</b> · ชี้ที่จุดเพื่อดูตัวเลข</p>
+    <p class="hint">💡 ดูว่าแต่ละวันเพิ่มขึ้นหรือลดลง · <b>On Time ยิ่งสูงยิ่งดี</b> · <b>เวลารอโหลด/โหลด ยิ่งต่ำยิ่งดี</b> · ชี้ที่จุดเพื่อดูตัวเลข</p>
     <div class="tgrid"><div class="tchart" id="tOt"></div><div class="tchart" id="tWl"></div></div></section>
   <div class="panels">
     <section class="panel w8 fillp"><div class="ph"><h3>เวลารอโหลด + โหลดสินค้า แยกตามต้นทาง</h3><span class="sub">นาที (เฉลี่ย)</span>
@@ -4037,14 +4037,13 @@ function tile(label, value, unit, sub, extra, color, icon, delta){
     (sub ? '<div class="s">' + sub + '</div>' : '') + (delta || '') + '</div>';
 }
 // เทียบกับช่วงก่อน: better = 'low' (ต่ำดี เช่น นาที) / 'high' (สูงดี เช่น %) / '' (แค่บอกขึ้นลง)
-function delta(cur, prev, unit, better, dp){      // แสดงแค่ "ดีขึ้น" / "แย่ลง" / "เท่าเดิม" (ชี้ที่คำเพื่อดูตัวเลข)
+function delta(cur, prev, unit, better, dp){      // "เพิ่มขึ้น X นาที" (แดง) / "ลดลง X นาที" (เขียว) / "เท่าเดิม" · เที่ยว/drop ไม่ใส่สี
   if(!REP.prev || cur == null || prev == null) return '';
   const r = v => dp ? Math.round(v * 10) / 10 : cm(v);
-  const d = Math.round((r(cur) - r(prev)) * 10) / 10;
-  if(d === 0) return '<div class="dl same" data-tip="' + esc('ช่วงก่อน ' + num(prev, dp ? 1 : null) + unit) + '">เท่าเดิม</div>';
-  const good = better === 'low' ? d < 0 : d > 0;
-  const tip = (d > 0 ? '▲ ' : '▼ ') + Math.abs(d).toLocaleString('en-US') + unit + ' · ช่วงก่อน ' + num(prev, dp ? 1 : null) + unit;
-  return '<div class="dl ' + (good ? 'good' : 'bad') + '" data-tip="' + esc(tip) + '">' + (good ? 'ดีขึ้น' : 'แย่ลง') + '</div>';
+  const d = Math.round((r(cur) - r(prev)) * 10) / 10, tip = esc('ช่วงก่อน ' + num(prev, dp ? 1 : null) + unit);
+  if(d === 0) return '<div class="dl same" data-tip="' + tip + '">เท่าเดิม</div>';
+  const cls = better === 'low' ? (d < 0 ? 'good' : 'bad') : 'nt';
+  return '<div class="dl ' + cls + '" data-tip="' + tip + '">' + (d > 0 ? 'เพิ่มขึ้น ' : 'ลดลง ') + Math.abs(d).toLocaleString('en-US') + unit + '</div>';
 }
 function pctOf(k){ const j = k.pass + k.delay; return j ? k.pass / j * 100 : null; }
 // กราฟเส้นรายวัน (SVG) — series: [{name, color, get}] · fmt: แสดงค่า
@@ -4085,7 +4084,7 @@ function niceStep(mx){
 function render(){
   renderActive();
   const k = REP.kpi, judged = k.pass + k.delay, pct = judged ? k.pass / judged * 100 : null, pk = REP.prev ? REP.prev.kpi : {}, tgt = REP.target || 95;
-  document.getElementById('cmpNote').textContent = REP.prev ? 'ดีขึ้น / แย่ลง = เทียบกับช่วงก่อน: ' + (REP.prev.from === REP.prev.to ? dmy(REP.prev.from) : dmy(REP.prev.from) + ' – ' + dmy(REP.prev.to)) : '';
+  document.getElementById('cmpNote').textContent = REP.prev ? 'เพิ่มขึ้น / ลดลง = เทียบกับช่วงก่อน: ' + (REP.prev.from === REP.prev.to ? dmy(REP.prev.from) : dmy(REP.prev.from) + ' – ' + dmy(REP.prev.to)) : '';
   document.getElementById('tiles').innerHTML =
     '<div class="tile hero" style="' + (pct != null && pct < tgt ? '--hb:var(--crit-bg);--hc:var(--crit)' : '') + '"><div class="l"><span class="ic" style="background:var(--good-bg)">⏱️</span>On Time</div><div class="v">' + (pct == null ? '–' : Math.round(pct * 10) / 10 + '%') + '</div>' +
       '<div class="pbar" data-tip="PASS ' + k.pass + ' · Delay ' + k.delay + '"><i style="width:' + (pct || 0) + '%;background:var(--good)"></i><i style="width:' + (judged ? 100 - pct : 0) + '%;background:var(--crit)"></i></div>' +
@@ -4093,7 +4092,7 @@ function render(){
       '<span data-k="status" data-v="Delay"><span class="ico" style="background:var(--crit)">!</span>Delay <b>' + num(k.delay, 0) + '</b></span>' +
       '<span style="cursor:default;color:var(--mut)">จาก ' + num(judged, 0) + ' drop ที่มีผลในชีต</span></div>' +
       (pct == null ? '' : '<div class="dl ' + (pct >= tgt ? 'good' : 'bad') + '" data-tip="' + esc('เป้า On Time ' + tgt + '% ขึ้นไป' + (REP.prev && pctOf(REP.prev.kpi) != null ? ' · ช่วงก่อน ' + num(pctOf(REP.prev.kpi), 1) + '%' : '')) + '">' +
-        (pct >= tgt ? 'ดี · ผ่านเป้า ' + tgt + '%' : 'แย่ · ต่ำกว่าเป้า ' + tgt + '%') + '</div>') +
+        (pct >= tgt ? 'ผ่านเป้า ' + tgt + '%' : 'ต่ำกว่าเป้า ' + tgt + '%') + '</div>') +
       '<div class="s" style="margin-top:6px">💡 <b>PASS</b> = ส่งถึงลูกค้าไม่ช้าเกิน 30 นาที · <b>Delay</b> = ช้าเกิน 30 นาที · <b>เป้า ' + tgt + '% ขึ้นไป</b></div></div>' +
     tile('จำนวนเที่ยว', num(k.trips, 0), '', REP.from === REP.to ? dmy(REP.from) : dmy(REP.from) + ' – ' + dmy(REP.to), '', '#2a78d6', '🚚', delta(k.trips, pk.trips, ' เที่ยว', 'high')) +
     tile('งานทั้งหมด (drop)', num(REP.n_rows, 0), '', 'จุดส่งทั้งหมด · มีผล On Time ' + num(judged, 0), '', '#6250d6', '📦', delta(REP.n_rows, REP.prev && REP.prev.n_rows, ' drop', 'high')) +
