@@ -3129,6 +3129,7 @@ def plan_recent(n: int = Query(300)):
 # ─── รายงาน On Time (อ่านอย่างเดียวจากชีตแผนงานจริง ไม่มีการเขียนใดๆ) ───────────────────────────────
 # เวลาในชีตรูปแบบ "19/10/2026, 8:56:04" (นับถึงวินาที) · คอลัมน์: AB เข้าลาน, AC เข้าโหลด, AD ออกโหลด, AE ออกคลัง, AF เข้าปลายทาง, AG ออกปลายทาง,
 # AV On Time (PASS/Delay), AW นาทีที่ช้า
+ONTIME_TARGET = float(os.environ.get("ONTIME_TARGET", "95") or 95)   # เป้า On Time (%) — การ์ดบอก ดี/แย่ เทียบเป้านี้
 REPORT_MAX_MIN = 24 * 60          # ช่วงเวลาที่เกินนี้ถือว่าบันทึกผิด ไม่นำมาเฉลี่ย
 _rep_dist_cache: tuple = (0.0, None)
 
@@ -3350,6 +3351,7 @@ def report_ontime(date_from: str = Query(None, alias="from"), date_to: str = Que
     p_from = (datetime.strptime(d_from, "%Y-%m-%d") - timedelta(days=n)).strftime("%Y-%m-%d")
     prev = build_ontime_report(rows, p_from, p_to, f)
     rep["prev"] = {"from": p_from, "to": p_to, "n_rows": prev["n_rows"], "kpi": prev["kpi"]}
+    rep["target"] = ONTIME_TARGET
     return rep
 
 
@@ -4082,16 +4084,17 @@ function niceStep(mx){
 }
 function render(){
   renderActive();
-  const k = REP.kpi, judged = k.pass + k.delay, pct = judged ? k.pass / judged * 100 : null, pk = REP.prev ? REP.prev.kpi : {};
+  const k = REP.kpi, judged = k.pass + k.delay, pct = judged ? k.pass / judged * 100 : null, pk = REP.prev ? REP.prev.kpi : {}, tgt = REP.target || 95;
   document.getElementById('cmpNote').textContent = REP.prev ? 'ดีขึ้น / แย่ลง = เทียบกับช่วงก่อน: ' + (REP.prev.from === REP.prev.to ? dmy(REP.prev.from) : dmy(REP.prev.from) + ' – ' + dmy(REP.prev.to)) : '';
   document.getElementById('tiles').innerHTML =
-    '<div class="tile hero" style="' + (pct != null && pct < 90 ? '--hb:var(--crit-bg);--hc:var(--crit)' : '') + '"><div class="l"><span class="ic" style="background:var(--good-bg)">⏱️</span>On Time</div><div class="v">' + (pct == null ? '–' : Math.round(pct * 10) / 10 + '%') + '</div>' +
+    '<div class="tile hero" style="' + (pct != null && pct < tgt ? '--hb:var(--crit-bg);--hc:var(--crit)' : '') + '"><div class="l"><span class="ic" style="background:var(--good-bg)">⏱️</span>On Time</div><div class="v">' + (pct == null ? '–' : Math.round(pct * 10) / 10 + '%') + '</div>' +
       '<div class="pbar" data-tip="PASS ' + k.pass + ' · Delay ' + k.delay + '"><i style="width:' + (pct || 0) + '%;background:var(--good)"></i><i style="width:' + (judged ? 100 - pct : 0) + '%;background:var(--crit)"></i></div>' +
       '<div class="leg2"><span data-k="status" data-v="PASS"><span class="ico" style="background:var(--good)">✓</span>PASS <b>' + num(k.pass, 0) + '</b></span>' +
       '<span data-k="status" data-v="Delay"><span class="ico" style="background:var(--crit)">!</span>Delay <b>' + num(k.delay, 0) + '</b></span>' +
       '<span style="cursor:default;color:var(--mut)">จาก ' + num(judged, 0) + ' drop ที่มีผลในชีต</span></div>' +
-      delta(pct, REP.prev ? pctOf(REP.prev.kpi) : null, '%', 'high', true) +
-      '<div class="s" style="margin-top:6px">💡 <b>PASS</b> = ส่งถึงลูกค้าไม่ช้าเกิน 30 นาที · <b>Delay</b> = ช้าเกิน 30 นาที · <b>% ยิ่งสูงยิ่งดี</b></div></div>' +
+      (pct == null ? '' : '<div class="dl ' + (pct >= tgt ? 'good' : 'bad') + '" data-tip="' + esc('เป้า On Time ' + tgt + '% ขึ้นไป' + (REP.prev && pctOf(REP.prev.kpi) != null ? ' · ช่วงก่อน ' + num(pctOf(REP.prev.kpi), 1) + '%' : '')) + '">' +
+        (pct >= tgt ? 'ดี · ผ่านเป้า ' + tgt + '%' : 'แย่ · ต่ำกว่าเป้า ' + tgt + '%') + '</div>') +
+      '<div class="s" style="margin-top:6px">💡 <b>PASS</b> = ส่งถึงลูกค้าไม่ช้าเกิน 30 นาที · <b>Delay</b> = ช้าเกิน 30 นาที · <b>เป้า ' + tgt + '% ขึ้นไป</b></div></div>' +
     tile('จำนวนเที่ยว', num(k.trips, 0), '', REP.from === REP.to ? dmy(REP.from) : dmy(REP.from) + ' – ' + dmy(REP.to), '', '#2a78d6', '🚚', delta(k.trips, pk.trips, ' เที่ยว', 'high')) +
     tile('งานทั้งหมด (drop)', num(REP.n_rows, 0), '', 'จุดส่งทั้งหมด · มีผล On Time ' + num(judged, 0), '', '#6250d6', '📦', delta(REP.n_rows, REP.prev && REP.prev.n_rows, ' drop', 'high')) +
     tile('รอโหลดสินค้า (เฉลี่ย)', num(k.wait), 'นาที', sub2('เข้าลาน → เริ่มโหลด', k.wait), '', '#7c5cd6', '⏳', delta(k.wait, pk.wait, ' นาที', 'low')) +
