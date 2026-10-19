@@ -3002,7 +3002,6 @@ def plan_recent(n: int = Query(300)):
 # เวลาในชีตรูปแบบ "19/10/2026, 8:56:04" (นับถึงวินาที) · คอลัมน์: AB เข้าลาน, AC เข้าโหลด, AD ออกโหลด, AE ออกคลัง, AF เข้าปลายทาง, AG ออกปลายทาง,
 # AV On Time (PASS/Delay), AW นาทีที่ช้า
 REPORT_MAX_MIN = 24 * 60          # ช่วงเวลาที่เกินนี้ถือว่าบันทึกผิด ไม่นำมาเฉลี่ย
-ONTIME_TOL_MIN = float(os.environ.get("ONTIME_TOL_MIN", "30") or 30)   # ถึงช้ากว่าเวลาส่งมอบเกินกี่นาที = Delay (ตั้งที่ Vercel ได้)
 _rep_dist_cache: tuple = (0.0, None)
 
 
@@ -3108,24 +3107,13 @@ def build_ontime_report(rows: list, d_from: str, d_to: str, f: dict) -> dict:
         dep, arr, leave = _rep_dt(_cell(r, PLAN_DEPART)), _rep_dt(_cell(r, PLAN_ARRIVE)), _rep_dt(_cell(r, PLAN_LEAVE))
         raw_ot = _cell(r, PLAN_ONTIME).strip()
         av_seen[raw_ot] = av_seen.get(raw_ot, 0) + 1
-        late_m = None                      # นาทีที่ช้า (ติดลบ = ถึงก่อน): AW ถ้าเป็นตัวเลข ไม่งั้นคำนวณจากเวลาถึงจริง − เวลาส่งมอบ
-        aw = _cell(r, PLAN_ONTIME_M).replace(",", "").strip()
-        if re.fullmatch(r"-?\d+(\.\d+)?", aw):
-            late_m = float(aw)
-        else:
-            sched = _sched_dt(_parse_date(_cell(r, PLAN_DUE)) or day, _cell_time(_cell(r, PLAN_SCHED)) or "")
-            if arr and sched:
-                late_m = round((arr - sched).total_seconds() / 60, 1)
-        if late_m is not None and arr:     # ถึงแล้ว: ตัดสินจากเวลาที่ช้าเทียบเกณฑ์ (ชีตเขียนแค่ PASS/ว่าง ไม่มีคำว่า Delay)
-            ontime = "Delay" if (late_m > ONTIME_TOL_MIN or _rep_ontime(raw_ot) == "Delay") else "PASS"
-        else:
-            ontime = _rep_ontime(raw_ot)
+        ontime = _rep_ontime(raw_ot)      # PASS/Delay อ่านจากชีต (AV) ตรงๆ — ชีตตัดสินเอง (ช้าเกิน 30 นาที = Delay)
         dest = _cell(r, PLAN_DEST)
         km = (dist.get(dest) or {}).get(origin)
         it = {"row": i, "date": day, "job": _cell(r, 1), "car": car, "origin": origin, "dest": dest, "vtype": vt, "drop": drop,
               "order": _cell(r, PLAN_INVOICE), "weight": _cell(r, PLAN_VOLUME), "sched": _cell(r, PLAN_SCHED), "status": status,
               "arrive": arr.strftime("%d/%m/%Y %H:%M:%S") if arr else "", "ontime": ontime,
-              "late": "" if late_m is None else (int(late_m) if float(late_m).is_integer() else late_m),
+              "late": _cell(r, PLAN_ONTIME_M),
               "wait": _rep_gap(yard, lin), "load": _rep_gap(lin, lout), "travel": _rep_gap(dep, arr), "unload": _rep_gap(arr, leave),
               "km": km, "cls": _rep_class(km)}
         if f.get("status") and ontime != f["status"]:
@@ -3166,7 +3154,6 @@ def build_ontime_report(rows: list, d_from: str, d_to: str, f: dict) -> dict:
         "by_dest": sorted([{"dest": k, "drops": len(v), "n": len(col("unload", v)), "travel": avg(col("travel", v)), "unload": avg(col("unload", v))}
                            for k, v in by_dest.items() if col("unload", v)],
                           key=lambda d: -(d["unload"] or 0))[:12],
-        "tol": ONTIME_TOL_MIN,
         "by_class": [{"cls": k, "n": v} for k, v in sorted(by_class.items())],
         "rows": sorted(items, key=lambda x: (x["date"], x["origin"], x["car"], x["row"]))[:600],
         "av_values": sorted(([k or "(ว่าง)", v] for k, v in av_seen.items()), key=lambda kv: -kv[1])[:12],
@@ -3762,11 +3749,11 @@ function render(){
       '<div class="pbar" data-tip="PASS ' + k.pass + ' · Delay ' + k.delay + '"><i style="width:' + (pct || 0) + '%;background:var(--good)"></i><i style="width:' + (judged ? 100 - pct : 0) + '%;background:var(--crit)"></i></div>' +
       '<div class="leg2"><span data-k="status" data-v="PASS"><span class="ico" style="background:var(--good)">✓</span>PASS <b>' + num(k.pass, 0) + '</b></span>' +
       '<span data-k="status" data-v="Delay"><span class="ico" style="background:var(--crit)">!</span>Delay <b>' + num(k.delay, 0) + '</b></span>' +
-      '<span style="cursor:default;color:var(--mut)">จาก ' + num(judged, 0) + ' drop ที่ถึงแล้ว</span></div>' +
-      '<div class="s" style="margin-top:6px">เกณฑ์: ถึงช้ากว่าเวลาส่งมอบเกิน ' + num(REP.tol, 0) + ' นาที = Delay</div>' +
+      '<span style="cursor:default;color:var(--mut)">จาก ' + num(judged, 0) + ' drop ที่มีผลในชีต</span></div>' +
+      '<div class="s" style="margin-top:6px">ผล PASS/Delay อ่านจากชีต (คอลัมน์ AV · ช้าเกิน 30 นาที = Delay)</div>' +
       (av ? '<div class="s" style="margin-top:6px" title="คำที่พบในช่อง On Time (คอลัมน์ AV) ของชีต">คำในชีต: ' + av + '</div>' : '') + '</div>' +
     tile('จำนวนเที่ยว', num(k.trips, 0), '', REP.from === REP.to ? dmy(REP.from) : dmy(REP.from) + ' – ' + dmy(REP.to), '', '#2a78d6', '🚚') +
-    tile('งานทั้งหมด (drop)', num(REP.n_rows, 0), '', 'ถึงปลายทางแล้ว ' + num(judged, 0), '', '#6250d6', '📦') +
+    tile('งานทั้งหมด (drop)', num(REP.n_rows, 0), '', 'มีผล On Time ' + num(judged, 0), '', '#6250d6', '📦') +
     tile('รอโหลดสินค้า (เฉลี่ย)', num(k.wait), 'นาที', hm(k.wait), '', '#eb6834', '⏳') +
     tile('โหลดสินค้า (เฉลี่ย)', num(k.load), 'นาที', hm(k.load), '', '#e87ba4', '⛽') +
     tile('เดินทางไปปลายทาง (เฉลี่ย)', num(k.travel), 'นาที', hm(k.travel), '', '#1baf7a', '🛣️') +
