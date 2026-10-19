@@ -3728,6 +3728,13 @@ REPORT_HTML = """<!doctype html>
   .plist .pr .n{font-weight:700;text-align:right}
   .plist .pr .pc{color:var(--mut);text-align:right}
   .pdly{display:inline-block;margin-left:6px;padding:0 6px;border-radius:999px;font-size:11px;font-weight:700;background:var(--crit-bg);color:var(--crit)}
+  .btn2{font:inherit;font-size:13.5px;font-weight:600;padding:7px 14px;border-radius:9px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+  .btn2:hover{background:var(--hover)}
+  .btn2:disabled{opacity:.6;cursor:wait}
+  @media (max-width:820px){ .btn2{width:100%} }
+  .snapcap{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline;padding:4px 2px 12px}
+  .snapcap b{font-size:18px}
+  .snapcap span{font-size:12.5px;color:var(--mut)}
   [hidden]{display:none !important}
 </style>
 </head>
@@ -3745,9 +3752,10 @@ REPORT_HTML = """<!doctype html>
   </div>
   <div class="rng"><input type="date" id="dFrom" aria-label="ตั้งแต่วันที่"><span style="color:var(--mut)">–</span><input type="date" id="dTo" aria-label="ถึงวันที่"></div>
   <button class="btn" id="go">ดูรายงาน</button>
+  <button class="btn2" id="snap" title="บันทึกหน้ารายงานเป็นรูป เพื่อส่งต่อทาง LINE / อีเมล">📷 แคปส่ง</button>
 </div></header>
 <main id="main">
-  <div class="fbar">
+  <div class="fbar" data-nosnap="1">
     <span class="lbl">ตัวกรอง</span>
     <select id="fOrigin"><option value="">ต้นทาง: ทั้งหมด</option></select>
     <select id="fVtype"><option value="">ประเภทรถ: ทั้งหมด</option></select>
@@ -3755,7 +3763,7 @@ REPORT_HTML = """<!doctype html>
     <select id="fDrop"><option value="">Drop: ทั้งหมด</option></select>
     <select id="fStatus"><option value="">On Time: ทั้งหมด</option><option value="PASS">PASS</option><option value="Delay">Delay</option></select>
   </div>
-  <div class="chips" id="active"></div>
+  <div class="chips" id="active" data-nosnap="1"></div>
   <div id="err" class="err" hidden></div>
   <div class="tiles" id="tiles"></div>
   <div class="panels">
@@ -3774,7 +3782,7 @@ REPORT_HTML = """<!doctype html>
     <section class="panel w6"><div class="ph"><h3>สาเหตุ On Time / ล่าช้า</h3><span class="sub" id="whySub"></span></div><p class="hint">💡 จากคอลัมน์ <b>สาเหตุ On Time</b> ในชีต · นับเป็นจำนวนงาน · กดชื่อสาเหตุเพื่อดูงานนั้น</p><div id="cWhy"></div></section>
     <section class="panel w6"><div class="ph"><h3>สาเหตุแก้ไขงาน</h3><span class="sub" id="fixSub"></span></div><p class="hint">💡 จากคอลัมน์ <b>สาเหตุแก้ไขงาน</b> ในชีต · เช่น ลูกค้ายกเลิก, ปลายทางใหม่ · กดชื่อสาเหตุเพื่อดูงานนั้น</p><div id="cFix"></div></section>
     <section class="panel w12"><div class="ph"><h3>เวลาที่อยู่ในสถานี (เฉลี่ย)</h3><span class="sub">นาที</span></div><p class="hint">💡 รถจอดอยู่ที่ปลายทางนานเท่าไร (<b>ถึงปลายทาง → ออกจากปลายทาง</b>) แยกตามประเภทงาน · <b>ตัวเลขมาก = ลงของนาน</b> · เรียงจากนานสุดลงมา · กดหัวการ์ดหรือชื่อปลายทางเพื่อกรอง</p><div id="cDest"></div></section>
-    <section class="panel w12"><div class="tools"><h3 style="margin:0;font-size:15px">รายการทั้งหมด</h3><span class="sub" id="rowCount" style="font-size:12.5px;color:var(--mut)"></span><span class="grow"></span>
+    <section class="panel w12" data-nosnap="1"><div class="tools"><h3 style="margin:0;font-size:15px">รายการทั้งหมด</h3><span class="sub" id="rowCount" style="font-size:12.5px;color:var(--mut)"></span><span class="grow"></span>
       <input type="search" id="q" placeholder="ค้นหา รถ / ปลายทาง / ออเดอร์" style="min-width:260px"></div>
       <p class="hint">💡 ทุกงาน (drop) ในช่วงวันที่ที่เลือก · <b>กดหัวคอลัมน์</b> เพื่อเรียงน้อย→มาก / มาก→น้อย · <b>กดเบอร์รถ</b> เพื่อดูเฉพาะคันนั้น · ช่องค้นหาด้านบนพิมพ์เบอร์รถ/ปลายทาง/ออเดอร์ได้</p>
       <div class="tw"><table><thead><tr id="rowsHead"></tr></thead>
@@ -4051,6 +4059,49 @@ document.querySelectorAll('#presets button').forEach(b => { b.onclick = () => {
   setRange(a, z); load();
 }; });
 document.getElementById('go').onclick = () => load();
+// ── แคปส่ง: บันทึกหน้ารายงาน (การ์ด + กราฟ + ตารางสรุป) เป็นรูป PNG · มือถือเปิดหน้าแชร์ (LINE ฯลฯ) ได้เลย ──
+let H2I = null;
+function loadH2I(){
+  if(H2I) return H2I;
+  H2I = new Promise((ok, bad) => {
+    const sc = document.createElement('script');
+    sc.src = 'https://cdn.jsdelivr.net/npm/html-to-image@1.11.11/dist/html-to-image.js';
+    sc.integrity = 'sha384-UbfRVKN3/elS1r7JcK2FhmPP+KlJ4CvYwbyYD7tH+uTkbT9bNJr9eJeQ0FoFbAgz';
+    sc.crossOrigin = 'anonymous';
+    sc.onload = () => ok(window.htmlToImage);
+    sc.onerror = () => { H2I = null; bad(new Error('โหลดตัวแคปไม่ได้')); };
+    document.head.appendChild(sc);
+  });
+  return H2I;
+}
+document.getElementById('snap').onclick = async () => {
+  if(!REP) return;
+  const b = document.getElementById('snap'), main = document.getElementById('main');
+  b.disabled = true; b.textContent = '⏳ กำลังแคป…';
+  const keys = Object.keys(FNAME).filter(k => getF(k));
+  const cap = document.createElement('div'); cap.className = 'snapcap';
+  const rng = REP.from === REP.to ? dmy(REP.from) : dmy(REP.from) + ' – ' + dmy(REP.to);
+  cap.innerHTML = '<b>รายงาน On Time · ' + rng + '</b><span>' + (keys.length ? 'กรอง: ' + keys.map(k => FNAME[k] + ' ' + esc(getF(k))).join(' · ') + ' · ' : '') +
+    'แคปเมื่อ ' + new Date().toLocaleString('th-TH', {dateStyle: 'short', timeStyle: 'short'}) + '</span>';
+  main.insertBefore(cap, main.firstChild);
+  try{
+    const lib = await loadH2I();
+    const blob = await lib.toBlob(main, {pixelRatio: 2, skipFonts: true, backgroundColor: getComputedStyle(document.body).backgroundColor,
+      filter: n => !(n.dataset && n.dataset.nosnap)});
+    const name = 'ontime_' + REP.from + (REP.to !== REP.from ? '_' + REP.to : '') + '.png';
+    const file = new File([blob], name, {type: 'image/png'});
+    if(navigator.canShare && navigator.canShare({files: [file]}) && matchMedia('(pointer:coarse)').matches){
+      try{ await navigator.share({files: [file], title: 'รายงาน On Time ' + rng}); }catch(e){}
+    }else{
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+      document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+    }
+  }catch(e){
+    alert('แคปไม่สำเร็จ: ' + (e && e.message ? e.message : e) + ' — ลองใหม่อีกครั้ง หรือใช้ปุ่มแคปหน้าจอของเครื่องแทน');
+  }finally{
+    cap.remove(); b.disabled = false; b.textContent = '📷 แคปส่ง';
+  }
+};
 ['dFrom', 'dTo'].forEach(id => { document.getElementById(id).onchange = () => { markPreset(); load(); }; });
 ['fOrigin', 'fVtype', 'fCar', 'fDrop', 'fStatus'].forEach(id => { document.getElementById(id).onchange = () => load(true); });
 document.getElementById('q').oninput = () => { if(REP) drawRows(); };
