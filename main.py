@@ -3640,16 +3640,28 @@ REPORT_HTML = """<!doctype html>
   th.cs.act .ar{opacity:1}
   @media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])) th.cs.act{color:#9ec5f4}}
   /* เวลาอยู่ในสถานี: แยกกลุ่มตามประเภทงาน */
-  .dgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(440px,100%),1fr));gap:18px 30px}
-  .dgrp{min-width:0}
-  .dgh{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 8px;margin-bottom:4px;border-radius:8px;cursor:pointer;
-       background:color-mix(in srgb,var(--oc) 10%,transparent);border-left:4px solid var(--oc)}
-  .dgh:hover{background:color-mix(in srgb,var(--oc) 18%,transparent)}
-  .dgh.on{outline:2px solid #2563eb;outline-offset:1px}
-  .dgh b{font-size:14px}
-  .dgh .m{font-size:12px;color:var(--mut)}
-  .dgh .m b{font-size:12.5px;color:var(--ink)}
-  .dmore{font-size:12px;color:var(--mut);padding:6px 6px 0}
+  /* กลุ่มเรียงแบบคอลัมน์ไหล (ไม่มีช่องว่าง) · กว้างพอ = 2 คอลัมน์ · มือถือ = 1 */
+  .dgrid{display:flex;gap:24px;align-items:stretch}
+  .dcol{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:16px}
+  .dcol .dgrp:last-child{flex:1 1 auto}
+  .dgrp{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--card)}
+  .dgh{display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;border-top:4px solid var(--oc);
+       background:color-mix(in srgb,var(--oc) 9%,var(--card))}
+  .dgh:hover{background:color-mix(in srgb,var(--oc) 16%,var(--card))}
+  .dgh.on{box-shadow:inset 0 0 0 2px #2563eb}
+  .dgh .nm{font-size:14.5px;font-weight:700;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .dgh .st{margin-left:auto;text-align:right;line-height:1.25;white-space:nowrap}
+  .dgh .st b{font-size:17px}
+  .dgh .st small{display:block;font-size:11.5px;color:var(--mut)}
+  .dgrp .bars{grid-template-columns:minmax(150px,42%) 1fr 78px;column-gap:0;padding:4px 6px 6px}
+  .dgrp .brow > *{padding:8px 0}
+  .dgrp .brow:last-child > *{border-bottom:0}
+  .dgrp .blab{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.35;padding:6px 12px 6px 8px !important}
+  .dgrp .btrack{height:auto;align-self:stretch}
+  .dgrp .bfill{top:50%;margin-top:-5px}
+  .dgrp .bval{padding-left:10px !important}
+  .dmore{font-size:12px;color:var(--mut);padding:2px 14px 10px}
+  @media (max-width:820px){ .dgrid{flex-direction:column;gap:16px} .dgrp .bars{grid-template-columns:minmax(96px,40%) 1fr 66px} .dgh .st b{font-size:15px} }
   [hidden]{display:none !important}
 </style>
 </head>
@@ -3879,17 +3891,23 @@ function drawDest(){
   if(!list.length){ el.innerHTML = '<div class="empty">ไม่มีข้อมูลเวลาเข้า–ออกปลายทาง</div>'; return; }
   const mx = Math.max.apply(null, list.map(d => d.unload).concat([1])), sel = getF('dest'), jsel = getF('jtype');
   const groups = (REP.by_jtype || []).filter(g => list.some(d => d.jtype === g.jtype));
-  el.innerHTML = '<div class="dgrid">' + groups.map(g => {
-    const ds = list.filter(d => d.jtype === g.jtype), c = jcol(g.jtype), nm = jname(g.jtype);
+  const card = g => {
+    const ds = list.filter(d => d.jtype === g.jtype), c = jcol(g.jtype), nm = jname(g.jtype), gmx = Math.max.apply(null, ds.map(d => d.unload).concat([1]));
     return '<div class="dgrp" style="--oc:' + c + '">' +
       '<div class="dgh' + (jsel === nm ? ' on' : '') + '" data-k="jtype" data-v="' + esc(nm) + '" data-tip="' + esc(nm + ' · อยู่ที่สถานีเฉลี่ย ' + num(g.unload) + ' นาที · ' + g.drops + ' drop') + '">' +
-        '<b>' + esc(nm) + '</b><span class="m">เฉลี่ย <b>' + num(g.unload) + '</b> นาที · ' + ds.length + ' ปลายทาง · ' + g.drops + ' drop</span></div>' +
+        '<span class="nm">' + esc(nm) + '</span><span class="st"><b>' + num(g.unload) + '</b> นาที<small>เฉลี่ย · ' + ds.length + ' ปลายทาง · ' + g.drops + ' drop</small></span></div>' +
       '<div class="bars">' + ds.slice(0, TOP).map(x =>
         '<div class="brow' + (sel === x.dest ? ' on' : '') + '" style="--oc:' + c + '" data-k="dest" data-v="' + esc(x.dest) + '" data-tip="' + esc(nm + ' · ' + x.dest + ' · อยู่ที่สถานีเฉลี่ย ' + num(x.unload) + ' นาที · ' + x.n + ' drop') + '">' +
-        '<div class="blab"><i></i>' + esc(x.dest) + '</div><div class="btrack"><div class="bfill" style="width:' + Math.max(0.5, x.unload / mx * 100) + '%"></div></div>' +
+        '<div class="blab" title="' + esc(x.dest) + '"><i></i>' + esc(x.dest) + '</div><div class="btrack"><div class="bfill" style="width:' + Math.max(0.5, x.unload / gmx * 100) + '%"></div></div>' +
         '<div class="bval"><b>' + num(x.unload) + '</b> นาที</div></div>').join('') + '</div>' +
       (ds.length > TOP ? '<div class="dmore">+ อีก ' + (ds.length - TOP) + ' ปลายทาง (ดูในตารางด้านล่าง)</div>' : '') + '</div>';
-  }).join('') + '</div>';
+  };
+  // แบ่ง 2 คอลัมน์ให้สูงใกล้กัน (กลุ่มใหญ่ลงคอลัมน์ที่เตี้ยกว่า) แล้วยืดการ์ดสุดท้ายให้จบเสมอกัน
+  const cols = [[], []], hgt = [0, 0];
+  groups.map(g => ({g: g, h: 2 + Math.min(TOP, list.filter(d => d.jtype === g.jtype).length)})).sort((a, b) => b.h - a.h)
+    .forEach(x => { const i = hgt[0] <= hgt[1] ? 0 : 1; cols[i].push(x.g); hgt[i] += x.h; });
+  cols.forEach(c => c.sort((a, b) => b.drops - a.drops));
+  el.innerHTML = '<div class="dgrid">' + cols.filter(c => c.length).map(c => '<div class="dcol">' + c.map(card).join('') + '</div>').join('') + '</div>';
 }
 function bars(el, list, label, val, unit, key, tip, color){
   if(!list.length){ document.getElementById(el).innerHTML = '<div class="empty">ไม่มีข้อมูล</div>'; return; }
