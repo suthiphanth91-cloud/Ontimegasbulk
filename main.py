@@ -3286,8 +3286,19 @@ def build_ontime_report(rows: list, d_from: str, d_to: str, f: dict) -> dict:
         if x["ontime"] or x["travel"] is not None:
             by_class[x["cls"]] = by_class.get(x["cls"], 0) + 1
     avg = lambda vals: round(sum(vals) / len(vals), 1) if vals else None
+    by_day, day_items = [], _group(items, "date")
+    d0 = datetime.strptime(d_from, "%Y-%m-%d")
+    for k in range((datetime.strptime(d_to, "%Y-%m-%d") - d0).days + 1):       # ทุกวันในช่วง (วันไม่มีงาน = ว่าง)
+        ds = (d0 + timedelta(days=k)).strftime("%Y-%m-%d")
+        v = day_items.get(ds, [])
+        jd = [x for x in v if x["ontime"]]
+        ps = sum(1 for x in jd if x["ontime"] == "PASS")
+        by_day.append({"date": ds, "drops": len(jd), "pass": ps, "delay": len(jd) - ps,
+                       "pct": round(ps / len(jd) * 100, 1) if jd else None,
+                       "trips": len({x["job"] or f'{x["car"]}|{x["date"]}|{x["row"]}' for x in v if x["car"] and not x["status"].strip()}),
+                       "wait": avg(col("wait", v)), "load": avg(col("load", v))})
     return {
-        "from": d_from, "to": d_to, "n_rows": len(items),
+        "from": d_from, "to": d_to, "n_rows": len(items), "by_day": by_day,
         "kpi": {"trips": len(trips), "drops": len(judged), "pass": sum(1 for x in judged if x["ontime"] == "PASS"),
                 "delay": sum(1 for x in judged if x["ontime"] == "Delay"),
                 "wait": avg(col("wait")), "load": avg(col("load")), "travel": avg(col("travel")), "unload": avg(col("unload"))},
@@ -3330,8 +3341,16 @@ def report_ontime(date_from: str = Query(None, alias="from"), date_to: str = Que
         rows = _fetch_sheet(SOURCE_ID, PLAN_TAB)
     except Exception as e:
         raise HTTPException(502, f"อ่านชีตแผนงานไม่ได้ — {type(e).__name__}")
-    return build_ontime_report(rows, d_from, d_to, {"origin": origin, "vtype": vtype, "car": car, "drop": drop, "status": status,
-                                                    "dest": dest, "cls": cls, "jtype": jtype, "why": why, "fix": fix})
+    f = {"origin": origin, "vtype": vtype, "car": car, "drop": drop, "status": status,
+         "dest": dest, "cls": cls, "jtype": jtype, "why": why, "fix": fix}
+    rep = build_ontime_report(rows, d_from, d_to, f)
+    # ช่วงก่อนหน้า ยาวเท่ากัน ต่อกันพอดี (เช่น 7 วันล่าสุด เทียบกับ 7 วันก่อนหน้านั้น) — ใช้ตัวกรองเดียวกัน
+    n = (datetime.strptime(d_to, "%Y-%m-%d") - datetime.strptime(d_from, "%Y-%m-%d")).days + 1
+    p_to = (datetime.strptime(d_from, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+    p_from = (datetime.strptime(d_from, "%Y-%m-%d") - timedelta(days=n)).strftime("%Y-%m-%d")
+    prev = build_ontime_report(rows, p_from, p_to, f)
+    rep["prev"] = {"from": p_from, "to": p_to, "n_rows": prev["n_rows"], "kpi": prev["kpi"]}
+    return rep
 
 
 @app.get("/report", response_class=HTMLResponse, include_in_schema=False)
@@ -3870,6 +3889,21 @@ REPORT_HTML = """<!doctype html>
   .snapcap span{font-size:14px;color:var(--mut)}
   .side .menu.out{margin-top:auto;color:var(--mut);font-size:14.5px;white-space:nowrap}
   @media (max-width:820px){ .side .menu.out{flex:0 0 auto;margin-top:0} .side .menu.out span{display:none} }
+  /* เทียบช่วงก่อน ▲▼ : สีบอกดี/แย่ + ลูกศร + ข้อความ (ไม่ใช้สีอย่างเดียว) */
+  .dl{margin-top:5px;font-size:13px;font-weight:600;display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}
+  .dl.good{color:#0a8a0a}.dl.bad{color:#c62f2f}.dl.same,.dl.nt{color:var(--ink2)}
+  .dl small{font-weight:400;color:var(--mut);font-size:12px}
+  @media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])) .dl.good{color:#2fc22f} :root:where(:not([data-theme="light"])) .dl.bad{color:#f06a6a}}
+  .cmpnote{font-size:13px;color:var(--mut);margin:-2px 2px 8px}
+  /* แนวโน้มรายวัน: 2 กราฟเส้นแยกกัน (หน่วยต่างกัน ไม่ใช้แกนคู่) */
+  .tgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(420px,100%),1fr));gap:18px 28px}
+  .tchart h4{margin:0 0 6px;font-size:14.5px}
+  .tchart svg{width:100%;height:auto;display:block;overflow:visible}
+  .tchart .gl{stroke:var(--line);stroke-width:1}
+  .tchart .ax{fill:var(--mut);font-size:11px}
+  .tchart .pt{cursor:pointer}
+  .tchart .lg{display:flex;gap:14px;font-size:13px;color:var(--ink2);margin-top:4px}
+  .tchart .lg i{display:inline-block;width:14px;height:3px;border-radius:2px;vertical-align:middle;margin-right:6px}
   [hidden]{display:none !important}
 </style>
 </head>
@@ -3901,7 +3935,11 @@ REPORT_HTML = """<!doctype html>
   </div>
   <div class="chips" id="active" data-nosnap="1"></div>
   <div id="err" class="err" hidden></div>
+  <div class="cmpnote" id="cmpNote"></div>
   <div class="tiles" id="tiles"></div>
+  <section class="panel" id="trendP" hidden style="margin-bottom:12px"><div class="ph"><h3>แนวโน้มรายวัน</h3><span class="sub" id="trendSub"></span></div>
+    <p class="hint">💡 ดูว่าแต่ละวันดีขึ้นหรือแย่ลง · <b>On Time ยิ่งสูงยิ่งดี</b> · <b>เวลารอโหลด/โหลด ยิ่งต่ำยิ่งดี</b> · ชี้ที่จุดเพื่อดูตัวเลข</p>
+    <div class="tgrid"><div class="tchart" id="tOt"></div><div class="tchart" id="tWl"></div></div></section>
   <div class="panels">
     <section class="panel w8 fillp"><div class="ph"><h3>เวลารอโหลด + โหลดสินค้า แยกตามต้นทาง</h3><span class="sub">นาที (เฉลี่ย)</span>
       <div class="legend"><span><i class="lw"></i>รอโหลดสินค้า</span><span><i class="ll"></i>โหลดสินค้า</span></div></div>
@@ -3992,9 +4030,51 @@ function renderActive(){
     keys.map(k => '<button class="chip f" data-clr="' + k + '">' + FNAME[k] + ': ' + esc(getF(k)) + '  ✕</button>').join('') +
     '<button class="chip" data-clr="*">ล้างตัวกรองทั้งหมด</button>' : '';
 }
-function tile(label, value, unit, sub, extra, color, icon){
+function tile(label, value, unit, sub, extra, color, icon, delta){
   return '<div class="tile' + (extra || '') + '" style="--tc:' + (color || '#2a78d6') + '"><div class="l">' + (icon ? '<span class="ic">' + icon + '</span>' : '') + label + '</div><div class="v">' + value + (unit ? '<small>' + unit + '</small>' : '') + '</div>' +
-    (sub ? '<div class="s">' + sub + '</div>' : '') + '</div>';
+    (sub ? '<div class="s">' + sub + '</div>' : '') + (delta || '') + '</div>';
+}
+// เทียบกับช่วงก่อน: better = 'low' (ต่ำดี เช่น นาที) / 'high' (สูงดี เช่น %) / '' (แค่บอกขึ้นลง)
+function delta(cur, prev, unit, better, dp){
+  if(!REP.prev || cur == null || prev == null) return '';
+  const r = v => dp ? Math.round(v * 10) / 10 : (unit === ' นาที' ? cm(v) : v);
+  const d = Math.round((r(cur) - r(prev)) * 10) / 10;
+  if(d === 0) return '<div class="dl same">= เท่าเดิม <small>ช่วงก่อน ' + num(prev, dp ? 1 : null) + unit + '</small></div>';
+  const up = d > 0, good = better === 'low' ? !up : better === 'high' ? up : null;
+  return '<div class="dl ' + (good === null ? 'nt' : good ? 'good' : 'bad') + '">' + (up ? '▲ ' : '▼ ') + Math.abs(d).toLocaleString('en-US') + unit +
+    (good === null ? '' : good ? ' ดีขึ้น' : ' แย่ลง') + ' <small>ช่วงก่อน ' + num(prev, dp ? 1 : null) + unit + '</small></div>';
+}
+function pctOf(k){ const j = k.pass + k.delay; return j ? k.pass / j * 100 : null; }
+// กราฟเส้นรายวัน (SVG) — series: [{name, color, get}] · fmt: แสดงค่า
+function lineChart(elId, title, days, series, unit, yMax){
+  const W = 600, H = 210, L = 38, R = 10, T = 10, B = 26, iw = W - L - R, ih = H - T - B;
+  const vals = []; series.forEach(sr => days.forEach(d => { const v = sr.get(d); if(v != null) vals.push(v); }));
+  const mx0 = Math.max.apply(null, vals.concat([1])), st = yMax ? 25 : niceStep(mx0), top = yMax || Math.ceil(mx0 / st) * st;
+  const x = i => L + (days.length > 1 ? i / (days.length - 1) * iw : iw / 2), y = v => T + ih - v / top * ih;
+  let g = '';
+  for(let v = 0; v <= top + 1e-9; v += st){ const yy = y(v); g += '<line class="gl" x1="' + L + '" x2="' + (W - R) + '" y1="' + yy + '" y2="' + yy + '"/><text class="ax" x="' + (L - 6) + '" y="' + (yy + 4) + '" text-anchor="end">' + Math.round(v) + '</text>'; }
+  const step = Math.max(1, Math.ceil(days.length / 8));
+  days.forEach((d, i) => { if(i % step === 0 || i === days.length - 1) g += '<text class="ax" x="' + x(i) + '" y="' + (H - 6) + '" text-anchor="middle">' + d.date.slice(8, 10) + '/' + d.date.slice(5, 7) + '</text>'; });
+  series.forEach(sr => {
+    let path = '', pen = false;
+    days.forEach((d, i) => { const v = sr.get(d); if(v == null){ pen = false; return; } path += (pen ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(v).toFixed(1); pen = true; });
+    g += '<path d="' + path + '" fill="none" stroke="' + sr.color + '" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>';
+    days.forEach((d, i) => { const v = sr.get(d); if(v == null) return;
+      const tip = dmy(d.date) + ' · ' + sr.name + ' ' + (unit === '%' ? num(v, 1) : num(v)) + unit + (sr.extra ? ' · ' + sr.extra(d) : '');
+      g += '<circle class="pt" cx="' + x(i) + '" cy="' + y(v) + '" r="4" fill="' + sr.color + '" style="stroke:var(--card)" stroke-width="2" data-tip="' + esc(tip) + '"/>' +
+           '<circle cx="' + x(i) + '" cy="' + y(v) + '" r="12" fill="transparent" data-tip="' + esc(tip) + '"/>'; });
+  });
+  document.getElementById(elId).innerHTML = '<h4>' + title + '</h4><svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + esc(title) + '">' + g + '</svg>' +
+    (series.length > 1 ? '<div class="lg">' + series.map(sr => '<span><i style="background:' + sr.color + '"></i>' + sr.name + '</span>').join('') + '</div>' : '');
+}
+function drawTrend(){
+  const days = REP.by_day || [], P = document.getElementById('trendP');
+  P.hidden = days.length < 2;
+  if(P.hidden) return;
+  document.getElementById('trendSub').textContent = dmy(days[0].date) + ' – ' + dmy(days[days.length - 1].date);
+  lineChart('tOt', 'On Time (%) รายวัน', days, [{name: 'On Time', color: '#0a8a0a', get: d => d.pct, extra: d => 'PASS ' + d.pass + ' · Delay ' + d.delay}], '%', 100);
+  lineChart('tWl', 'เวลารอโหลด / โหลด เฉลี่ยรายวัน (นาที)', days,
+    [{name: 'รอโหลด', color: '#7c5cd6', get: d => d.wait == null ? null : cm(d.wait)}, {name: 'โหลด', color: '#d6487f', get: d => d.load == null ? null : cm(d.load)}], ' นาที');
 }
 function niceStep(mx){
   const steps = [5, 10, 15, 20, 30, 60, 90, 120, 180, 240, 360, 480, 720, 960, 1440];
@@ -4002,23 +4082,25 @@ function niceStep(mx){
 }
 function render(){
   renderActive();
-  const k = REP.kpi, judged = k.pass + k.delay, pct = judged ? k.pass / judged * 100 : null;
+  const k = REP.kpi, judged = k.pass + k.delay, pct = judged ? k.pass / judged * 100 : null, pk = REP.prev ? REP.prev.kpi : {};
+  document.getElementById('cmpNote').textContent = REP.prev ? '▲▼ เทียบกับช่วงก่อนหน้าที่ยาวเท่ากัน: ' + (REP.prev.from === REP.prev.to ? dmy(REP.prev.from) : dmy(REP.prev.from) + ' – ' + dmy(REP.prev.to)) : '';
   document.getElementById('tiles').innerHTML =
     '<div class="tile hero" style="' + (pct != null && pct < 90 ? '--hb:var(--crit-bg);--hc:var(--crit)' : '') + '"><div class="l"><span class="ic" style="background:var(--good-bg)">⏱️</span>On Time</div><div class="v">' + (pct == null ? '–' : Math.round(pct * 10) / 10 + '%') + '</div>' +
       '<div class="pbar" data-tip="PASS ' + k.pass + ' · Delay ' + k.delay + '"><i style="width:' + (pct || 0) + '%;background:var(--good)"></i><i style="width:' + (judged ? 100 - pct : 0) + '%;background:var(--crit)"></i></div>' +
       '<div class="leg2"><span data-k="status" data-v="PASS"><span class="ico" style="background:var(--good)">✓</span>PASS <b>' + num(k.pass, 0) + '</b></span>' +
       '<span data-k="status" data-v="Delay"><span class="ico" style="background:var(--crit)">!</span>Delay <b>' + num(k.delay, 0) + '</b></span>' +
       '<span style="cursor:default;color:var(--mut)">จาก ' + num(judged, 0) + ' drop ที่มีผลในชีต</span></div>' +
+      delta(pct, REP.prev ? pctOf(REP.prev.kpi) : null, '%', 'high', true) +
       '<div class="s" style="margin-top:6px">💡 <b>PASS</b> = ส่งถึงลูกค้าไม่ช้าเกิน 30 นาที · <b>Delay</b> = ช้าเกิน 30 นาที · <b>% ยิ่งสูงยิ่งดี</b></div></div>' +
-    tile('จำนวนเที่ยว', num(k.trips, 0), '', REP.from === REP.to ? dmy(REP.from) : dmy(REP.from) + ' – ' + dmy(REP.to), '', '#2a78d6', '🚚') +
-    tile('งานทั้งหมด (drop)', num(REP.n_rows, 0), '', 'จุดส่งทั้งหมด · มีผล On Time ' + num(judged, 0), '', '#6250d6', '📦') +
-    tile('รอโหลดสินค้า (เฉลี่ย)', num(k.wait), 'นาที', sub2('เข้าลาน → เริ่มโหลด', k.wait), '', '#7c5cd6', '⏳') +
-    tile('โหลดสินค้า (เฉลี่ย)', num(k.load), 'นาที', sub2('เริ่มโหลด → โหลดเสร็จ', k.load), '', '#d6487f', '⛽') +
-    tile('เดินทางไปปลายทาง (เฉลี่ย)', num(k.travel), 'นาที', sub2('ออกคลัง → ถึงปลายทาง', k.travel), '', '#1baf7a', '🛣️') +
-    tile('อยู่ที่สถานี / ส่งสินค้า (เฉลี่ย)', num(k.unload), 'นาที', sub2('ถึงปลายทาง → ออกปลายทาง', k.unload), '', '#eda100', '🏁');
+    tile('จำนวนเที่ยว', num(k.trips, 0), '', REP.from === REP.to ? dmy(REP.from) : dmy(REP.from) + ' – ' + dmy(REP.to), '', '#2a78d6', '🚚', delta(k.trips, pk.trips, ' เที่ยว', '')) +
+    tile('งานทั้งหมด (drop)', num(REP.n_rows, 0), '', 'จุดส่งทั้งหมด · มีผล On Time ' + num(judged, 0), '', '#6250d6', '📦', delta(REP.n_rows, REP.prev && REP.prev.n_rows, ' drop', '')) +
+    tile('รอโหลดสินค้า (เฉลี่ย)', num(k.wait), 'นาที', sub2('เข้าลาน → เริ่มโหลด', k.wait), '', '#7c5cd6', '⏳', delta(k.wait, pk.wait, ' นาที', 'low')) +
+    tile('โหลดสินค้า (เฉลี่ย)', num(k.load), 'นาที', sub2('เริ่มโหลด → โหลดเสร็จ', k.load), '', '#d6487f', '⛽', delta(k.load, pk.load, ' นาที', 'low')) +
+    tile('เดินทางไปปลายทาง (เฉลี่ย)', num(k.travel), 'นาที', sub2('ออกคลัง → ถึงปลายทาง', k.travel), '', '#1baf7a', '🛣️', delta(k.travel, pk.travel, ' นาที', 'low')) +
+    tile('อยู่ที่สถานี / ส่งสินค้า (เฉลี่ย)', num(k.unload), 'นาที', sub2('ถึงปลายทาง → ออกปลายทาง', k.unload), '', '#eda100', '🏁', delta(k.unload, pk.unload, ' นาที', 'low'));
   drawOrigin(); drawClass();
   bars('cVtype', REP.by_vtype, x => x.vtype, x => x.trips, ' เที่ยว', 'vtype', x => x.vtype + ': ' + x.trips + ' เที่ยว', x => vcol(x.vtype));
-  drawDest(); drawWhy();
+  drawDest(); drawWhy(); drawTrend();
   drawOriginTable();
   drawRows();
 }
