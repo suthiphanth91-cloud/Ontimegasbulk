@@ -3941,9 +3941,10 @@ function ocol(o){ const i = ORIGINS.indexOf(o); return i >= 0 ? CAT[i] : hashc(o
 function vcol(v){ return VCOL[v] || hashc(v); }
 function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function iso(d){ return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
-function num(v, d){ return v == null ? '–' : Number(v).toLocaleString('en-US', {maximumFractionDigits: d == null ? 1 : d}); }
+function cm(v){ return v == null ? null : Math.ceil(Number(v) - 1e-9) + 0; }     // นาที: ปัดขึ้นเป็นจำนวนเต็ม (12.1 → 13)
+function num(v, d){ if(v == null) return '–'; if(d == null) return cm(v).toLocaleString('en-US'); return Number(v).toLocaleString('en-US', {maximumFractionDigits: d}); }
 function sub2(what, v){ return what + (hm(v) ? ' · ' + hm(v) : ''); }
-function hm(v){ if(v == null) return ''; const m = Math.round(v); return m >= 60 ? '≈ ' + Math.floor(m / 60) + ' ชม. ' + (m % 60) + ' นาที' : ''; }
+function hm(v){ if(v == null) return ''; const m = cm(v); return m >= 60 ? '≈ ' + Math.floor(m / 60) + ' ชม. ' + (m % 60) + ' นาที' : ''; }
 function getF(k){ return SELMAP[k] ? document.getElementById(SELMAP[k]).value : XF[k]; }
 function setF(k, v){
   if(SELMAP[k]){
@@ -4070,7 +4071,7 @@ function dmy(s){ return s ? s.slice(8, 10) + '/' + s.slice(5, 7) + '/' + s.slice
 function drawOrigin(){
   const list = REP.by_origin.filter(o => o.wait.n || o.load.n);
   if(!list.length){ document.getElementById('cOrigin').innerHTML = '<div class="empty">ไม่มีข้อมูลเวลารอโหลด/โหลด</div>'; return; }
-  const tot = o => (o.wait.avg || 0) + (o.load.avg || 0);
+  const tot = o => (cm(o.wait.avg) || 0) + (cm(o.load.avg) || 0);      // รวม = ผลรวมของตัวเลขที่ปัดแล้ว ให้บวกกันตรงกับที่เห็น
   const mx = Math.max.apply(null, list.map(tot).concat([1])), sel = getF('origin');
   const seg = (cls, v, t) => { const w = v / mx * 100; return v ? '<div class="osg ' + cls + '" style="width:' + w + '%">' + (w > 9 ? num(v) : '') + '</div>' : ''; };
   document.getElementById('cOrigin').innerHTML = '<div class="oc">' + list.map(o => {
