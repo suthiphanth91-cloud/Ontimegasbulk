@@ -3489,7 +3489,7 @@ REPORT_HTML = """<!doctype html>
   .rng{display:flex;align-items:center;gap:6px}
   input,select{font:inherit;font-size:13.5px;padding:7px 10px;border-radius:9px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
   .btn{font:inherit;font-size:13.5px;font-weight:600;padding:7px 14px;border-radius:9px;border:1px solid var(--acc);background:var(--acc);color:#fff;cursor:pointer}
-  main{padding:18px 22px 40px;max-width:1560px;transition:opacity .15s}
+  main{padding:18px 22px 40px;transition:opacity .15s}
   main.busy{opacity:.55;pointer-events:none}
   .fbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
   .fbar .lbl{font-size:12.5px;color:var(--mut);margin-right:2px}
@@ -3583,6 +3583,26 @@ REPORT_HTML = """<!doctype html>
   .empty{padding:30px;text-align:center;color:var(--mut);font-size:13.5px}
   .err{background:var(--crit-bg);color:var(--crit-ink);padding:10px 14px;border-radius:10px;margin-bottom:12px}
   .note{color:var(--mut);font-size:12.5px;margin:4px 0 0}
+  @media (max-width:820px){
+    header{padding:10px 12px;position:static}
+    .hd{gap:8px}
+    .ttl h1{font-size:18px}
+    .hd .grow{display:none}
+    .seg{width:100%}.seg button{flex:1;padding:7px 4px}
+    .rng{width:100%}.rng input{flex:1;min-width:0}
+    .btn{width:100%}
+    main{padding:12px 10px 30px}
+    .fbar select{flex:1 1 45%;min-width:0}
+    .fbar .lbl{width:100%}
+    .tile{padding:12px}.tile .v{font-size:23px}.hero .v{font-size:34px}
+    .panel{padding:12px}
+    .rc{grid-template-columns:72px 1fr 92px;gap:8px}
+    .rname{font-size:12.5px}.rstat{font-size:11.5px}
+    .bars{grid-template-columns:minmax(70px,110px) 1fr 72px;column-gap:8px}
+    .blab{font-size:12px}.bval{font-size:11.5px}
+    .legend{margin-left:0;width:100%}
+    #q{min-width:0 !important;width:100%}
+  }
   #tip{position:fixed;z-index:50;pointer-events:none;background:#111827;color:#f9fafb;font-size:12.5px;line-height:1.5;padding:7px 10px;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.25);max-width:280px;display:none}
   [hidden]{display:none !important}
 </style>
