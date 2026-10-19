@@ -3666,15 +3666,19 @@ REPORT_HTML = """<!doctype html>
   .fillp{display:flex;flex-direction:column}
   .fillp > #cOrigin{flex:1;display:flex;flex-direction:column}
   .oc{flex:1;display:flex;flex-direction:column;gap:8px}
-  .orow{flex:1 1 auto;min-height:64px;display:grid;grid-template-columns:minmax(120px,190px) 1fr 130px;align-items:center;gap:16px;
-        padding:10px 14px;border:1px solid var(--line);border-left:5px solid var(--oc);border-radius:10px;cursor:pointer;
-        background:color-mix(in srgb,var(--oc) 5%,var(--card))}
-  .orow:hover{background:color-mix(in srgb,var(--oc) 11%,var(--card))}
+  .orow{flex:1 1 auto;min-height:64px;display:grid;grid-template-columns:minmax(110px,170px) 1fr 165px;align-items:center;gap:16px;
+        padding:10px 14px;border:1px solid var(--line);border-radius:10px;cursor:pointer;background:var(--card)}
+  .orow:hover{background:var(--hover)}
   .orow.on{box-shadow:0 0 0 2px #2563eb}
   .orow .on1{font-size:15px;font-weight:700}
   .orow .on2{font-size:12px;color:var(--mut);margin-top:2px}
-  .orow .otr{height:16px;border-radius:8px;background:var(--plane);overflow:hidden}
-  .orow .ofl{height:100%;border-radius:8px;background:var(--oc)}
+  .orow .otr{display:flex;height:24px;border-radius:7px;background:var(--plane);overflow:hidden}
+  .orow .osg{height:100%;display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;min-width:2px}
+  .orow .osg.w{background:var(--wc)}
+  .orow .osg.l{background:var(--lc);box-shadow:inset 2px 0 0 var(--card)}
+  .orow .omm .w b{color:var(--wc)} .orow .omm .l b{color:var(--lc)}
+  .legend i.lw{width:12px;height:12px;border-radius:3px;background:var(--wc)}
+  .legend i.ll{width:12px;height:12px;border-radius:3px;background:var(--lc)}
   .orow .omm{display:flex;justify-content:space-between;font-size:12px;color:var(--ink2);margin-top:6px}
   .orow .omm b{font-weight:700;color:var(--ink)}
   .orow .oav{text-align:right;line-height:1.15}
@@ -3686,7 +3690,7 @@ REPORT_HTML = """<!doctype html>
   .hint b{color:var(--ink)}
   .hk{display:inline-block;padding:0 7px;border-radius:5px;margin:0 2px;color:var(--ink);font-weight:600}
   /* แยกสีกลุ่มคอลัมน์แบบ Looker: รอโหลด = ม่วงอ่อน · โหลด = ชมพู */
-  :root{--cw:#f1eafb;--cwh:#dccbf5;--cl:#fdebf2;--clh:#f8c9dc}
+  :root{--cw:#f1eafb;--cwh:#dccbf5;--cl:#fdebf2;--clh:#f8c9dc;--wc:#7c5cd6;--lc:#d6487f}
   @media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){--cw:#241d36;--cwh:#3b2f5c;--cl:#33192a;--clh:#552a42}}
   :root[data-theme="dark"]{--cw:#241d36;--cwh:#3b2f5c;--cl:#33192a;--clh:#552a42}
   th.gw{background:var(--cwh) !important;color:var(--ink) !important}
@@ -3725,8 +3729,9 @@ REPORT_HTML = """<!doctype html>
   <div id="err" class="err" hidden></div>
   <div class="tiles" id="tiles"></div>
   <div class="panels">
-    <section class="panel w8 fillp"><div class="ph"><h3>เวลารอโหลดสินค้า แยกตามต้นทาง</h3><span class="sub">นาที</span></div>
-      <p class="hint">💡 นับตั้งแต่<b>รถเข้าลาน</b> จนถึง<b>เริ่มโหลด</b> · ตัวเลขใหญ่ = เวลารอเฉลี่ย · <b>แท่งยิ่งยาว = รอนาน</b> · กดแถวเพื่อดูเฉพาะต้นทางนั้น</p>
+    <section class="panel w8 fillp"><div class="ph"><h3>เวลารอโหลด + โหลดสินค้า แยกตามต้นทาง</h3><span class="sub">นาที (เฉลี่ย)</span>
+      <div class="legend"><span><i class="lw"></i>รอโหลดสินค้า</span><span><i class="ll"></i>โหลดสินค้า</span></div></div>
+      <p class="hint">💡 แท่งเดียวต่อกัน: <b style="color:var(--wc)">ม่วง = รอโหลด</b> (เข้าลาน → เริ่มโหลด) ต่อด้วย <b style="color:var(--lc)">ชมพู = โหลด</b> (เริ่มโหลด → โหลดเสร็จ) · ตัวเลขขวา = รวมเวลาอยู่ที่ต้นทาง · <b>แท่งยิ่งยาว = อยู่นาน</b> · กดแถวเพื่อกรอง</p>
       <div id="cOrigin"></div></section>
     <div class="w4 col2">
       <section class="panel"><div class="ph"><h3>สัดส่วนตามระยะทาง</h3></div>
@@ -3734,9 +3739,9 @@ REPORT_HTML = """<!doctype html>
         <div id="cClass"></div></section>
       <section class="panel"><div class="ph"><h3>จำนวนเที่ยวตามประเภทรถ</h3></div><p class="hint">💡 รถแต่ละขนาดวิ่งไปกี่เที่ยวในช่วงวันที่ที่เลือก</p><div id="cVtype"></div></section>
     </div>
-    <section class="panel w12"><div class="ph"><h3>เวลาที่อยู่ในสถานี (เฉลี่ย)</h3><span class="sub">นาที</span></div><p class="hint">💡 รถจอดอยู่ที่ปลายทางนานเท่าไร (<b>ถึงปลายทาง → ออกจากปลายทาง</b>) แยกตามประเภทงาน · <b>ตัวเลขมาก = ลงของนาน</b> · เรียงจากนานสุดลงมา · กดหัวการ์ดหรือชื่อปลายทางเพื่อกรอง</p><div id="cDest"></div></section>
     <section class="panel w12"><div class="ph"><h3>สรุปตามต้นทาง</h3><span class="sub">นาที</span></div><p class="hint">💡 <b>รอโหลด</b> = เข้าลาน → เริ่มโหลด · <b>โหลด</b> = เริ่มโหลด → โหลดเสร็จ · ต่ำสุด / สูงสุด / เฉลี่ย ของแต่ละต้นทาง · กดหัวคอลัมน์เพื่อเรียง</p>
       <div class="tw" style="max-height:none"><table><thead><tr class="grp"><th colspan="2"></th><th colspan="3" class="gw">⏳ เวลารอโหลดสินค้า (นาที)</th><th colspan="3" class="gl">⛽ เวลาโหลดสินค้า (นาที)</th></tr><tr id="oHead"></tr></thead><tbody id="tOrigin"></tbody></table></div></section>
+    <section class="panel w12"><div class="ph"><h3>เวลาที่อยู่ในสถานี (เฉลี่ย)</h3><span class="sub">นาที</span></div><p class="hint">💡 รถจอดอยู่ที่ปลายทางนานเท่าไร (<b>ถึงปลายทาง → ออกจากปลายทาง</b>) แยกตามประเภทงาน · <b>ตัวเลขมาก = ลงของนาน</b> · เรียงจากนานสุดลงมา · กดหัวการ์ดหรือชื่อปลายทางเพื่อกรอง</p><div id="cDest"></div></section>
     <section class="panel w12"><div class="tools"><h3 style="margin:0;font-size:15px">รายการทั้งหมด</h3><span class="sub" id="rowCount" style="font-size:12.5px;color:var(--mut)"></span><span class="grow"></span>
       <input type="search" id="q" placeholder="ค้นหา รถ / ปลายทาง / ออเดอร์" style="min-width:260px"></div>
       <p class="hint">💡 ทุกงาน (drop) ในช่วงวันที่ที่เลือก · <b>กดหัวคอลัมน์</b> เพื่อเรียงน้อย→มาก / มาก→น้อย · <b>กดเบอร์รถ</b> เพื่อดูเฉพาะคันนั้น · ช่องค้นหาด้านบนพิมพ์เบอร์รถ/ปลายทาง/ออเดอร์ได้</p>
@@ -3830,8 +3835,8 @@ function render(){
       '<div class="s" style="margin-top:6px">💡 <b>PASS</b> = ส่งถึงลูกค้าไม่ช้าเกิน 30 นาที · <b>Delay</b> = ช้าเกิน 30 นาที · <b>% ยิ่งสูงยิ่งดี</b></div></div>' +
     tile('จำนวนเที่ยว', num(k.trips, 0), '', REP.from === REP.to ? dmy(REP.from) : dmy(REP.from) + ' – ' + dmy(REP.to), '', '#2a78d6', '🚚') +
     tile('งานทั้งหมด (drop)', num(REP.n_rows, 0), '', 'จุดส่งทั้งหมด · มีผล On Time ' + num(judged, 0), '', '#6250d6', '📦') +
-    tile('รอโหลดสินค้า (เฉลี่ย)', num(k.wait), 'นาที', sub2('เข้าลาน → เริ่มโหลด', k.wait), '', '#9b72e0', '⏳') +
-    tile('โหลดสินค้า (เฉลี่ย)', num(k.load), 'นาที', sub2('เริ่มโหลด → โหลดเสร็จ', k.load), '', '#e87ba4', '⛽') +
+    tile('รอโหลดสินค้า (เฉลี่ย)', num(k.wait), 'นาที', sub2('เข้าลาน → เริ่มโหลด', k.wait), '', '#7c5cd6', '⏳') +
+    tile('โหลดสินค้า (เฉลี่ย)', num(k.load), 'นาที', sub2('เริ่มโหลด → โหลดเสร็จ', k.load), '', '#d6487f', '⛽') +
     tile('เดินทางไปปลายทาง (เฉลี่ย)', num(k.travel), 'นาที', sub2('ออกคลัง → ถึงปลายทาง', k.travel), '', '#1baf7a', '🛣️') +
     tile('อยู่ที่สถานี / ส่งสินค้า (เฉลี่ย)', num(k.unload), 'นาที', sub2('ถึงปลายทาง → ออกปลายทาง', k.unload), '', '#eda100', '🏁');
   drawOrigin(); drawClass();
@@ -3887,16 +3892,20 @@ function drawOriginTable(){
 }
 function dmy(s){ return s ? s.slice(8, 10) + '/' + s.slice(5, 7) + '/' + s.slice(0, 4) : ''; }
 function drawOrigin(){
-  const list = REP.by_origin.filter(o => o.wait.n);
-  if(!list.length){ document.getElementById('cOrigin').innerHTML = '<div class="empty">ไม่มีข้อมูลเวลารอโหลด</div>'; return; }
-  const mx = Math.max.apply(null, list.map(o => o.wait.avg).concat([1])), sel = getF('origin');
+  const list = REP.by_origin.filter(o => o.wait.n || o.load.n);
+  if(!list.length){ document.getElementById('cOrigin').innerHTML = '<div class="empty">ไม่มีข้อมูลเวลารอโหลด/โหลด</div>'; return; }
+  const tot = o => (o.wait.avg || 0) + (o.load.avg || 0);
+  const mx = Math.max.apply(null, list.map(tot).concat([1])), sel = getF('origin');
+  const seg = (cls, v, t) => { const w = v / mx * 100; return v ? '<div class="osg ' + cls + '" style="width:' + w + '%">' + (w > 9 ? num(v) : '') + '</div>' : ''; };
   document.getElementById('cOrigin').innerHTML = '<div class="oc">' + list.map(o => {
-    const w = o.wait, tip = o.origin + ' · ' + o.trips + ' เที่ยว · รอโหลด ต่ำสุด ' + num(w.min) + ' / เฉลี่ย ' + num(w.avg) + ' / สูงสุด ' + num(w.max) + ' นาที';
-    return '<div class="orow' + (sel === o.origin ? ' on' : '') + '" style="--oc:' + ocol(o.origin) + '" data-k="origin" data-v="' + esc(o.origin) + '" data-tip="' + esc(tip) + '">' +
-      '<div><div class="on1">' + esc(o.origin) + '</div><div class="on2">' + o.trips + ' เที่ยว · ' + w.n + ' ครั้งที่วัดได้</div></div>' +
-      '<div class="obar"><div class="otr"><div class="ofl" style="width:' + Math.max(2, w.avg / mx * 100) + '%"></div></div>' +
-        '<div class="omm"><span>ต่ำสุด <b>' + num(w.min) + '</b></span><span>สูงสุด <b>' + num(w.max) + '</b> นาที</span></div></div>' +
-      '<div class="oav"><b>' + num(w.avg) + '</b> นาที<small>เฉลี่ย' + (hm(w.avg) ? ' ' + hm(w.avg) : '') + '</small></div></div>';
+    const w = o.wait, l = o.load, t = tot(o);
+    const tip = o.origin + ' · ' + o.trips + ' เที่ยว · รอโหลดเฉลี่ย ' + num(w.avg) + ' (ต่ำสุด ' + num(w.min) + ' / สูงสุด ' + num(w.max) + ') · โหลดเฉลี่ย ' + num(l.avg) + ' (ต่ำสุด ' + num(l.min) + ' / สูงสุด ' + num(l.max) + ') นาที';
+    return '<div class="orow' + (sel === o.origin ? ' on' : '') + '" data-k="origin" data-v="' + esc(o.origin) + '" data-tip="' + esc(tip) + '">' +
+      '<div><div class="on1">' + esc(o.origin) + '</div><div class="on2">' + o.trips + ' เที่ยว</div></div>' +
+      '<div class="obar"><div class="otr">' + seg('w', w.avg, 'รอโหลด') + seg('l', l.avg, 'โหลด') + '</div>' +
+        '<div class="omm"><span class="w">รอโหลด <b>' + num(w.avg) + '</b> <small>(' + num(w.min) + '–' + num(w.max) + ')</small></span>' +
+        '<span class="l">โหลด <b>' + num(l.avg) + '</b> <small>(' + num(l.min) + '–' + num(l.max) + ')</small></span></div></div>' +
+      '<div class="oav"><b>' + num(t) + '</b> นาที<small>รวมที่ต้นทาง' + (hm(t) ? ' ' + hm(t) : '') + '</small></div></div>';
   }).join('') + '</div>';
 }
 function drawClass(){
