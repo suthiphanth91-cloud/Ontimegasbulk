@@ -3662,6 +3662,25 @@ REPORT_HTML = """<!doctype html>
   .dgrp .bval{padding-left:10px !important}
   .dmore{font-size:12px;color:var(--mut);padding:2px 14px 10px}
   @media (max-width:820px){ .dgrid{flex-direction:column;gap:16px} .dgrp .bars{grid-template-columns:minmax(96px,40%) 1fr 66px} .dgh .st b{font-size:15px} }
+  /* เวลารอโหลดแยกต้นทาง: แถวละต้นทาง ตัวเลขชัด แท่ง = เฉลี่ย ใต้แท่ง = ต่ำสุด/สูงสุด · แถวยืดเต็มการ์ด */
+  .fillp{display:flex;flex-direction:column}
+  .fillp > #cOrigin{flex:1;display:flex;flex-direction:column}
+  .oc{flex:1;display:flex;flex-direction:column;gap:8px}
+  .orow{flex:1 1 auto;min-height:64px;display:grid;grid-template-columns:minmax(120px,190px) 1fr 130px;align-items:center;gap:16px;
+        padding:10px 14px;border:1px solid var(--line);border-left:5px solid var(--oc);border-radius:10px;cursor:pointer;
+        background:color-mix(in srgb,var(--oc) 5%,var(--card))}
+  .orow:hover{background:color-mix(in srgb,var(--oc) 11%,var(--card))}
+  .orow.on{box-shadow:0 0 0 2px #2563eb}
+  .orow .on1{font-size:15px;font-weight:700}
+  .orow .on2{font-size:12px;color:var(--mut);margin-top:2px}
+  .orow .otr{height:16px;border-radius:8px;background:var(--plane);overflow:hidden}
+  .orow .ofl{height:100%;border-radius:8px;background:var(--oc)}
+  .orow .omm{display:flex;justify-content:space-between;font-size:12px;color:var(--ink2);margin-top:6px}
+  .orow .omm b{font-weight:700;color:var(--ink)}
+  .orow .oav{text-align:right;line-height:1.15}
+  .orow .oav b{font-size:24px;font-weight:700}
+  .orow .oav small{display:block;font-size:11.5px;color:var(--mut)}
+  @media (max-width:820px){ .orow{grid-template-columns:1fr 92px;gap:6px 10px} .orow .obar{grid-column:1 / -1;grid-row:2} .orow .oav b{font-size:20px} }
   [hidden]{display:none !important}
 </style>
 </head>
@@ -3693,8 +3712,7 @@ REPORT_HTML = """<!doctype html>
   <div id="err" class="err" hidden></div>
   <div class="tiles" id="tiles"></div>
   <div class="panels">
-    <section class="panel w8"><div class="ph"><h3>เวลารอโหลดสินค้า แยกตามต้นทาง</h3><span class="sub">นาที · คลิกแถวเพื่อกรอง</span>
-      <div class="legend"><span><i style="width:18px;height:6px;border-radius:3px;background:#cfd8e3"></i>ต่ำสุด–สูงสุด</span><span><i style="width:10px;height:10px;border-radius:50%;background:#6b7280"></i>เฉลี่ย</span><span style="color:var(--mut)">(สีตามต้นทาง)</span></div></div>
+    <section class="panel w8 fillp"><div class="ph"><h3>เวลารอโหลดสินค้า แยกตามต้นทาง</h3><span class="sub">นาที · แท่ง = เวลาเฉลี่ย · คลิกแถวเพื่อกรอง</span></div>
       <div id="cOrigin"></div></section>
     <div class="w4 col2">
       <section class="panel"><div class="ph"><h3>สัดส่วนตามระยะทาง</h3><span class="sub">สายใกล้ ≤80 · กลาง 81–250 · ไกล &gt;250 กม.</span></div>
@@ -3856,19 +3874,15 @@ function dmy(s){ return s ? s.slice(8, 10) + '/' + s.slice(5, 7) + '/' + s.slice
 function drawOrigin(){
   const list = REP.by_origin.filter(o => o.wait.n);
   if(!list.length){ document.getElementById('cOrigin').innerHTML = '<div class="empty">ไม่มีข้อมูลเวลารอโหลด</div>'; return; }
-  const mx0 = Math.max.apply(null, list.map(o => o.wait.max)), st = niceStep(mx0), mx = Math.ceil(mx0 / st) * st || st;
-  const ticks = []; for(let t = 0; t <= mx; t += st) ticks.push(t);
-  const pos = v => (v / mx * 100) + '%';
-  const grid = '<div class="grid">' + ticks.map(t => '<i style="left:' + pos(t) + '"></i>').join('') + '</div>';
-  const sel = getF('origin');
-  document.getElementById('cOrigin').innerHTML = '<div class="rc">' + list.map(o => {
-    const w = o.wait, tip = esc(o.origin) + ' · ' + o.trips + ' เที่ยว · รอโหลด ต่ำสุด ' + num(w.min) + ' / เฉลี่ย ' + num(w.avg) + ' / สูงสุด ' + num(w.max) + ' นาที';
-    return '<div class="rrow' + (sel === o.origin ? ' on' : '') + '" style="--oc:' + ocol(o.origin) + '" data-k="origin" data-v="' + esc(o.origin) + '" data-tip="' + tip + '">' +
-      '<div class="rname"><i></i>' + esc(o.origin) + '</div>' +
-      '<div class="rplot">' + grid + '<div class="rband" style="left:' + pos(w.min) + ';width:' + ((w.max - w.min) / mx * 100) + '%"></div>' +
-        '<div class="rend" style="left:' + pos(w.min) + '"></div><div class="rend" style="left:' + pos(w.max) + '"></div><div class="rdot" style="left:' + pos(w.avg) + '"></div></div>' +
-      '<div class="rstat">เฉลี่ย <b>' + num(w.avg) + '</b> · ' + o.trips + ' เที่ยว</div></div>';
-  }).join('') + '<div></div><div class="axis">' + ticks.map(t => '<span style="left:' + pos(t) + '">' + t + '</span>').join('') + '</div><div></div></div>';
+  const mx = Math.max.apply(null, list.map(o => o.wait.avg).concat([1])), sel = getF('origin');
+  document.getElementById('cOrigin').innerHTML = '<div class="oc">' + list.map(o => {
+    const w = o.wait, tip = o.origin + ' · ' + o.trips + ' เที่ยว · รอโหลด ต่ำสุด ' + num(w.min) + ' / เฉลี่ย ' + num(w.avg) + ' / สูงสุด ' + num(w.max) + ' นาที';
+    return '<div class="orow' + (sel === o.origin ? ' on' : '') + '" style="--oc:' + ocol(o.origin) + '" data-k="origin" data-v="' + esc(o.origin) + '" data-tip="' + esc(tip) + '">' +
+      '<div><div class="on1">' + esc(o.origin) + '</div><div class="on2">' + o.trips + ' เที่ยว · ' + w.n + ' ครั้งที่วัดได้</div></div>' +
+      '<div class="obar"><div class="otr"><div class="ofl" style="width:' + Math.max(2, w.avg / mx * 100) + '%"></div></div>' +
+        '<div class="omm"><span>ต่ำสุด <b>' + num(w.min) + '</b></span><span>สูงสุด <b>' + num(w.max) + '</b> นาที</span></div></div>' +
+      '<div class="oav"><b>' + num(w.avg) + '</b> นาที<small>เฉลี่ย' + (hm(w.avg) ? ' ' + hm(w.avg) : '') + '</small></div></div>';
+  }).join('') + '</div>';
 }
 function drawClass(){
   const m = {}; REP.by_class.forEach(c => { m[c.cls] = c.n; });
