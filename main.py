@@ -201,6 +201,15 @@ def _app_password() -> str:
     return os.environ.get("APP_PASSWORD", "")
 
 
+def _report_password() -> str:
+    """รหัสผ่านชุดที่ 2 (ตั้งที่ Vercel → REPORT_PASSWORD) — ล็อกอินด้วยรหัสนี้ ดูได้เฉพาะหน้ารายงาน On Time"""
+    return os.environ.get("REPORT_PASSWORD", "")
+
+
+ROLE_REPORT = "r"                                   # ผู้ใช้ที่ดูได้เฉพาะรายงาน
+REPORT_ONLY_PATHS = {"/report", "/api/report/ontime", "/logout", "/favicon.ico"}
+
+
 CRON_SECRET = os.environ.get("CRON_SECRET", "")   # ตั้งที่ Vercel — ใช้กันคนนอกยิง /api/cron/hourly-status เล่น
 
 
@@ -209,22 +218,40 @@ def _secret() -> bytes:
     return (os.environ.get("SESSION_SECRET") or _app_password() or "dev").encode()
 
 
-def _make_token() -> str:
-    exp  = str(int(time()) + SESSION_HOURS * 3600)
-    sig  = hmac.new(_secret(), exp.encode(), hashlib.sha256).digest()
-    return exp + "." + base64.urlsafe_b64encode(sig).decode().rstrip("=")
+def _sign(msg: str) -> str:
+    sig = hmac.new(_secret(), msg.encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(sig).decode().rstrip("=")
+
+
+def _make_token(role: str = "") -> str:
+    """token = "หมดอายุ.ลายเซ็น" (เข้าได้ทุกหน้า) หรือ "หมดอายุ.r.ลายเซ็น" (ดูได้เฉพาะรายงาน) — สิทธิ์อยู่ในลายเซ็น แก้เองไม่ได้"""
+    exp = str(int(time()) + SESSION_HOURS * 3600)
+    if role:
+        return exp + "." + role + "." + _sign(exp + "|" + role)
+    return exp + "." + _sign(exp)
+
+
+def _token_role(token: str) -> Optional[str]:
+    """"" = เข้าได้ทุกหน้า · "r" = ดูได้เฉพาะรายงาน · None = ไม่ผ่าน/หมดอายุ"""
+    try:
+        parts = (token or "").split(".")
+        if len(parts) == 2:
+            exp, sig = parts
+            role, msg = "", parts[0]
+        elif len(parts) == 3 and parts[1] == ROLE_REPORT:
+            exp, role, sig = parts
+            msg = exp + "|" + role
+        else:
+            return None
+        if int(exp) < int(time()):
+            return None
+        return role if hmac.compare_digest(sig, _sign(msg)) else None
+    except (ValueError, AttributeError):
+        return None
 
 
 def _token_ok(token: str) -> bool:
-    try:
-        exp, sig = (token or "").split(".", 1)
-        if int(exp) < int(time()):
-            return False
-        want = hmac.new(_secret(), exp.encode(), hashlib.sha256).digest()
-        want = base64.urlsafe_b64encode(want).decode().rstrip("=")
-        return hmac.compare_digest(sig, want)
-    except (ValueError, AttributeError):
-        return False
+    return _token_role(token) == ""
 
 # ─── APP ─────────────────────────────────────────────────────────────────────
 
@@ -270,8 +297,15 @@ async def require_login(request: Request, call_next):
     if not _app_password() or path in OPEN_PATHS:
         return await call_next(request)          # ยังไม่ตั้งรหัส → เปิดตามเดิม
 
-    if _token_ok(request.cookies.get(COOKIE_NAME, "")):
+    role = _token_role(request.cookies.get(COOKIE_NAME, ""))
+    if role == "":
         return await call_next(request)
+    if role == ROLE_REPORT:                       # บัญชีดูรายงานอย่างเดียว
+        if path in REPORT_ONLY_PATHS:
+            return await call_next(request)
+        if path.startswith("/api/"):
+            return JSONResponse({"detail": "บัญชีนี้ดูได้เฉพาะรายงาน On Time"}, status_code=403)
+        return RedirectResponse("/report", status_code=303)
 
     if path.startswith("/api/"):
         return JSONResponse({"detail": "ต้องล็อกอินก่อน"}, status_code=401)
@@ -3211,8 +3245,15 @@ def report_ontime(date_from: str = Query(None, alias="from"), date_to: str = Que
 
 
 @app.get("/report", response_class=HTMLResponse, include_in_schema=False)
-def report_page():
+def report_page(request: Request):
+    if _app_password() and _token_role(request.cookies.get(COOKIE_NAME, "")) == ROLE_REPORT:
+        return REPORT_HTML.replace(NAV_FULL, "")             # บัญชีดูรายงาน: ไม่แสดงเมนูหน้าอื่น
     return REPORT_HTML
+
+
+NAV_FULL = '''  <a class="menu" href="/">🚛 เช็กรถ</a>
+  <a class="menu" href="/plan">📋 แผนงาน</a>
+'''
 
 
 @app.get("/plan", response_class=HTMLResponse, include_in_schema=False)
@@ -3273,15 +3314,20 @@ def do_login(request: Request, password: str = Form("")):
     wait = _login_gate(ip)
     if wait:
         return RedirectResponse("/login?error=2", status_code=303)
-    if not pw or not _pw_equal(password, pw):
+    rpw = _report_password()
+    if pw and _pw_equal(password, pw):
+        role, dest = "", "/"
+    elif pw and rpw and _pw_equal(password, rpw):
+        role, dest = ROLE_REPORT, "/report"          # รหัสชุดดูรายงาน → เข้าได้แค่หน้ารายงาน
+    else:
         _login_failed(ip)
         sleep(0.8)                                   # หน่วงเล็กน้อยทุกครั้งที่ผิด ให้เดาได้ช้าลง
         return RedirectResponse("/login?error=1", status_code=303)
     _login_fails.pop(ip, None)
 
-    resp = RedirectResponse("/", status_code=303)
+    resp = RedirectResponse(dest, status_code=303)
     resp.set_cookie(
-        COOKIE_NAME, _make_token(),
+        COOKIE_NAME, _make_token(role),
         max_age=SESSION_HOURS * 3600,
         httponly=True, secure=True, samesite="lax", path="/",
     )
@@ -3735,6 +3781,8 @@ REPORT_HTML = """<!doctype html>
   .snapcap{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline;padding:4px 2px 12px}
   .snapcap b{font-size:18px}
   .snapcap span{font-size:12.5px;color:var(--mut)}
+  .side .menu.out{margin-top:auto;color:var(--mut);font-size:13px}
+  @media (max-width:820px){ .side .menu.out{flex:0 0 auto;margin-top:0} .side .menu.out span{display:none} }
   [hidden]{display:none !important}
 </style>
 </head>
@@ -3743,6 +3791,7 @@ REPORT_HTML = """<!doctype html>
   <a class="menu" href="/">🚛 เช็กรถ</a>
   <a class="menu" href="/plan">📋 แผนงาน</a>
   <a class="menu on" href="/report">📊 รายงาน On Time</a>
+  <a class="menu out" href="/logout" title="ออกจากระบบ">🚪<span>ออกจากระบบ</span></a>
 </aside>
 <header><div class="hd">
   <div class="ttl"><h1>รายงาน On Time</h1><p id="stamp">ข้อมูลจากชีตแผนงานจริง · อ่านอย่างเดียว</p></div>
