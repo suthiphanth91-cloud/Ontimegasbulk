@@ -4035,14 +4035,14 @@ function tile(label, value, unit, sub, extra, color, icon, delta){
     (sub ? '<div class="s">' + sub + '</div>' : '') + (delta || '') + '</div>';
 }
 // เทียบกับช่วงก่อน: better = 'low' (ต่ำดี เช่น นาที) / 'high' (สูงดี เช่น %) / '' (แค่บอกขึ้นลง)
-function delta(cur, prev, unit, better, dp){
+function delta(cur, prev, unit, better, dp){      // แสดงแค่ "ดีขึ้น" / "แย่ลง" / "เท่าเดิม" (ชี้ที่คำเพื่อดูตัวเลข)
   if(!REP.prev || cur == null || prev == null) return '';
-  const r = v => dp ? Math.round(v * 10) / 10 : (unit === ' นาที' ? cm(v) : v);
+  const r = v => dp ? Math.round(v * 10) / 10 : cm(v);
   const d = Math.round((r(cur) - r(prev)) * 10) / 10;
-  if(d === 0) return '<div class="dl same">= เท่าเดิม <small>ช่วงก่อน ' + num(prev, dp ? 1 : null) + unit + '</small></div>';
-  const up = d > 0, good = better === 'low' ? !up : better === 'high' ? up : null;
-  return '<div class="dl ' + (good === null ? 'nt' : good ? 'good' : 'bad') + '">' + (up ? '▲ ' : '▼ ') + Math.abs(d).toLocaleString('en-US') + unit +
-    (good === null ? '' : good ? ' ดีขึ้น' : ' แย่ลง') + ' <small>ช่วงก่อน ' + num(prev, dp ? 1 : null) + unit + '</small></div>';
+  if(d === 0) return '<div class="dl same" data-tip="' + esc('ช่วงก่อน ' + num(prev, dp ? 1 : null) + unit) + '">เท่าเดิม</div>';
+  const good = better === 'low' ? d < 0 : d > 0;
+  const tip = (d > 0 ? '▲ ' : '▼ ') + Math.abs(d).toLocaleString('en-US') + unit + ' · ช่วงก่อน ' + num(prev, dp ? 1 : null) + unit;
+  return '<div class="dl ' + (good ? 'good' : 'bad') + '" data-tip="' + esc(tip) + '">' + (good ? 'ดีขึ้น' : 'แย่ลง') + '</div>';
 }
 function pctOf(k){ const j = k.pass + k.delay; return j ? k.pass / j * 100 : null; }
 // กราฟเส้นรายวัน (SVG) — series: [{name, color, get}] · fmt: แสดงค่า
@@ -4083,7 +4083,7 @@ function niceStep(mx){
 function render(){
   renderActive();
   const k = REP.kpi, judged = k.pass + k.delay, pct = judged ? k.pass / judged * 100 : null, pk = REP.prev ? REP.prev.kpi : {};
-  document.getElementById('cmpNote').textContent = REP.prev ? '▲▼ เทียบกับช่วงก่อนหน้าที่ยาวเท่ากัน: ' + (REP.prev.from === REP.prev.to ? dmy(REP.prev.from) : dmy(REP.prev.from) + ' – ' + dmy(REP.prev.to)) : '';
+  document.getElementById('cmpNote').textContent = REP.prev ? 'ดีขึ้น / แย่ลง = เทียบกับช่วงก่อน: ' + (REP.prev.from === REP.prev.to ? dmy(REP.prev.from) : dmy(REP.prev.from) + ' – ' + dmy(REP.prev.to)) : '';
   document.getElementById('tiles').innerHTML =
     '<div class="tile hero" style="' + (pct != null && pct < 90 ? '--hb:var(--crit-bg);--hc:var(--crit)' : '') + '"><div class="l"><span class="ic" style="background:var(--good-bg)">⏱️</span>On Time</div><div class="v">' + (pct == null ? '–' : Math.round(pct * 10) / 10 + '%') + '</div>' +
       '<div class="pbar" data-tip="PASS ' + k.pass + ' · Delay ' + k.delay + '"><i style="width:' + (pct || 0) + '%;background:var(--good)"></i><i style="width:' + (judged ? 100 - pct : 0) + '%;background:var(--crit)"></i></div>' +
@@ -4092,8 +4092,8 @@ function render(){
       '<span style="cursor:default;color:var(--mut)">จาก ' + num(judged, 0) + ' drop ที่มีผลในชีต</span></div>' +
       delta(pct, REP.prev ? pctOf(REP.prev.kpi) : null, '%', 'high', true) +
       '<div class="s" style="margin-top:6px">💡 <b>PASS</b> = ส่งถึงลูกค้าไม่ช้าเกิน 30 นาที · <b>Delay</b> = ช้าเกิน 30 นาที · <b>% ยิ่งสูงยิ่งดี</b></div></div>' +
-    tile('จำนวนเที่ยว', num(k.trips, 0), '', REP.from === REP.to ? dmy(REP.from) : dmy(REP.from) + ' – ' + dmy(REP.to), '', '#2a78d6', '🚚', delta(k.trips, pk.trips, ' เที่ยว', '')) +
-    tile('งานทั้งหมด (drop)', num(REP.n_rows, 0), '', 'จุดส่งทั้งหมด · มีผล On Time ' + num(judged, 0), '', '#6250d6', '📦', delta(REP.n_rows, REP.prev && REP.prev.n_rows, ' drop', '')) +
+    tile('จำนวนเที่ยว', num(k.trips, 0), '', REP.from === REP.to ? dmy(REP.from) : dmy(REP.from) + ' – ' + dmy(REP.to), '', '#2a78d6', '🚚', delta(k.trips, pk.trips, ' เที่ยว', 'high')) +
+    tile('งานทั้งหมด (drop)', num(REP.n_rows, 0), '', 'จุดส่งทั้งหมด · มีผล On Time ' + num(judged, 0), '', '#6250d6', '📦', delta(REP.n_rows, REP.prev && REP.prev.n_rows, ' drop', 'high')) +
     tile('รอโหลดสินค้า (เฉลี่ย)', num(k.wait), 'นาที', sub2('เข้าลาน → เริ่มโหลด', k.wait), '', '#7c5cd6', '⏳', delta(k.wait, pk.wait, ' นาที', 'low')) +
     tile('โหลดสินค้า (เฉลี่ย)', num(k.load), 'นาที', sub2('เริ่มโหลด → โหลดเสร็จ', k.load), '', '#d6487f', '⛽', delta(k.load, pk.load, ' นาที', 'low')) +
     tile('เดินทางไปปลายทาง (เฉลี่ย)', num(k.travel), 'นาที', sub2('ออกคลัง → ถึงปลายทาง', k.travel), '', '#1baf7a', '🛣️', delta(k.travel, pk.travel, ' นาที', 'low')) +
