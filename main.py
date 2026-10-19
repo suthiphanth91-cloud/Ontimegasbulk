@@ -3465,7 +3465,7 @@ REPORT_HTML = """<!doctype html>
     --s1:#2a78d6;--s1-soft:#cde2fb;--acc:#2563eb;
     --good:#0ca30c;--good-ink:#006300;--good-bg:#e9f7e9;--crit:#d03b3b;--crit-ink:#b42318;--crit-bg:#fdecec;
     --o1:#86b6ef;--o2:#3987e5;--o3:#184f95;--o0:#c3c2b7;
-    --h1:#eef5fe;--h2:#cde2fb;--h3:#9ec5f4;--h4:#6da7ec;
+    --h1:#dcf3dc;--h2:#fff0bf;--h3:#ffd9c2;--h4:#f9c9c9;
     --shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.08)}
   @media (prefers-color-scheme:dark){
     :root:where(:not([data-theme="light"])){color-scheme:dark;
@@ -3474,14 +3474,14 @@ REPORT_HTML = """<!doctype html>
       --s1:#3987e5;--s1-soft:#1c3554;--acc:#3b82f6;
       --good:#0ca30c;--good-ink:#3fcf3f;--good-bg:#10260f;--crit:#d03b3b;--crit-ink:#ff8a80;--crit-bg:#2d1414;
       --o1:#9ec5f4;--o2:#3987e5;--o3:#1c5cab;--o0:#4a4a46;
-      --h1:#14243a;--h2:#1c3554;--h3:#24497a;--h4:#2d5fa3;--shadow:none}}
+      --h1:#143a1c;--h2:#3d3210;--h3:#45260f;--h4:#4a1a1c;--shadow:none}}
   :root[data-theme="dark"]{color-scheme:dark;
       --plane:#0d0d0d;--card:#161616;--surface:#1a1a19;--line:#2a2a28;--hair:#2c2c2a;--axis:#383835;
       --ink:#f0efec;--ink2:#c3c2b7;--mut:#898781;--hover:#1f2733;
       --s1:#3987e5;--s1-soft:#1c3554;--acc:#3b82f6;
       --good:#0ca30c;--good-ink:#3fcf3f;--good-bg:#10260f;--crit:#d03b3b;--crit-ink:#ff8a80;--crit-bg:#2d1414;
       --o1:#9ec5f4;--o2:#3987e5;--o3:#1c5cab;--o0:#4a4a46;
-      --h1:#14243a;--h2:#1c3554;--h3:#24497a;--h4:#2d5fa3;--shadow:none}
+      --h1:#143a1c;--h2:#3d3210;--h3:#45260f;--h4:#4a1a1c;--shadow:none}
   *{box-sizing:border-box}
   body{margin:0;background:var(--plane);color:var(--ink);font-family:'Noto Sans Thai',system-ui,-apple-system,"Segoe UI",sans-serif;font-size:14.5px;padding-left:148px}
   /* เมนูหลัก (เหมือนหน้าอื่น) */
@@ -3681,6 +3681,19 @@ REPORT_HTML = """<!doctype html>
   .orow .oav b{font-size:24px;font-weight:700}
   .orow .oav small{display:block;font-size:11.5px;color:var(--mut)}
   @media (max-width:820px){ .orow{grid-template-columns:1fr 92px;gap:6px 10px} .orow .obar{grid-column:1 / -1;grid-row:2} .orow .oav b{font-size:20px} }
+  /* คำอธิบายใต้หัวกราฟ ให้คนอ่านครั้งแรกเข้าใจ */
+  .hint{margin:-4px 0 12px;font-size:12.5px;line-height:1.55;color:var(--ink2);background:var(--plane);border-radius:8px;padding:7px 11px}
+  .hint b{color:var(--ink)}
+  .hk{display:inline-block;padding:0 7px;border-radius:5px;margin:0 2px;color:var(--ink);font-weight:600}
+  /* แยกสีกลุ่มคอลัมน์แบบ Looker: รอโหลด = ม่วงอ่อน · โหลด = ชมพู */
+  :root{--cw:#f1eafb;--cwh:#dccbf5;--cl:#fdebf2;--clh:#f8c9dc}
+  @media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){--cw:#241d36;--cwh:#3b2f5c;--cl:#33192a;--clh:#552a42}}
+  :root[data-theme="dark"]{--cw:#241d36;--cwh:#3b2f5c;--cl:#33192a;--clh:#552a42}
+  th.gw{background:var(--cwh) !important;color:var(--ink) !important}
+  th.gl{background:var(--clh) !important;color:var(--ink) !important}
+  td.cw{background:var(--cw)}
+  td.cl{background:var(--cl)}
+  tr.grp th{position:static;text-align:center;font-size:12px;border-bottom:0}
   [hidden]{display:none !important}
 </style>
 </head>
@@ -3712,21 +3725,24 @@ REPORT_HTML = """<!doctype html>
   <div id="err" class="err" hidden></div>
   <div class="tiles" id="tiles"></div>
   <div class="panels">
-    <section class="panel w8 fillp"><div class="ph"><h3>เวลารอโหลดสินค้า แยกตามต้นทาง</h3><span class="sub">นาที · แท่ง = เวลาเฉลี่ย · คลิกแถวเพื่อกรอง</span></div>
+    <section class="panel w8 fillp"><div class="ph"><h3>เวลารอโหลดสินค้า แยกตามต้นทาง</h3><span class="sub">นาที</span></div>
+      <p class="hint">💡 นับตั้งแต่<b>รถเข้าลาน</b> จนถึง<b>เริ่มโหลด</b> · ตัวเลขใหญ่ = เวลารอเฉลี่ย · <b>แท่งยิ่งยาว = รอนาน</b> · กดแถวเพื่อดูเฉพาะต้นทางนั้น</p>
       <div id="cOrigin"></div></section>
     <div class="w4 col2">
-      <section class="panel"><div class="ph"><h3>สัดส่วนตามระยะทาง</h3><span class="sub">สายใกล้ ≤80 · กลาง 81–250 · ไกล &gt;250 กม.</span></div>
+      <section class="panel"><div class="ph"><h3>สัดส่วนตามระยะทาง</h3></div>
+        <p class="hint">💡 งานแบ่งตามระยะทางต้นทาง → ปลายทาง: <b>ใกล้</b> ไม่เกิน 80 กม. · <b>กลาง</b> 81–250 · <b>ไกล</b> เกิน 250 กม. · กดสีเพื่อกรอง</p>
         <div id="cClass"></div></section>
-      <section class="panel"><div class="ph"><h3>จำนวนเที่ยวตามประเภทรถ</h3><span class="sub">เที่ยว</span></div><div id="cVtype"></div></section>
+      <section class="panel"><div class="ph"><h3>จำนวนเที่ยวตามประเภทรถ</h3></div><p class="hint">💡 รถแต่ละขนาดวิ่งไปกี่เที่ยวในช่วงวันที่ที่เลือก</p><div id="cVtype"></div></section>
     </div>
-    <section class="panel w12"><div class="ph"><h3>เวลาที่อยู่ในสถานี (เฉลี่ย)</h3><span class="sub">นาที · เข้าปลายทาง → ออกปลายทาง · แยกตามประเภทงาน · กดหัวกลุ่มเพื่อกรอง</span></div><div id="cDest"></div></section>
-    <section class="panel w12"><div class="ph"><h3>สรุปตามต้นทาง</h3><span class="sub">นาที</span></div>
-      <div class="tw" style="max-height:none"><table><thead><tr id="oHead"></tr></thead><tbody id="tOrigin"></tbody></table></div></section>
+    <section class="panel w12"><div class="ph"><h3>เวลาที่อยู่ในสถานี (เฉลี่ย)</h3><span class="sub">นาที</span></div><p class="hint">💡 รถจอดอยู่ที่ปลายทางนานเท่าไร (<b>ถึงปลายทาง → ออกจากปลายทาง</b>) แยกตามประเภทงาน · <b>ตัวเลขมาก = ลงของนาน</b> · เรียงจากนานสุดลงมา · กดหัวการ์ดหรือชื่อปลายทางเพื่อกรอง</p><div id="cDest"></div></section>
+    <section class="panel w12"><div class="ph"><h3>สรุปตามต้นทาง</h3><span class="sub">นาที</span></div><p class="hint">💡 <b>รอโหลด</b> = เข้าลาน → เริ่มโหลด · <b>โหลด</b> = เริ่มโหลด → โหลดเสร็จ · ต่ำสุด / สูงสุด / เฉลี่ย ของแต่ละต้นทาง · กดหัวคอลัมน์เพื่อเรียง</p>
+      <div class="tw" style="max-height:none"><table><thead><tr class="grp"><th colspan="2"></th><th colspan="3" class="gw">⏳ เวลารอโหลดสินค้า (นาที)</th><th colspan="3" class="gl">⛽ เวลาโหลดสินค้า (นาที)</th></tr><tr id="oHead"></tr></thead><tbody id="tOrigin"></tbody></table></div></section>
     <section class="panel w12"><div class="tools"><h3 style="margin:0;font-size:15px">รายการทั้งหมด</h3><span class="sub" id="rowCount" style="font-size:12.5px;color:var(--mut)"></span><span class="grow"></span>
       <input type="search" id="q" placeholder="ค้นหา รถ / ปลายทาง / ออเดอร์" style="min-width:260px"></div>
+      <p class="hint">💡 ทุกงาน (drop) ในช่วงวันที่ที่เลือก · <b>กดหัวคอลัมน์</b> เพื่อเรียงน้อย→มาก / มาก→น้อย · <b>กดเบอร์รถ</b> เพื่อดูเฉพาะคันนั้น · ช่องค้นหาด้านบนพิมพ์เบอร์รถ/ปลายทาง/ออเดอร์ได้</p>
       <div class="tw"><table><thead><tr id="rowsHead"></tr></thead>
         <tbody id="rows"></tbody></table></div>
-      <p class="note">ช่องรอโหลด/โหลด ไล่สีตามความนาน: &lt;30 · 30–60 · 60–120 · &gt;120 นาที</p></section>
+      <p class="note">สีช่องรอโหลด/โหลด: <span class="hk" style="background:var(--h1)">ไม่ถึง 30 นาที</span><span class="hk" style="background:var(--h2)">30–60</span><span class="hk" style="background:var(--h3)">60–120</span><span class="hk" style="background:var(--h4)">เกิน 120 นาที</span></p></section>
   </div>
 </main>
 <div id="tip"></div>
@@ -3745,6 +3761,7 @@ function vcol(v){ return VCOL[v] || hashc(v); }
 function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function iso(d){ return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
 function num(v, d){ return v == null ? '–' : Number(v).toLocaleString('en-US', {maximumFractionDigits: d == null ? 1 : d}); }
+function sub2(what, v){ return what + (hm(v) ? ' · ' + hm(v) : ''); }
 function hm(v){ if(v == null) return ''; const m = Math.round(v); return m >= 60 ? '≈ ' + Math.floor(m / 60) + ' ชม. ' + (m % 60) + ' นาที' : ''; }
 function getF(k){ return SELMAP[k] ? document.getElementById(SELMAP[k]).value : XF[k]; }
 function setF(k, v){
@@ -3804,21 +3821,19 @@ function niceStep(mx){
 function render(){
   renderActive();
   const k = REP.kpi, judged = k.pass + k.delay, pct = judged ? k.pass / judged * 100 : null;
-  const av = (REP.av_values || []).slice(0, 4).map(a => esc(a[0]) + ' ' + a[1]).join(' · ');
   document.getElementById('tiles').innerHTML =
     '<div class="tile hero" style="' + (pct != null && pct < 90 ? '--hb:var(--crit-bg);--hc:var(--crit)' : '') + '"><div class="l"><span class="ic" style="background:var(--good-bg)">⏱️</span>On Time</div><div class="v">' + (pct == null ? '–' : Math.round(pct * 10) / 10 + '%') + '</div>' +
       '<div class="pbar" data-tip="PASS ' + k.pass + ' · Delay ' + k.delay + '"><i style="width:' + (pct || 0) + '%;background:var(--good)"></i><i style="width:' + (judged ? 100 - pct : 0) + '%;background:var(--crit)"></i></div>' +
       '<div class="leg2"><span data-k="status" data-v="PASS"><span class="ico" style="background:var(--good)">✓</span>PASS <b>' + num(k.pass, 0) + '</b></span>' +
       '<span data-k="status" data-v="Delay"><span class="ico" style="background:var(--crit)">!</span>Delay <b>' + num(k.delay, 0) + '</b></span>' +
       '<span style="cursor:default;color:var(--mut)">จาก ' + num(judged, 0) + ' drop ที่มีผลในชีต</span></div>' +
-      '<div class="s" style="margin-top:6px">ผล PASS/Delay อ่านจากชีต (คอลัมน์ AV · ช้าเกิน 30 นาที = Delay)</div>' +
-      (av ? '<div class="s" style="margin-top:6px" title="คำที่พบในช่อง On Time (คอลัมน์ AV) ของชีต">คำในชีต: ' + av + '</div>' : '') + '</div>' +
+      '<div class="s" style="margin-top:6px">💡 <b>PASS</b> = ส่งถึงลูกค้าไม่ช้าเกิน 30 นาที · <b>Delay</b> = ช้าเกิน 30 นาที · <b>% ยิ่งสูงยิ่งดี</b></div></div>' +
     tile('จำนวนเที่ยว', num(k.trips, 0), '', REP.from === REP.to ? dmy(REP.from) : dmy(REP.from) + ' – ' + dmy(REP.to), '', '#2a78d6', '🚚') +
-    tile('งานทั้งหมด (drop)', num(REP.n_rows, 0), '', 'มีผล On Time ' + num(judged, 0), '', '#6250d6', '📦') +
-    tile('รอโหลดสินค้า (เฉลี่ย)', num(k.wait), 'นาที', hm(k.wait), '', '#eb6834', '⏳') +
-    tile('โหลดสินค้า (เฉลี่ย)', num(k.load), 'นาที', hm(k.load), '', '#e87ba4', '⛽') +
-    tile('เดินทางไปปลายทาง (เฉลี่ย)', num(k.travel), 'นาที', hm(k.travel), '', '#1baf7a', '🛣️') +
-    tile('อยู่ที่สถานี / ส่งสินค้า (เฉลี่ย)', num(k.unload), 'นาที', hm(k.unload), '', '#eda100', '🏁');
+    tile('งานทั้งหมด (drop)', num(REP.n_rows, 0), '', 'จุดส่งทั้งหมด · มีผล On Time ' + num(judged, 0), '', '#6250d6', '📦') +
+    tile('รอโหลดสินค้า (เฉลี่ย)', num(k.wait), 'นาที', sub2('เข้าลาน → เริ่มโหลด', k.wait), '', '#9b72e0', '⏳') +
+    tile('โหลดสินค้า (เฉลี่ย)', num(k.load), 'นาที', sub2('เริ่มโหลด → โหลดเสร็จ', k.load), '', '#e87ba4', '⛽') +
+    tile('เดินทางไปปลายทาง (เฉลี่ย)', num(k.travel), 'นาที', sub2('ออกคลัง → ถึงปลายทาง', k.travel), '', '#1baf7a', '🛣️') +
+    tile('อยู่ที่สถานี / ส่งสินค้า (เฉลี่ย)', num(k.unload), 'นาที', sub2('ถึงปลายทาง → ออกปลายทาง', k.unload), '', '#eda100', '🏁');
   drawOrigin(); drawClass();
   bars('cVtype', REP.by_vtype, x => x.vtype, x => x.trips, ' เที่ยว', 'vtype', x => x.vtype + ': ' + x.trips + ' เที่ยว', x => vcol(x.vtype));
   drawDest();
@@ -3840,13 +3855,13 @@ function sortList(list, cols, st){
 }
 function headHtml(cols, tbl){
   const st = SORTS[tbl];
-  return cols.map(c => '<th class="cs' + (c.n ? ' n' : '') + (st && st.k === c.k ? ' act' : '') + '" data-tbl="' + tbl + '" data-col="' + c.k + '" title="กดเพื่อเรียง">' +
+  return cols.map(c => '<th class="cs' + (c.n ? ' n' : '') + (c.g ? ' g' + c.g : '') + (st && st.k === c.k ? ' act' : '') + '" data-tbl="' + tbl + '" data-col="' + c.k + '" title="กดเพื่อเรียง">' +
     c.t + '<span class="ar">' + (st && st.k === c.k ? (st.dir > 0 ? '▲' : '▼') : '⇅') + '</span></th>').join('');
 }
 const OCOLS = [
   {k: 'origin', t: 'ต้นทาง', v: o => o.origin}, {k: 'trips', t: 'เที่ยว', n: 1, v: o => o.trips},
-  {k: 'wmin', t: 'รอโหลด ต่ำสุด', n: 1, v: o => o.wait.min}, {k: 'wmax', t: 'สูงสุด', n: 1, v: o => o.wait.max}, {k: 'wavg', t: 'เฉลี่ย', n: 1, v: o => o.wait.avg},
-  {k: 'lmin', t: 'โหลด ต่ำสุด', n: 1, v: o => o.load.min}, {k: 'lmax', t: 'สูงสุด', n: 1, v: o => o.load.max}, {k: 'lavg', t: 'เฉลี่ย', n: 1, v: o => o.load.avg}];
+  {k: 'wmin', t: 'ต่ำสุด', n: 1, g: 'w', v: o => o.wait.min}, {k: 'wmax', t: 'สูงสุด', n: 1, g: 'w', v: o => o.wait.max}, {k: 'wavg', t: 'เฉลี่ย', n: 1, g: 'w', v: o => o.wait.avg},
+  {k: 'lmin', t: 'ต่ำสุด', n: 1, g: 'l', v: o => o.load.min}, {k: 'lmax', t: 'สูงสุด', n: 1, g: 'l', v: o => o.load.max}, {k: 'lavg', t: 'เฉลี่ย', n: 1, g: 'l', v: o => o.load.avg}];
 const RCOLS = [
   {k: 'car', t: 'เบอร์รถ', v: x => x.car}, {k: 'date', t: 'วันที่', v: x => x.date}, {k: 'order', t: 'เลขออเดอร์', v: x => x.order},
   {k: 'origin', t: 'ต้นทาง', v: x => x.origin}, {k: 'jtype', t: 'ประเภทงาน', v: x => x.jtype}, {k: 'dest', t: 'ปลายทาง', v: x => x.dest}, {k: 'vtype', t: 'ประเภท', v: x => x.vtype},
@@ -3854,7 +3869,7 @@ const RCOLS = [
   {k: 'sched', t: 'เวลาส่ง', v: x => hhmm(x.sched)},
   {k: 'arrive', t: 'ถึงปลายทาง', v: x => x.arrive ? x.arrive.slice(6, 10) + x.arrive.slice(3, 5) + x.arrive.slice(0, 2) + x.arrive.slice(10) : ''},
   {k: 'ontime', t: 'On Time', v: x => x.ontime}, {k: 'late', t: 'ช้า (นาที)', n: 1, v: x => toNum(x.late)},
-  {k: 'wait', t: 'รอโหลด', n: 1, v: x => x.wait}, {k: 'load', t: 'โหลด', n: 1, v: x => x.load},
+  {k: 'wait', t: 'รอโหลด', n: 1, g: 'w', v: x => x.wait}, {k: 'load', t: 'โหลด', n: 1, g: 'l', v: x => x.load},
   {k: 'travel', t: 'เดินทาง', n: 1, v: x => x.travel}, {k: 'unload', t: 'ส่งสินค้า', n: 1, v: x => x.unload}];
 document.addEventListener('click', e => {
   const th = e.target.closest ? e.target.closest('th.cs') : null;
@@ -3866,8 +3881,8 @@ document.addEventListener('click', e => {
 function drawOriginTable(){
   document.getElementById('oHead').innerHTML = headHtml(OCOLS, 'o');
   document.getElementById('tOrigin').innerHTML = sortList(REP.by_origin, OCOLS, SORTS.o).map(o => '<tr><td class="k" data-k="origin" data-v="' + esc(o.origin) + '">' + esc(o.origin) + '</td><td class="n">' + o.trips + '</td>' +
-    '<td class="n">' + num(o.wait.min) + '</td><td class="n">' + num(o.wait.max) + '</td><td class="n"><b>' + num(o.wait.avg) + '</b></td>' +
-    '<td class="n">' + num(o.load.min) + '</td><td class="n">' + num(o.load.max) + '</td><td class="n"><b>' + num(o.load.avg) + '</b></td></tr>').join('') ||
+    '<td class="n cw">' + num(o.wait.min) + '</td><td class="n cw">' + num(o.wait.max) + '</td><td class="n cw"><b>' + num(o.wait.avg) + '</b></td>' +
+    '<td class="n cl">' + num(o.load.min) + '</td><td class="n cl">' + num(o.load.max) + '</td><td class="n cl"><b>' + num(o.load.avg) + '</b></td></tr>').join('') ||
     '<tr><td colspan="8" class="empty">ไม่มีข้อมูล</td></tr>';
 }
 function dmy(s){ return s ? s.slice(8, 10) + '/' + s.slice(5, 7) + '/' + s.slice(0, 4) : ''; }
