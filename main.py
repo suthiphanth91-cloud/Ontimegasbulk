@@ -4599,6 +4599,10 @@ PLAN_HTML = """<!doctype html>
   .imp td[data-sel]{outline:2px solid #2563eb;outline-offset:-2px;position:relative}
   .imp td[data-sel] .fh{position:absolute;right:0;bottom:0;width:11px;height:11px;background:#2563eb;border:1px solid #fff;cursor:crosshair}
   .imp td.idrag{background:#dbeafe}
+  .imp .iorg{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:10px 0 2px}
+  .imp .iorg .chip{font-size:14px;padding:6px 14px}
+  .imp .iorg .chip.on{background:#2563eb;border-color:#2563eb;color:#fff}
+  .imp .iorg .chip:disabled{opacity:.45;cursor:default}
   .imp .impsearch{display:flex;align-items:center;gap:8px;margin:8px 0;flex-wrap:wrap}
   .imp .impsearch .sw{position:relative;display:inline-flex;align-items:center}
   .imp .impsearch .ico{position:absolute;left:11px;pointer-events:none;opacity:.65}
@@ -5654,9 +5658,10 @@ function impRender(){
     '<b class="bad">ช่องสีแดง = มีปัญหา (เอาเมาส์ชี้ดูสาเหตุ)</b> · ช่องสีเหลือง = ที่คุณแก้</p>' + er + w +
     '<label style="display:block;margin:6px 2px"><input type="checkbox" id="impOnlyBad"' + (IMP.onlyBad ? ' checked' : '') +
     '> ดูเฉพาะแถวที่มีช่องสีแดง (' + nbad + ' แถว)</label>' +
+    impOriginBar() +
     '<div class="impsearch"><span class="sw"><span class="ico">🔍</span><input type="search" id="impQ" placeholder="ค้นหาในตาราง (รถ / ปลายทาง / ออเดอร์ / ชื่อคนขับ)" value="' + esc(IMP.q || '') +
     '">' + (IMP.q ? '<button type="button" class="clr" id="impQx" title="ล้างคำค้น">✕</button>' : '') + '</span><span class="cnt">' +
-    (String(IMP.q || '').trim() ? 'พบ ' + shown + ' จาก ' + IMP.rows.length + ' แถว' : 'ทั้งหมด ' + IMP.rows.length + ' แถว') + '</span>' +
+    (String(IMP.q || '').trim() || IMP.origin ? 'พบ ' + shown + ' จาก ' + IMP.rows.length + ' แถว' : 'ทั้งหมด ' + IMP.rows.length + ' แถว') + '</span>' +
     (IMP.near ? ' <button class="undo" id="impRenum" title="จัดเที่ยววิ่งของทุกแถวใหม่ตาม Drop (Drop 1 = เที่ยวใหม่, Drop 2+ ต่อเที่ยวเดิม) ไม่ให้ซ้ำกับงานในชีตของวันนั้น">🔢 จัดเที่ยววิ่งใหม่ตาม Drop</button>' : '') + '</div>' +
     '<span class="mut" style="font-size:12.5px">ลากช่องไปวางบนอีกช่อง = สลับค่า · ลากจุดสีน้ำเงินที่มุมช่อง = คัดลอกลงแถวล่าง</span>' +
     '<button class="undo" id="impUndo"' + (IMP.hist && IMP.hist.length ? '' : ' disabled') + ' title="ย้อนกลับการแก้ล่าสุด (Ctrl+Z)">↶ ย้อนกลับ</button>' +
@@ -5676,6 +5681,7 @@ function impRender(){
   const rp = document.getElementById('impReplace'); if(rp) rp.onchange = e => { IMP.replace = e.target.checked; };
   const sk = document.getElementById('impSkip'); if(sk) sk.onchange = e => { IMP.skip = e.target.checked; impRender(); };
   document.getElementById('impOnlyBad').onchange = e => { IMP.onlyBad = e.target.checked; impRender(); };
+  document.querySelectorAll('#impBody [data-iorg]').forEach(bt => { bt.onclick = () => { IMP.origin = bt.dataset.iorg; impRender(); }; });
   document.getElementById('impUndo').onclick = impUndo;
   document.getElementById('impGo').onclick = impCommit;
   const qi = document.getElementById('impQ');
@@ -5697,7 +5703,17 @@ function impHl(v){                       // แสดงค่าในช่อ
   }
   return out;
 }
-function impHidden(ri){                  // ถูกซ่อนด้วยช่องค้นหาไหม (ค้นในทุกช่องของแถว ไม่สนตัวพิมพ์เล็กใหญ่)
+const IMP_ORIGINS = ['SC BPK', 'PTT TANK', 'BSRC', 'UAC', 'IRPC'];
+function impOriginBar(){                  // ปุ่มแยกต้นทาง 5 แห่ง (+ ทั้งหมด) พร้อมจำนวนแถว
+  const cnt = {}; IMP.rows.forEach(r => { const o = String(r[11] || '').trim(); cnt[o] = (cnt[o] || 0) + 1; });
+  const other = IMP.rows.length - IMP_ORIGINS.reduce((a, o) => a + (cnt[o] || 0), 0), cur = IMP.origin || '';
+  const b = (v, label, n) => '<button type="button" class="chip' + (cur === v ? ' on' : '') + '" data-iorg="' + esc(v) + '"' + (n ? '' : ' disabled') + '>' + label + ' <b>' + n + '</b></button>';
+  return '<div class="iorg"><span class="mut" style="font-size:13px">ต้นทาง:</span>' + b('', 'ทั้งหมด', IMP.rows.length) +
+    IMP_ORIGINS.map(o => b(o, esc(o), cnt[o] || 0)).join('') + (other ? b('*', 'อื่นๆ', other) : '') + '</div>';
+}
+function impHidden(ri){                  // ถูกซ่อนด้วยช่องค้นหา / ปุ่มต้นทางไหม
+  const o = IMP.origin || '', org = String(IMP.rows[ri][11] || '').trim();
+  if(o === '*' ? IMP_ORIGINS.indexOf(org) >= 0 : (o && org !== o)) return true;      // แล้วค่อยกรองด้วยคำค้น
   const q = String(IMP.q || '').trim().toLowerCase();
   return !!q && IMP.rows[ri].join(' ').toLowerCase().indexOf(q) < 0;
 }
