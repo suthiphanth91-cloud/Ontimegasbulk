@@ -4557,6 +4557,19 @@ PLAN_HTML = """<!doctype html>
          border-radius:10px;font-weight:600;z-index:80;box-shadow:0 4px 14px rgba(0,0,0,.25);max-width:420px}
   .toast.bad{background:var(--late)}
   /* ── หน้าต่างนำเข้า Excel ── */
+  /* สรุปรถของวัน: จัดแล้ว / ว่าง */
+  .carbar{margin:8px 0 10px;padding:10px 14px;border:1px solid var(--line);border-radius:12px;background:var(--card);font-size:15px}
+  .carbar .sum{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .carbar .sum b{font-size:17px}
+  .carbar .on{color:#1d4ed8}.carbar .free{color:#15803d}
+  .carbar button{font:inherit;font-size:13.5px;padding:5px 12px;border-radius:999px;border:1px solid var(--line);background:var(--bg);cursor:pointer}
+  .carbar .lst{margin-top:10px;display:grid;gap:8px}
+  .carbar .lst h4{margin:0;font-size:13.5px;color:var(--mut)}
+  .carbar .chips2{display:flex;flex-wrap:wrap;gap:6px}
+  .carbar .cp{font-size:13.5px;padding:4px 10px;border-radius:8px;border:1px solid var(--line);cursor:pointer}
+  .carbar .cp.f{background:#ecfdf5;border-color:#a7f3d0;color:#166534}
+  .carbar .cp.u{background:#eff6ff;border-color:#bfdbfe;color:#1e3a8a}
+  .carbar .cp small{opacity:.75;margin-left:4px}
   .imp-back{position:fixed;inset:0;background:rgba(15,23,42,.5);z-index:60;display:flex;
             align-items:flex-start;justify-content:center;padding:12px 10px;overflow:auto}
   .imp-back[hidden]{display:none}
@@ -4640,6 +4653,7 @@ PLAN_HTML = """<!doctype html>
 </div></header>
 <main>
   <div class="cards" id="cards"></div>
+  <div id="carbar" class="carbar" hidden></div>
   <div class="chgbar" id="presbar" hidden></div>
   <div class="chgbar" id="edithint" hidden>
     <span>✏️ <b>กำลังอยู่ในโหมดแก้ไข</b> — คลิกที่ช่องเพื่อแก้ · <b>Enter</b> = บันทึกแล้วลงช่องล่าง · <b>Tab</b> = บันทึกแล้วไปช่องขวา · <b>Esc</b> = ยกเลิก ·
@@ -4761,8 +4775,64 @@ async function load(fresh, quiet){
   render();
 }
 
+// ── รถคันไหนจัดงานแล้ว: นับจากแถวของวันนั้น (ไม่นับแถวยกเลิก) ──
+function carUse(cellRows){                     // → {เบอร์รถ: {trips: ['เที่ยว 1', ...], drops: n}}
+  const m = {};
+  cellRows.forEach(c => {
+    const car = String(c[15] || '').trim();
+    if(!car || /ยกเลิก|cancel/i.test(String(c[12] || ''))) return;
+    const u = m[car] = m[car] || {trips: [], drops: 0};
+    const t = String(c[4] || '').trim();
+    if(t && u.trips.indexOf(t) < 0) u.trips.push(t);
+    u.drops++;
+  });
+  Object.keys(m).forEach(k => m[k].trips.sort());
+  return m;
+}
+function useText(u){ return u ? 'มีงานแล้ว · ' + (u.trips.length ? u.trips.join(', ') + ' · ' : '') + u.drops + ' drop' : 'ว่าง'; }
+function allCars(){
+  const set = {};
+  Object.keys(CARS || {}).forEach(k => { set[k] = 1; });
+  ((OPTS && OPTS.suggest && OPTS.suggest['15']) || []).forEach(k => { set[k] = 1; });
+  return Object.keys(set).sort((a, b) => a.localeCompare(b, 'th', {numeric: true}));
+}
+function refreshCarList(cellRows){             // รายการเบอร์รถในช่องเลือก: รถว่างขึ้นก่อน + ป้ายสถานะ
+  const dl = document.getElementById('dl15');
+  if(!dl) return;
+  const use = carUse(cellRows), cars = allCars();
+  Object.keys(use).forEach(k => { if(cars.indexOf(k) < 0) cars.push(k); });
+  const free = cars.filter(k => !use[k]), busy = cars.filter(k => use[k]);
+  dl.innerHTML = free.concat(busy).map(k => '<option value="' + esc(k) + '" label="' + esc(useText(use[k])) + '"></option>').join('');
+}
+let CARBAR_OPEN = false;
+function updateCarBar(){
+  const bar = document.getElementById('carbar');
+  if(!bar || !DATA) return;
+  const cars = allCars();
+  if(!cars.length){ bar.hidden = true; return; }
+  const use = carUse(DATA.rows.map(x => x.cells));
+  const busy = cars.filter(k => use[k]), free = cars.filter(k => !use[k]);
+  Object.keys(use).forEach(k => { if(cars.indexOf(k) < 0) busy.push(k); });
+  bar.hidden = false;
+  bar.innerHTML = '<div class="sum">🚛 <span>รถของวันที่ ' + dmy(DATA.date) + ':</span>' +
+    '<span class="on">จัดแล้ว <b>' + busy.length + '</b> คัน</span><span class="free">ว่าง <b>' + free.length + '</b> คัน</span>' +
+    '<span class="mut">(รถทั้งหมด ' + cars.length + ' คัน)</span><button id="carbarT">' + (CARBAR_OPEN ? 'ซ่อนรายชื่อ ▴' : 'ดูรายชื่อ ▾') + '</button></div>' +
+    (CARBAR_OPEN ? '<div class="lst"><h4>🟢 ว่าง (' + free.length + ') — กดเพื่อค้นหารถคันนั้น</h4><div class="chips2">' +
+      (free.map(k => '<span class="cp f" data-car="' + esc(k) + '">' + esc(k) + '</span>').join('') || '<span class="mut">ไม่มีรถว่าง</span>') + '</div>' +
+      '<h4>🔵 จัดแล้ว (' + busy.length + ')</h4><div class="chips2">' +
+      (busy.map(k => '<span class="cp u" data-car="' + esc(k) + '" title="' + esc(useText(use[k])) + '">' + esc(k) + '<small>' + esc((use[k].trips.join(', ') || '') + ' · ' + use[k].drops + ' drop') + '</small></span>').join('') || '<span class="mut">ยังไม่มี</span>') +
+      '</div></div>' : '');
+}
+document.addEventListener('click', e => {
+  if(e.target.id === 'carbarT'){ CARBAR_OPEN = !CARBAR_OPEN; updateCarBar(); return; }
+  const cp = e.target.closest && e.target.closest('.carbar .cp');
+  if(cp){ const q = document.getElementById('q'); q.value = q.value === cp.dataset.car ? '' : cp.dataset.car; render(); }   // กดชื่อรถ = ค้นหาแถวของคันนั้น (กดซ้ำ = ล้าง)
+});
+
 function render(){
   if(!DATA) return;
+  updateCarBar();
+  if(!CARS && !render._cars){ render._cars = 1; loadCars().then(() => updateCarBar()); }
   const q = document.getElementById('q').value.trim().toLowerCase();
   const depot = document.getElementById('depot').value;
   updateBar();
@@ -5301,7 +5371,9 @@ async function loadOpts(){              // รายการตัวเลื�
 }
 
 // ตัวแก้ค่าในช่อง (ใช้ทั้งตารางหลักและตารางในหน้าต่างนำเข้า): เลือกอย่างเดียว / พิมพ์ค้นหา / พิมพ์อิสระ
+let CARCTX = null;                                    // แถวของวันที่ใช้คำนวณสถานะรถตอนเปิดช่องเบอร์รถ
 function openEditor(td, i, old, onSave, onCancel, onSkip){
+  if(i === 15) refreshCarList(CARCTX ? CARCTX() : (DATA ? DATA.rows.map(x => x.cells) : []));
   const strict = OPTS && OPTS.strict[String(i)];            // ต้นทาง/เที่ยววิ่ง/Drop/ประเภทรถ = เลือกอย่างเดียว
   const sug = OPTS && OPTS.suggest[String(i)];              // ปลายทาง/เบอร์รถ/พขร. = พิมพ์ค้นหาแล้วเลือก
   let el, done = false;
@@ -5390,6 +5462,11 @@ document.getElementById('editBtn').onclick = () => setEditing(!EDITING);
 let IMPFILE = null;
 let IMP = null;                          // {rows, headers, errs, edited, info, replace}
 const COLS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+let IMPDAY = {date: '', rows: []};                    // แถวในชีตของวันที่กำลังนำเข้า (ใช้บอกว่ารถคันไหนมีงานแล้ว)
+function impDayRows(skip){                             // แถวในชีตวันนั้น + แถวอื่นในตารางตรวจ (ไม่นับแถวที่กำลังแก้)
+  const base = IMPDAY.rows.length ? IMPDAY.rows : (DATA && IMP && DATA.date === (IMP.date || '') ? DATA.rows.map(x => x.cells) : []);
+  return base.concat((IMP ? IMP.rows : []).filter((_, k) => k !== skip));
+}
 function impBody(html){ document.getElementById('impBody').innerHTML = html; }
 function dmy(iso){ return iso ? iso.slice(8,10) + '/' + iso.slice(5,7) + '/' + iso.slice(0,4) : '?'; }
 
@@ -5643,7 +5720,9 @@ document.getElementById('impBody').addEventListener('click', e => {
   if(!td || !IMP || td.querySelector('input,select')) return;
   const r = Number(td.dataset.ir), c = Number(td.dataset.ic);
   IMP.sel = {r: r, c: c};
+  CARCTX = () => impDayRows(r);
   openEditor(td, c, IMP.rows[r][c], v => impSet(r, c, v), impRender);
+  CARCTX = null;
 });
 // ลากตัวช่อง (ไม่ใช่จุดสีน้ำเงิน) ไปวางบนอีกช่อง = สลับค่า: คอลัมน์เดียวกันข้ามแถวได้ หรือ พขร.1 ↔ พขร.2
 document.getElementById('impBody').addEventListener('mousedown', e => {
@@ -5841,7 +5920,9 @@ async function pasteGo(){
     const used = {};                                                    // เที่ยวที่รถแต่ละคันมีอยู่แล้วในชีตของวันนั้น (กันเลข JOB ซ้ำ)
     try{
       const pr = await fetch('/api/plan?date=' + iso);
+      IMPDAY = {date: iso, rows: []};
       if(pr.ok) ((await pr.json()).rows || []).forEach(x => {
+        IMPDAY.rows.push(x.cells);
         const car = String(x.cells[15] || '').trim(), t = parseInt(String(x.cells[4] || '').split(' ')[1], 10);
         const dn = parseInt(String(x.cells[13] || ''), 10) || 1;
         if(car && t) ((used[car] = used[car] || {})[t] = used[car][t] || {})[dn] = 1;      // used[รถ][เที่ยว][Drop]
