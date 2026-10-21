@@ -4557,19 +4557,25 @@ PLAN_HTML = """<!doctype html>
          border-radius:10px;font-weight:600;z-index:80;box-shadow:0 4px 14px rgba(0,0,0,.25);max-width:420px}
   .toast.bad{background:var(--late)}
   /* ── หน้าต่างนำเข้า Excel ── */
-  /* สรุปรถของวัน: จัดแล้ว / ว่าง */
-  .carbar{margin:8px 0 10px;padding:10px 14px;border:1px solid var(--line);border-radius:12px;background:var(--card);font-size:15px}
-  .carbar .sum{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
-  .carbar .sum b{font-size:17px}
+  /* แผงรถซ้ายของตาราง: ว่าง / จัดแล้ว — ลากชื่อรถไปวางบนแถว = ใส่เบอร์รถ */
+  .tblrow{display:flex;gap:12px;align-items:flex-start}
+  .tblrow > .wrap{flex:1;min-width:0}
+  .carbar{flex:0 0 210px;max-height:calc(100vh - 250px);overflow:auto;padding:10px 10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--card);font-size:14px;position:sticky;top:8px}
+  .carbar .hd2{font-weight:700;font-size:15px;margin-bottom:4px}
+  .carbar .sum2{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px}
   .carbar .on{color:#1d4ed8}.carbar .free{color:#15803d}
-  .carbar button{font:inherit;font-size:13.5px;padding:5px 12px;border-radius:999px;border:1px solid var(--line);background:var(--bg);cursor:pointer}
-  .carbar .lst{margin-top:10px;display:grid;gap:8px}
-  .carbar .lst h4{margin:0;font-size:13.5px;color:var(--mut)}
-  .carbar .chips2{display:flex;flex-wrap:wrap;gap:6px}
-  .carbar .cp{font-size:13.5px;padding:4px 10px;border-radius:8px;border:1px solid var(--line);cursor:pointer}
+  .carbar .tipd{font-size:12px;color:var(--mut);margin:0 0 8px;line-height:1.4}
+  .carbar h4{margin:10px 0 6px;font-size:13px;color:var(--mut)}
+  .carbar .g2{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+  .carbar .g2 .cp{margin:0;justify-content:center}
+  .carbar .cp{display:flex;justify-content:space-between;gap:6px;align-items:center;font-size:14px;padding:5px 8px;margin-bottom:5px;border-radius:8px;border:1px solid var(--line);cursor:grab;user-select:none}
+  .carbar .cp:active{cursor:grabbing}
   .carbar .cp.f{background:#ecfdf5;border-color:#a7f3d0;color:#166534}
   .carbar .cp.u{background:#eff6ff;border-color:#bfdbfe;color:#1e3a8a}
-  .carbar .cp small{opacity:.75;margin-left:4px}
+  .carbar .cp small{font-size:11.5px;opacity:.8;white-space:nowrap}
+  .carbar .cp.sel{outline:2px solid #2563eb}
+  tr.dropok td{background:#dbeafe !important}
+  @media (max-width:820px){ .tblrow{flex-direction:column} .carbar{position:static;flex:none;width:100%;max-height:220px} }
   .imp-back{position:fixed;inset:0;background:rgba(15,23,42,.5);z-index:60;display:flex;
             align-items:flex-start;justify-content:center;padding:12px 10px;overflow:auto}
   .imp-back[hidden]{display:none}
@@ -4653,7 +4659,6 @@ PLAN_HTML = """<!doctype html>
 </div></header>
 <main>
   <div class="cards" id="cards"></div>
-  <div id="carbar" class="carbar" hidden></div>
   <div class="chgbar" id="presbar" hidden></div>
   <div class="chgbar" id="edithint" hidden>
     <span>✏️ <b>กำลังอยู่ในโหมดแก้ไข</b> — คลิกที่ช่องเพื่อแก้ · <b>Enter</b> = บันทึกแล้วลงช่องล่าง · <b>Tab</b> = บันทึกแล้วไปช่องขวา · <b>Esc</b> = ยกเลิก ·
@@ -4671,10 +4676,13 @@ PLAN_HTML = """<!doctype html>
   </div>
   <div class="chips" id="chips"><span class="mut" style="font-size:13px">แสดงคอลัมน์:</span></div>
   <div id="err" class="warn" hidden></div>
-  <div class="wrap"><table>
-    <thead id="head"></thead>
-    <tbody id="rows"></tbody>
-  </table></div>
+  <div class="tblrow">
+    <aside id="carbar" class="carbar" hidden></aside>
+    <div class="wrap"><table>
+      <thead id="head"></thead>
+      <tbody id="rows"></tbody>
+    </table></div>
+  </div>
   <p class="mut" style="font-size:13px">ข้อมูลจากชีต "แผนงาน Gasbulk" คอลัมน์ A–Z (อ่านอย่างเดียว) &middot; สีแดง = ยกเลิก/โหลดเก็บ</p>
 </main>
 
@@ -4804,7 +4812,6 @@ function refreshCarList(cellRows){             // รายการเบอร
   const free = cars.filter(k => !use[k]), busy = cars.filter(k => use[k]);
   dl.innerHTML = free.concat(busy).map(k => '<option value="' + esc(k) + '" label="' + esc(useText(use[k])) + '"></option>').join('');
 }
-let CARBAR_OPEN = false;
 function updateCarBar(){
   const bar = document.getElementById('carbar');
   if(!bar || !DATA) return;
@@ -4813,20 +4820,51 @@ function updateCarBar(){
   const use = carUse(DATA.rows.map(x => x.cells));
   const busy = cars.filter(k => use[k]), free = cars.filter(k => !use[k]);
   Object.keys(use).forEach(k => { if(cars.indexOf(k) < 0) busy.push(k); });
+  const q = document.getElementById('q').value.trim();
+  const chip = (k, cls, sub) => '<div class="cp ' + cls + (q === k ? ' sel' : '') + '" draggable="true" data-car="' + esc(k) + '" title="' +
+    esc(k + ' · ' + useText(use[k]) + ' — ลากไปวางบนแถวในตาราง หรือกดเพื่อดูงานของคันนี้') + '"><span>' + esc(k) + '</span>' + (sub ? '<small>' + esc(sub) + '</small>' : '') + '</div>';
   bar.hidden = false;
-  bar.innerHTML = '<div class="sum">🚛 <span>รถของวันที่ ' + dmy(DATA.date) + ':</span>' +
-    '<span class="on">จัดแล้ว <b>' + busy.length + '</b> คัน</span><span class="free">ว่าง <b>' + free.length + '</b> คัน</span>' +
-    '<span class="mut">(รถทั้งหมด ' + cars.length + ' คัน)</span><button id="carbarT">' + (CARBAR_OPEN ? 'ซ่อนรายชื่อ ▴' : 'ดูรายชื่อ ▾') + '</button></div>' +
-    (CARBAR_OPEN ? '<div class="lst"><h4>🟢 ว่าง (' + free.length + ') — กดเพื่อค้นหารถคันนั้น</h4><div class="chips2">' +
-      (free.map(k => '<span class="cp f" data-car="' + esc(k) + '">' + esc(k) + '</span>').join('') || '<span class="mut">ไม่มีรถว่าง</span>') + '</div>' +
-      '<h4>🔵 จัดแล้ว (' + busy.length + ')</h4><div class="chips2">' +
-      (busy.map(k => '<span class="cp u" data-car="' + esc(k) + '" title="' + esc(useText(use[k])) + '">' + esc(k) + '<small>' + esc((use[k].trips.join(', ') || '') + ' · ' + use[k].drops + ' drop') + '</small></span>').join('') || '<span class="mut">ยังไม่มี</span>') +
-      '</div></div>' : '');
+  bar.innerHTML = '<div class="hd2">🚛 รถวันที่ ' + dmy(DATA.date) + '</div>' +
+    '<div class="sum2"><span class="on">จัดแล้ว <b>' + busy.length + '</b></span><span class="free">ว่าง <b>' + free.length + '</b></span><span class="mut">/ ' + cars.length + ' คัน</span></div>' +
+    '<p class="tipd">' + (EDITING ? '✋ ลากรถไปวางบนแถวในตาราง = ใส่เบอร์รถ' : '✋ กด "โหมดแก้ไข" ก่อน แล้วลากรถไปวางบนแถวได้') + ' · กดชื่อรถ = ดูงานของคันนั้น</p>' +
+    '<h4>🟢 ว่าง (' + free.length + ')</h4>' + (free.length ? '<div class="g2">' + free.map(k => chip(k, 'f', '')).join('') + '</div>' : '<div class="mut">ไม่มีรถว่าง</div>') +
+    '<h4>🔵 จัดแล้ว (' + busy.length + ')</h4>' + (busy.map(k => chip(k, 'u', (use[k].trips.map(t => t.replace('เที่ยว ', 'ท.')).join(',') || '') + ' · ' + use[k].drops + 'd')).join('') || '<div class="mut">ยังไม่มี</div>');
 }
 document.addEventListener('click', e => {
-  if(e.target.id === 'carbarT'){ CARBAR_OPEN = !CARBAR_OPEN; updateCarBar(); return; }
   const cp = e.target.closest && e.target.closest('.carbar .cp');
   if(cp){ const q = document.getElementById('q'); q.value = q.value === cp.dataset.car ? '' : cp.dataset.car; render(); }   // กดชื่อรถ = ค้นหาแถวของคันนั้น (กดซ้ำ = ล้าง)
+});
+// ลากชื่อรถ → วางบนแถวในตารางหลัก = ใส่เบอร์รถในแถวนั้น (ผ่าน saveCell เหมือนพิมพ์เอง: เติมทะเบียน/พขร./เที่ยววิ่งให้)
+document.addEventListener('dragstart', e => {
+  const cp = e.target.closest && e.target.closest('.carbar .cp');
+  if(!cp) return;
+  e.dataTransfer.setData('text/plain', cp.dataset.car); e.dataTransfer.effectAllowed = 'copy';
+  document.body.dataset.dragcar = cp.dataset.car;
+});
+document.addEventListener('dragend', () => { delete document.body.dataset.dragcar; document.querySelectorAll('tr.dropok').forEach(t => t.classList.remove('dropok')); });
+const ROWS_EL = document.getElementById('rows');
+ROWS_EL.addEventListener('dragover', e => {
+  if(!document.body.dataset.dragcar) return;
+  const tr = e.target.closest('tr'); if(!tr || !tr.querySelector('td[data-r]')) return;
+  e.preventDefault(); e.dataTransfer.dropEffect = 'copy';
+  document.querySelectorAll('tr.dropok').forEach(t => { if(t !== tr) t.classList.remove('dropok'); });
+  tr.classList.add('dropok');
+});
+ROWS_EL.addEventListener('dragleave', e => { const tr = e.target.closest('tr'); if(tr && !tr.contains(e.relatedTarget)) tr.classList.remove('dropok'); });
+ROWS_EL.addEventListener('drop', e => {
+  const car = document.body.dataset.dragcar || e.dataTransfer.getData('text/plain');
+  const td = e.target.closest('tr') && e.target.closest('tr').querySelector('td[data-r]');
+  if(!car || !td) return;
+  e.preventDefault();
+  document.querySelectorAll('tr.dropok').forEach(t => t.classList.remove('dropok'));
+  if(!EDITING){ toast('กด "โหมดแก้ไข" ก่อน แล้วค่อยลากรถมาวาง', true); return; }
+  const x = DATA.rows.find(r => r.row === Number(td.dataset.r));
+  if(!x) return;
+  if(x.cancelled){ toast('แถวนี้ยกเลิก/โหลดเก็บ — ไม่ใส่รถให้', true); return; }
+  const old = x.cells[15] || '';
+  if(old === car) return;
+  if(old && !confirm('แถว ' + x.row + ' มีรถ ' + old + ' อยู่แล้ว — เปลี่ยนเป็น ' + car + ' ?')) return;
+  saveCell(x, 15, old, car, false);
 });
 
 function render(){
