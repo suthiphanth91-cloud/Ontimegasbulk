@@ -3191,7 +3191,7 @@ def _fleet_rows(grid: list) -> tuple:
 
 
 @app.get("/api/plan/fleet", include_in_schema=False)
-def plan_fleet(date: str = ""):
+def plan_fleet(date: str = "", only_tabs: int = Query(0, alias="list")):
     """ดึงงานจากชีตแผนรถ PTGLG (แท็บวันที่ที่เลือก หรือวันล่าสุด) เป็นตารางสำหรับวางในหน้าแผนงาน — อ่านอย่างเดียว"""
     try:
         tabs = _fleet_tabs()
@@ -3199,8 +3199,12 @@ def plan_fleet(date: str = ""):
         raise HTTPException(502, f"เปิดชีตแผนรถไม่ได้ — ตรวจว่าแชร์ให้บัญชีระบบแล้ว ({type(e).__name__})")
     if not tabs:
         raise HTTPException(404, "ไม่พบแท็บวันที่ (เช่น 21-Oct-2026) ในชีตแผนรถ")
-    want = _parse_date(date) if date else None
-    pick = next((t for t in tabs if t[0] == want), None) if want else tabs[0]
+    today = _today_thai()
+    default = today if any(t[0] == today for t in tabs) else tabs[0][0]      # ค่าเริ่ม = วันนี้ (ถ้ามีแท็บ) ไม่งั้นแท็บล่าสุด
+    if only_tabs:
+        return {"tabs": [t[0] for t in tabs[:31]], "default": default}
+    want = _parse_date(date) if date else default
+    pick = next((t for t in tabs if t[0] == want), None)
     if not pick:
         raise HTTPException(404, f"ไม่พบแท็บวันที่ {want} ในชีตแผนรถ")
     try:
@@ -4670,7 +4674,8 @@ PLAN_HTML = """<!doctype html>
   <div id="pasteBox" style="margin:10px 0;padding:10px;border:1px dashed #94a3b8;border-radius:10px">
     <div style="margin:0 0 10px;padding:10px;border-radius:10px;background:#ecfdf5;border:1px solid #a7f3d0">
       <button id="fleetGo" class="go">📄 ดึงงานจากชีตแผนรถ PTGLG</button>
-      <span class="mut" style="font-size:13px">อ่านแท็บวันที่ล่าสุด (งาน SC + งานภูมิภาค) แล้วแสดงให้ตรวจ/แก้ก่อน · ยังไม่เขียนอะไรจนกว่าจะกดยืนยัน</span>
+      แท็บวันที่: <select id="fleetDate" style="font:inherit;padding:6px 8px;border-radius:8px"><option value="">กำลังโหลด...</option></select>
+      <span class="mut" style="font-size:13px">งาน SC + งานภูมิภาค แสดงให้ตรวจ/แก้ก่อน · ยังไม่เขียนอะไรจนกว่าจะกดยืนยัน</span>
       <div id="fleetMsg" class="mut" style="font-size:13px;margin-top:4px"></div>
     </div>
     <b>📋 หรือ วางข้อมูลที่ลูกค้าให้มา</b>
@@ -5865,11 +5870,21 @@ document.addEventListener('keydown', e => {                       // Ctrl+Z ใ�
   e.preventDefault(); impUndo();
 });
 document.getElementById('pasteGo').onclick = pasteGo;
+async function fleetDates(){                                      // รายการแท็บวันที่ในชีตแผนรถ (ค่าเริ่ม = วันนี้)
+  const sel = document.getElementById('fleetDate');
+  try{
+    const r = await fetch('/api/plan/fleet?list=1'), j = await r.json();
+    if(!r.ok) throw new Error(j.detail || r.status);
+    sel.innerHTML = j.tabs.map(d => '<option value="' + d + '"' + (d === j.default ? ' selected' : '') + '>' + dmy(d) + '</option>').join('');
+  }catch(e){ sel.innerHTML = '<option value="">(แท็บล่าสุด)</option>'; }
+}
+document.getElementById('pasteOpen').addEventListener('click', fleetDates);
 document.getElementById('fleetGo').onclick = async () => {        // ดึงจากชีตแผนรถ → ใส่ในกล่องวาง → ตรวจแบบเดียวกับวางเอง
   const msg = document.getElementById('fleetMsg');
   msg.textContent = 'กำลังอ่านชีตแผนรถ...';
   try{
-    const r = await fetch('/api/plan/fleet'), j = await r.json();
+    const d = document.getElementById('fleetDate').value;
+    const r = await fetch('/api/plan/fleet' + (d ? '?date=' + d : '')), j = await r.json();
     if(!r.ok) throw new Error(j.detail || r.status);
     if(!j.rows.length){ msg.textContent = 'แท็บ ' + j.tab + ' ไม่มีงานของ PTGLG'; return; }
     const TAB = String.fromCharCode(9), NL = String.fromCharCode(10);
