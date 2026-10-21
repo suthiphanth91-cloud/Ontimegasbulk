@@ -4835,7 +4835,7 @@ function updateCarBar(){
     '<h4>🔵 จัดแล้ว (' + busy.length + ')</h4>' + (busy.map(k => chip(k, 'u', (use[k].trips.map(t => t.replace('เที่ยว ', 'ท.')).join(',') || '') + ' · ' + use[k].drops + 'd')).join('') || '<div class="mut">ยังไม่มี</div>');
 }
 document.addEventListener('click', e => {
-  const cp = e.target.closest && e.target.closest('.carbar .cp');
+  const cp = e.target.closest && e.target.closest('#carbar .cp');
   if(cp){ const q = document.getElementById('q'); q.value = q.value === cp.dataset.car ? '' : cp.dataset.car; render(); }   // กดชื่อรถ = ค้นหาแถวของคันนั้น (กดซ้ำ = ล้าง)
 });
 // ลากชื่อรถ → วางบนแถวในตารางหลัก = ใส่เบอร์รถในแถวนั้น (ผ่าน saveCell เหมือนพิมพ์เอง: เติมทะเบียน/พขร./เที่ยววิ่งให้)
@@ -5506,9 +5506,49 @@ let IMP = null;                          // {rows, headers, errs, edited, info, 
 const COLS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
 let IMPDAY = {date: '', rows: []};                    // แถวในชีตของวันที่กำลังนำเข้า (ใช้บอกว่ารถคันไหนมีงานแล้ว)
 function impDayRows(skip){                             // แถวในชีตวันนั้น + แถวอื่นในตารางตรวจ (ไม่นับแถวที่กำลังแก้)
-  const base = IMPDAY.rows.length ? IMPDAY.rows : (DATA && IMP && DATA.date === (IMP.date || '') ? DATA.rows.map(x => x.cells) : []);
+  const d = (IMP && IMP.info && IMP.info.date) || '';
+  const base = IMPDAY.date === d ? IMPDAY.rows : (DATA && DATA.date === d ? DATA.rows.map(x => x.cells) : []);
   return base.concat((IMP ? IMP.rows : []).filter((_, k) => k !== skip));
 }
+function impCarPane(){                               // แผงรถในหน้าต่างตรวจ: ว่าง / มีงานแล้ว (นับชีตวันนั้น + แถวที่กำลังตรวจ)
+  const cars = allCars();
+  if(!cars.length) return '<div class="hd2">🚛 รถ</div><p class="tipd">' + (CARS ? 'ไม่พบรายชื่อรถ' : '⏳ กำลังโหลดรายชื่อรถ…') + '</p>';
+  const use = carUse(impDayRows(-1)), q = String(IMP && IMP.q || '').trim();
+  const busy = cars.filter(k => use[k]), free = cars.filter(k => !use[k]);
+  Object.keys(use).forEach(k => { if(cars.indexOf(k) < 0) busy.push(k); });
+  const chip = (k, cls, sub) => '<div class="cp ' + cls + (q === k ? ' sel' : '') + '" draggable="true" data-car="' + esc(k) + '" title="' +
+    esc(k + ' · ' + useText(use[k]) + ' — ลากไปวางบนแถว หรือกดเพื่อค้นหาในตาราง') + '"><span>' + esc(k) + '</span>' + (sub ? '<small>' + esc(sub) + '</small>' : '') + '</div>';
+  return '<div class="hd2">🚛 รถ</div><div class="sum2"><span class="on">มีงาน <b>' + busy.length + '</b></span><span class="free">ว่าง <b>' + free.length + '</b></span></div>' +
+    '<p class="tipd">✋ ลากรถไปวางบนแถว = ใส่เบอร์รถ · นับรวมงานในชีตวันนั้น + แถวในตารางนี้</p>' +
+    '<h4>🟢 ว่าง (' + free.length + ')</h4>' + (free.length ? '<div class="g2">' + free.map(k => chip(k, 'f', '')).join('') + '</div>' : '<div class="mut">ไม่มีรถว่าง</div>') +
+    '<h4>🔵 มีงานแล้ว (' + busy.length + ')</h4>' + (busy.map(k => chip(k, 'u', (use[k].trips.map(t => t.replace('เที่ยว ', 'ท.')).join(',') || '') + ' · ' + use[k].drops + 'd')).join('') || '<div class="mut">ยังไม่มี</div>');
+}
+(function(){                                           // ลากรถ → วางบนแถวในตารางตรวจ = ใส่เบอร์รถแถวนั้น (ผ่าน impSet: เติมทะเบียน/พขร.)
+  const box = document.getElementById('impBody');
+  const rowOf = e => { const tr = e.target.closest && e.target.closest('tr'); return tr && tr.querySelector('td[data-ir]') ? tr : null; };
+  box.addEventListener('dragover', e => {
+    if(!document.body.dataset.dragcar) return;
+    const tr = rowOf(e); if(!tr) return;
+    e.preventDefault(); e.dataTransfer.dropEffect = 'copy';
+    box.querySelectorAll('tr.dropok').forEach(t => { if(t !== tr) t.classList.remove('dropok'); });
+    tr.classList.add('dropok');
+  });
+  box.addEventListener('drop', e => {
+    const car = document.body.dataset.dragcar, tr = rowOf(e);
+    if(!car || !tr || !IMP) return;
+    e.preventDefault();
+    const r = Number(tr.querySelector('td[data-ir]').dataset.ir), old = String(IMP.rows[r][15] || '').trim();
+    if(old === car) return;
+    if(old && !confirm('แถว ' + (r + 1) + ' มีรถ ' + old + ' อยู่แล้ว — เปลี่ยนเป็น ' + car + ' ?')) return;
+    impSet(r, 15, car);
+  });
+  box.addEventListener('click', e => {                  // กดชื่อรถในแผง = ค้นหาในตารางตรวจ (กดซ้ำ = ล้าง)
+    const cp = e.target.closest && e.target.closest('#impCars .cp');
+    if(!cp || !IMP) return;
+    e.stopPropagation();
+    IMP.q = String(IMP.q || '').trim() === cp.dataset.car ? '' : cp.dataset.car; impRender();
+  });
+})();
 function impBody(html){ document.getElementById('impBody').innerHTML = html; }
 function dmy(iso){ return iso ? iso.slice(8,10) + '/' + iso.slice(5,7) + '/' + iso.slice(0,4) : '?'; }
 
@@ -5621,7 +5661,8 @@ function impRender(){
     '<span class="mut" style="font-size:12.5px">ลากช่องไปวางบนอีกช่อง = สลับค่า · ลากจุดสีน้ำเงินที่มุมช่อง = คัดลอกลงแถวล่าง</span>' +
     '<button class="undo" id="impUndo"' + (IMP.hist && IMP.hist.length ? '' : ' disabled') + ' title="ย้อนกลับการแก้ล่าสุด (Ctrl+Z)">↶ ย้อนกลับ</button>' +
     (IMP.checking ? ' <span class="mut" style="font-size:12.5px">⏳ กำลังตรวจข้อมูล…</span>' : '') +
-    '<div class="tbl"><table><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div>' +
+    '<div class="tblrow"><aside class="carbar" id="impCars">' + impCarPane() + '</aside>' +
+    '<div class="tbl" style="flex:1;min-width:0"><table><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div></div>' +
     '<div class="box">' + ex + '</div>' +
     (ndup ? '<div class="box"><label><input type="checkbox" id="impSkip"' + (IMP.skip ? ' checked' : '') + '> <b>ข้ามแถวที่ซ้ำกับชีต (' + ndup +
       ' แถว)</b> — งานที่มีเลขออเดอร์/เลขโหลด/ปลายทางเหมือนที่อยู่ในชีตวันนี้แล้ว จะไม่ถูกเพิ่มซ้ำ (แถวสีเหลืองในช่องเลขออเดอร์)</label></div>' : '') +
