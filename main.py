@@ -3187,6 +3187,8 @@ def _fleet_rows(grid: list) -> tuple:
                 skipped += 1
                 continue
             out.append([_fleet_time(tm), order(atl), load, qty.replace(",", ""), origin, dest, cond])
+    rank = {o: n for n, o in enumerate(FLEET_ORIGINS)}
+    out.sort(key=lambda r: rank.get(r[4], len(rank)))          # sort เสถียร: ภายในต้นทางเดียวกันยังเรียงตามชีต
     return out, skipped
 
 
@@ -4599,6 +4601,10 @@ PLAN_HTML = """<!doctype html>
   .imp td[data-sel]{outline:2px solid #2563eb;outline-offset:-2px;position:relative}
   .imp td[data-sel] .fh{position:absolute;right:0;bottom:0;width:11px;height:11px;background:#2563eb;border:1px solid #fff;cursor:crosshair}
   .imp td.idrag{background:#dbeafe}
+  .imp td[data-ic="15"]{position:relative}
+  .imp .xcar{position:absolute;right:3px;top:50%;margin-top:-10px;width:20px;height:20px;line-height:20px;text-align:center;border-radius:50%;
+             font-size:11px;background:#fee2e2;color:#b91c1c;cursor:pointer;opacity:.35}
+  .imp td:hover .xcar{opacity:1}
   .imp .iorg{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:10px 0 2px}
   .imp .iorg .chip{font-size:14px;padding:6px 14px}
   .imp .iorg .chip.on{background:#2563eb;border-color:#2563eb;color:#fff}
@@ -5439,8 +5445,10 @@ function openEditor(td, i, old, onSave, onCancel, onSkip){
       el.setAttribute('list', 'dl' + i);
       el.value = ''; el.placeholder = old || 'พิมพ์เพื่อค้นหา';   // ล้างไว้ก่อน รายการถึงจะเด้งครบ ไม่ถูกกรองด้วยค่าเดิม
     }
+    if(sug && sug.length && old) el.placeholder = old + '  (กด Delete = ลบ)';
     el.addEventListener('keydown', ev => {
       if(ev.key === 'Escape'){ ev.preventDefault(); finish(onCancel); }
+      else if(ev.key === 'Delete' && !el.value && old){ ev.preventDefault(); finish(() => onSave('', 'down')); }   // ลบค่าในช่อง
       else if(ev.key === 'Enter' || ev.key === 'Tab'){
         ev.preventDefault();
         const dir = ev.key === 'Enter' ? 'down' : 'right';                   // Enter = ช่องล่าง, Tab = ช่องขวา
@@ -5637,7 +5645,8 @@ function impRender(){
       : IMP.warns[k] ? ' class="iwarn" title="' + esc(IMP.warns[k]) + '"'
       : IMP.edited[k] ? ' class="ied"' : '';
     const sel = IMP.sel && IMP.sel.r === ri && IMP.sel.c === c;
-    return '<td data-ir="' + ri + '" data-ic="' + c + '"' + cls + (sel ? ' data-sel="1"' : '') + '>' + (c === 14 ? '<div class="nt" title="' + esc(v) + '">' + impHl(v) + '</div>' : impHl(v)) + (sel ? '<i class="fh" title="ลากลงเพื่อคัดลอกค่าไปแถวล่าง"></i>' : '') + '</td>';
+    return '<td data-ir="' + ri + '" data-ic="' + c + '"' + cls + (sel ? ' data-sel="1"' : '') + '>' + (c === 14 ? '<div class="nt" title="' + esc(v) + '">' + impHl(v) + '</div>' : impHl(v)) +
+      (c === 15 && String(v || '').trim() ? '<b class="xcar" data-xr="' + ri + '" title="เอารถออกจากแถวนี้">✕</b>' : '') + (sel ? '<i class="fh" title="ลากลงเพื่อคัดลอกค่าไปแถวล่าง"></i>' : '') + '</td>';
   }).join('') + '</tr>').join('');
   const nedit = Object.keys(IMP.edited).length;
   const ex = IMP.near ? (j.existing
@@ -5794,8 +5803,22 @@ function impSet(r, c, v){                // แก้ช่องในตาร
   if(c === 18 || c === 19){ const nm = driverOk(resolveDriver(v), v); if(nm === null){ impRender(); return; } v = nm; }
   if(v === IMP.rows[r][c]){ impRender(); return; }
   impSnap();
+  const oldCar = c === 15 ? String(IMP.rows[r][15] || '').trim() : '';
   impApply(r, c, v);
+  if(c === 15 && !v && oldCar) impUnfillCar(r, oldCar);
   impRecheck();
+}
+function impUnfillCar(r, oldCar){         // เอารถออก → ล้างช่องที่เติมมาจากรถคันนั้น (ช่องที่พิมพ์เองค่าอื่นไม่แตะ)
+  const c = (CARS && CARS[oldCar]) || {}, row = IMP.rows[r];
+  [[16, 't'], [17, 'plate'], [18, 'd1'], [19, 'd2'], [20, 'p1'], [21, 'p2']].forEach(f => {
+    const cur = String(row[f[0]] || '').trim();
+    if(cur && (cur === String(c[f[1]] || '').trim() || (f[0] >= 20 && PHONES[String(row[f[0] - 2] || '').trim()] === cur))){ row[f[0]] = ''; IMP.edited[r + ',' + f[0]] = 1; }
+  });
+}
+function impClearCar(r){                  // ปุ่ม ✕ ในช่องเบอร์รถ
+  if(!IMP || !String(IMP.rows[r][15] || '').trim()) return;
+  impSet(r, 15, '');
+  toast('เอารถออกจากแถว ' + (r + 1) + ' แล้ว (กด ↶ ย้อนกลับ ได้)', false);
 }
 function impFill(from, col, a, b){       // ลากคัดลอกค่าของช่อง (from, col) ไปแถว a..b ของคอลัมน์เดียวกัน (ทับค่าเดิมในช่องปลายทาง)
   const v = IMP.rows[from][col];
@@ -5813,6 +5836,12 @@ function impFill(from, col, a, b){       // ลากคัดลอกค่า
   impRecheck();
 }
 
+['mousedown', 'click'].forEach(ev => document.getElementById('impBody').addEventListener(ev, e => {   // ✕ เอารถออก (ก่อนตัวแก้/ลากสลับช่อง)
+  const x = e.target.closest && e.target.closest('.xcar');
+  if(!x) return;
+  e.preventDefault(); e.stopPropagation();
+  if(ev === 'click') impClearCar(Number(x.dataset.xr));
+}, true));
 document.getElementById('impBody').addEventListener('click', e => {
   if(e.target.closest('.fh') || (IMP && IMP.justDragged)) return;
   const td = e.target.closest('td[data-ir]');
