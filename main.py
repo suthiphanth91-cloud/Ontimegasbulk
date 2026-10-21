@@ -3134,6 +3134,20 @@ def _fleet_tabs() -> list:
     return _fleet_tabs_cache["data"]
 
 
+FLEET_ORIGINS = ["SC BPK", "PTT TANK", "BSRC", "UAC", "IRPC"]     # ต้นทางที่ใช้ในชีตแผนงาน
+
+
+def _fleet_origin(v: str) -> str:
+    """ชื่อคลังในชีตแผนรถ → ชื่อต้นทางมาตรฐาน: 'BSRC IN' → 'BSRC', 'PTT Tank' → 'PTT TANK', 'SC' → 'SC BPK' (ไม่รู้จัก = คืนตามเดิมตัวใหญ่)"""
+    u = re.sub(r"\s+", " ", (v or "").upper()).strip()
+    for canon in FLEET_ORIGINS:
+        if u == canon or u.startswith(canon + " ") or u.split(" ")[0] == canon.split(" ")[0] and canon.split(" ")[0] != "PTT":
+            return canon
+    if u.startswith("PTT") and "TANK" in u:
+        return "PTT TANK"
+    return u
+
+
 def _fleet_time(v: str) -> str:
     """'15:00:00' → '15:00' · เศษวันแบบ Excel (0.5) → '12:00' · อื่นๆ คืนตามเดิม"""
     v = (v or "").strip()
@@ -3166,7 +3180,7 @@ def _fleet_rows(grid: list) -> tuple:
                                                                   cell(r, 1), FLEET_SC_ORIGIN)
             else:
                 dest, qty, tm, atl, load, cond, carrier, origin = (cell(r, 13), cell(r, 14), cell(r, 15), cell(r, 16), cell(r, 20),
-                                                                  cell(r, 21), cell(r, 11), cell(r, 10).upper())
+                                                                  cell(r, 21), cell(r, 11), _fleet_origin(cell(r, 10)))
             if not dest or "ยอดออก" in dest:
                 continue
             if not carrier_ok(carrier):
