@@ -4554,10 +4554,10 @@ PLAN_HTML = """<!doctype html>
   .toast.bad{background:var(--late)}
   /* ── หน้าต่างนำเข้า Excel ── */
   .imp-back{position:fixed;inset:0;background:rgba(15,23,42,.5);z-index:60;display:flex;
-            align-items:flex-start;justify-content:center;padding:30px 16px;overflow:auto}
+            align-items:flex-start;justify-content:center;padding:12px 10px;overflow:auto}
   .imp-back[hidden]{display:none}
   .imp{background:var(--card);border:1px solid var(--line);border-radius:14px;width:100%;
-       max-width:1240px;padding:18px 20px}
+       max-width:min(1900px, 98vw);padding:18px 20px}
   .imp-h{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
   .imp-h b{font-size:18px}
   .imp-h button{border:0;background:none;font-size:20px;padding:2px 8px}
@@ -4565,9 +4565,10 @@ PLAN_HTML = """<!doctype html>
   .imp .ok{color:#16a34a;font-weight:700}
   .imp .bad{color:var(--late);font-weight:700}
   .imp ul{margin:6px 0 0;padding-left:20px;font-size:13.5px;max-height:130px;overflow:auto}
-  .imp .tbl{max-height:420px;overflow:auto;border:1px solid var(--line);border-radius:10px}
-  .imp table{font-size:13px;min-width:0;width:100%}
-  .imp th,.imp td{padding:6px 9px}
+  .imp .tbl{max-height:max(420px, calc(100vh - 230px));overflow:auto;border:1px solid var(--line);border-radius:10px}
+  .imp table{font-size:15px;min-width:0;width:100%}
+  .imp th,.imp td{padding:9px 11px}
+  .imp thead th{font-size:13.5px}
   .imp thead th{position:sticky;top:0;background:var(--card);z-index:1}
   .imp td[data-ir]{cursor:cell}
   .imp td[data-ir]:hover{outline:2px solid #2563eb;outline-offset:-2px}
