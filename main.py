@@ -4816,7 +4816,11 @@ function updateCarBar(){
   const bar = document.getElementById('carbar');
   if(!bar || !DATA) return;
   const cars = allCars();
-  if(!cars.length){ bar.hidden = true; return; }
+  if(!cars.length){                                    // รายชื่อรถยังโหลดไม่เสร็จ (ครั้งแรกอาจช้า) — บอกไว้ ไม่ซ่อนแผง
+    bar.hidden = false;
+    bar.innerHTML = '<div class="hd2">🚛 รถวันที่ ' + dmy(DATA.date) + '</div><p class="tipd">' + (CARS ? 'ไม่พบรายชื่อรถในชีตข้อมูลรถ' : '⏳ กำลังโหลดรายชื่อรถ…') + '</p>';
+    return;
+  }
   const use = carUse(DATA.rows.map(x => x.cells));
   const busy = cars.filter(k => use[k]), free = cars.filter(k => !use[k]);
   Object.keys(use).forEach(k => { if(cars.indexOf(k) < 0) busy.push(k); });
