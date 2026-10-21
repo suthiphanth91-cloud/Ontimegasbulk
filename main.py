@@ -3098,6 +3098,105 @@ def plan_edit(p: PlanEdit):
 _recent_cache: tuple = (0.0, None)
 
 
+# ชีต "แผนรถ PTGLG" — แท็บรายวันชื่อ "21-Oct-2026" · อ่านอย่างเดียว ไม่เขียนกลับ
+# งาน SC  : E ปลายทาง · F ปริมาณ · G เวลาจัดส่ง · H เลข ATL · J เงื่อนไข · B ขนส่ง        (ต้นทาง = FLEET_SC_ORIGIN)
+# งานภูมิภาค: K คลัง(ต้นทาง) · L ขนส่ง · N ปลายทาง · O ปริมาณ · P เวลาจัดส่ง · Q เลข ATL · U เลขโหลด · V เงื่อนไข
+FLEET_SHEET_ID  = os.environ.get("FLEET_SHEET_ID", "1j0CLmJYxqiLghAoDzLll0ykyATWY3N1MASEUBMZmmlc")
+FLEET_SC_ORIGIN = os.environ.get("FLEET_SC_ORIGIN", "SC BPK")
+FLEET_CARRIER   = os.environ.get("FLEET_CARRIER", "PTGLG")     # เอาเฉพาะงานของขนส่งนี้
+_MONTHS = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+_fleet_tabs_cache: dict = {"ts": 0.0, "data": None}
+FLEET_HEAD = ["เวลาส่งมอบ", "เลขออเดอร์", "เลขโหลด", "น้ำหนักบรรทุก", "ต้นทาง", "ปลายทาง", "หมายเหตุ"]
+
+
+def _fleet_tab_date(title: str) -> Optional[str]:
+    """'21-Oct-2026' → '2026-10-21' (ชื่อแท็บแบบอื่น = None)"""
+    m = re.fullmatch(r"\s*(\d{1,2})-([A-Za-z]{3})-(\d{4})\s*", title or "")
+    if not m or m.group(2).lower() not in _MONTHS:
+        return None
+    try:
+        return datetime(int(m.group(3)), _MONTHS[m.group(2).lower()], int(m.group(1))).strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def _load_fleet_titles() -> list:
+    gc = gspread.authorize(_build_creds())
+    return [ws.title for ws in gc.open_by_key(FLEET_SHEET_ID).worksheets()]
+
+
+def _fleet_tabs() -> list:
+    """[(วันที่ iso, ชื่อแท็บ)] เรียงใหม่ → เก่า (แคช 60 วินาที)"""
+    now = time()
+    if _fleet_tabs_cache["data"] is None or now - _fleet_tabs_cache["ts"] > 60:
+        titles = _with_retry(_load_fleet_titles)
+        _fleet_tabs_cache.update(ts=now, data=sorted(((d, t) for t in titles if (d := _fleet_tab_date(t))), reverse=True))
+    return _fleet_tabs_cache["data"]
+
+
+def _fleet_time(v: str) -> str:
+    """'15:00:00' → '15:00' · เศษวันแบบ Excel (0.5) → '12:00' · อื่นๆ คืนตามเดิม"""
+    v = (v or "").strip()
+    m = re.match(r"^(\d{1,2}):(\d{2})", v)
+    if m:
+        return f"{int(m.group(1)):02d}:{m.group(2)}"
+    try:
+        f = float(v)
+        if 0 <= f < 1:
+            mins = round(f * 24 * 60)
+            return f"{mins // 60:02d}:{mins % 60:02d}"
+    except ValueError:
+        pass
+    return v
+
+
+def _fleet_rows(grid: list) -> tuple:
+    """ตารางจากแท็บแผนรถ → (แถวสำหรับวาง, จำนวนแถวที่ข้าม) — ใช้ทั้งฝั่งงาน SC และงานภูมิภาค"""
+    hdr = next((i for i, r in enumerate(grid[:30]) if any((c or "").strip().lower() == "customer" for c in r)), None)
+    if hdr is None:
+        return [], 0
+    cell = lambda r, i: re.sub(r"\s+", " ", (r[i] if i < len(r) else "") or "").strip()
+    order = lambda v: v if (not v or v.upper().startswith("ATL")) else "ATL-" + v
+    carrier_ok = lambda v: not FLEET_CARRIER or not v or FLEET_CARRIER.lower() in v.lower()
+    out, skipped = [], 0
+    for r in grid[hdr + 1:]:
+        for side in ("sc", "reg"):
+            if side == "sc":
+                dest, qty, tm, atl, load, cond, carrier, origin = (cell(r, 4), cell(r, 5), cell(r, 6), cell(r, 7), "", cell(r, 9),
+                                                                  cell(r, 1), FLEET_SC_ORIGIN)
+            else:
+                dest, qty, tm, atl, load, cond, carrier, origin = (cell(r, 13), cell(r, 14), cell(r, 15), cell(r, 16), cell(r, 20),
+                                                                  cell(r, 21), cell(r, 11), cell(r, 10).upper())
+            if not dest or "ยอดออก" in dest:
+                continue
+            if not carrier_ok(carrier):
+                skipped += 1
+                continue
+            out.append([_fleet_time(tm), order(atl), load, qty.replace(",", ""), origin, dest, cond])
+    return out, skipped
+
+
+@app.get("/api/plan/fleet", include_in_schema=False)
+def plan_fleet(date: str = ""):
+    """ดึงงานจากชีตแผนรถ PTGLG (แท็บวันที่ที่เลือก หรือวันล่าสุด) เป็นตารางสำหรับวางในหน้าแผนงาน — อ่านอย่างเดียว"""
+    try:
+        tabs = _fleet_tabs()
+    except Exception as e:
+        raise HTTPException(502, f"เปิดชีตแผนรถไม่ได้ — ตรวจว่าแชร์ให้บัญชีระบบแล้ว ({type(e).__name__})")
+    if not tabs:
+        raise HTTPException(404, "ไม่พบแท็บวันที่ (เช่น 21-Oct-2026) ในชีตแผนรถ")
+    want = _parse_date(date) if date else None
+    pick = next((t for t in tabs if t[0] == want), None) if want else tabs[0]
+    if not pick:
+        raise HTTPException(404, f"ไม่พบแท็บวันที่ {want} ในชีตแผนรถ")
+    try:
+        grid = _fetch_sheet(FLEET_SHEET_ID, pick[1])
+    except Exception as e:
+        raise HTTPException(502, f"อ่านแท็บ {pick[1]} ไม่ได้ — {type(e).__name__}")
+    rows, skipped = _fleet_rows(grid)
+    return {"date": pick[0], "tab": pick[1], "tabs": [t[0] for t in tabs[:14]], "head": FLEET_HEAD, "rows": rows, "skipped": skipped}
+
+
 @app.get("/api/plan/recent", include_in_schema=False)
 def plan_recent(n: int = Query(300)):
     """การแก้ไขล่าสุดจากแท็บ EditLog (เวลา/ผู้แก้/แถว/คอลัมน์/ค่าเดิม→ใหม่) ไว้บอกอีกคนว่า "เพื่อนแก้ไปแล้ว"
@@ -4554,6 +4653,11 @@ PLAN_HTML = """<!doctype html>
     <b>แก้ข้อมูลในตารางนี้ได้เลยก่อนนำเข้า</b> ยังไม่เขียนอะไรลงชีตจนกว่าคุณจะกดยืนยัน</p>
   <input type="file" id="impFile" accept=".xlsx">
   <div id="pasteBox" style="margin:10px 0;padding:10px;border:1px dashed #94a3b8;border-radius:10px">
+    <div style="margin:0 0 10px;padding:10px;border-radius:10px;background:#ecfdf5;border:1px solid #a7f3d0">
+      <button id="fleetGo" class="go">📄 ดึงงานจากชีตแผนรถ PTGLG</button>
+      <span class="mut" style="font-size:13px">อ่านแท็บวันที่ล่าสุด (งาน SC + งานภูมิภาค) แล้วแสดงให้ตรวจ/แก้ก่อน · ยังไม่เขียนอะไรจนกว่าจะกดยืนยัน</span>
+      <div id="fleetMsg" class="mut" style="font-size:13px;margin-top:4px"></div>
+    </div>
     <b>📋 หรือ วางข้อมูลที่ลูกค้าให้มา</b>
     <p class="mut" style="margin:4px 0 6px;font-size:13px">คัดลอกตารางจาก Excel/อีเมล แล้ววางในกล่องนี้ (Ctrl+V) ตามลำดับ 10 คอลัมน์:
       เวลาส่งมอบ · เลขออเดอร์ · เลขโหลด · น้ำหนักบรรทุก · น้ำหนักสุทธิ · ต้นทาง · ปลายทาง · Drop · หมายเหตุ · เบอร์รถ
@@ -5746,6 +5850,20 @@ document.addEventListener('keydown', e => {                       // Ctrl+Z ใ�
   e.preventDefault(); impUndo();
 });
 document.getElementById('pasteGo').onclick = pasteGo;
+document.getElementById('fleetGo').onclick = async () => {        // ดึงจากชีตแผนรถ → ใส่ในกล่องวาง → ตรวจแบบเดียวกับวางเอง
+  const msg = document.getElementById('fleetMsg');
+  msg.textContent = 'กำลังอ่านชีตแผนรถ...';
+  try{
+    const r = await fetch('/api/plan/fleet'), j = await r.json();
+    if(!r.ok) throw new Error(j.detail || r.status);
+    if(!j.rows.length){ msg.textContent = 'แท็บ ' + j.tab + ' ไม่มีงานของ PTGLG'; return; }
+    const TAB = String.fromCharCode(9), NL = String.fromCharCode(10);
+    document.getElementById('pasteTxt').value = [j.head].concat(j.rows).map(r => r.join(TAB)).join(NL);
+    document.getElementById('pasteDate').value = j.date;
+    msg.textContent = 'ดึงจากแท็บ ' + j.tab + ' ได้ ' + j.rows.length + ' งาน' + (j.skipped ? ' (ข้ามงานขนส่งอื่น ' + j.skipped + ')' : '') + ' — ตรวจ/แก้ด้านล่างได้เลย';
+    pasteGo();
+  }catch(e){ msg.textContent = 'ดึงไม่สำเร็จ: ' + e.message; }
+};
 document.getElementById('pasteOpen').onclick = () => openImp(true);
 document.getElementById('impOpen').onclick = () => openImp(false);
 document.getElementById('impClose').onclick = () => { document.getElementById('impBack').hidden = true; };
