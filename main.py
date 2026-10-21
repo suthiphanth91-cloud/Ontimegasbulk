@@ -4671,13 +4671,14 @@ PLAN_HTML = """<!doctype html>
     เลือกไฟล์ใบจัดรถ (.xlsx) ระบบอ่านชีต "ข้อมูลการจัดส่ง" คอลัมน์ E–AD แล้วแสดงเป็นตาราง
     <b>แก้ข้อมูลในตารางนี้ได้เลยก่อนนำเข้า</b> ยังไม่เขียนอะไรลงชีตจนกว่าคุณจะกดยืนยัน</p>
   <input type="file" id="impFile" accept=".xlsx">
-  <div id="pasteBox" style="margin:10px 0;padding:10px;border:1px dashed #94a3b8;border-radius:10px">
+  <div id="pasteBox" style="margin:10px 0">
     <div style="margin:0 0 10px;padding:10px;border-radius:10px;background:#ecfdf5;border:1px solid #a7f3d0">
       <button id="fleetGo" class="go">📄 ดึงงานจากชีตแผนรถ PTGLG</button>
       แท็บวันที่: <select id="fleetDate" style="font:inherit;padding:6px 8px;border-radius:8px"><option value="">กำลังโหลด...</option></select>
       <span class="mut" style="font-size:13px">งาน SC + งานภูมิภาค แสดงให้ตรวจ/แก้ก่อน · ยังไม่เขียนอะไรจนกว่าจะกดยืนยัน</span>
       <div id="fleetMsg" class="mut" style="font-size:13px;margin-top:4px"></div>
     </div>
+    <div id="pasteManual" hidden>                 <!-- ซ่อน: ปุ่มดึงจากแผนรถยังใช้กล่องนี้อยู่เบื้องหลัง -->
     <b>📋 หรือ วางข้อมูลที่ลูกค้าให้มา</b>
     <p class="mut" style="margin:4px 0 6px;font-size:13px">คัดลอกตารางจาก Excel/อีเมล แล้ววางในกล่องนี้ (Ctrl+V) ตามลำดับ 10 คอลัมน์:
       เวลาส่งมอบ · เลขออเดอร์ · เลขโหลด · น้ำหนักบรรทุก · น้ำหนักสุทธิ · ต้นทาง · ปลายทาง · Drop · หมายเหตุ · เบอร์รถ
@@ -4686,6 +4687,7 @@ PLAN_HTML = """<!doctype html>
       (ถ้ามีแต่เวลาเข้าโหลด ระบบคำนวณอีกสองช่องให้: ออกจากฟรีต = เข้าโหลด − 30 นาที, โทรตาม พขร = ออกจากฟรีต − 1 ชม.)</p>
     <textarea id="pasteTxt" rows="5" style="width:100%;box-sizing:border-box;font:inherit" placeholder="วางข้อมูลที่นี่ (Ctrl+V)"></textarea>
     <div style="margin-top:6px">วันที่ของงาน: <input type="date" id="pasteDate"> <button id="pasteGo" class="go">ตรวจข้อมูลที่วาง</button></div>
+    </div>
   </div>
   <div id="impBody"></div>
 </div></div>
