@@ -2798,6 +2798,16 @@ MASTER_HEADER = ["เบอร์รถ", "ประเภทรถ", "ทะเ
 _MASTER_KEYS = ("t", "plate", "d1", "d2", "p1", "p2")
 
 
+def _area_of(text: str) -> str:
+    """ข้อความใดๆ → พื้นที่ประจำรถ: 'ศรีราชา' / 'บางปะกง' (บางประกง ก็นับ) / '' """
+    t = (text or "").replace(" ", "")
+    if "ศรีราชา" in t:
+        return "ศรีราชา"
+    if "บางปะกง" in t or "บางประกง" in t:
+        return "บางปะกง"
+    return ""
+
+
 def _build_cars(tabs: dict, phones_out=None, names_out=None) -> dict:
     """tabs = {ชื่อแท็บ: แถว (list ของข้อความ)} → {เบอร์รถ: {t, plate, d1, d2, p1, p2}}
     หาคอลัมน์จาก "ชื่อหัวตาราง" ไม่ใช้ตำแหน่งตายตัว แท็บที่ไม่มี/หัวไม่ตรง = ข้ามไป"""
@@ -2818,12 +2828,15 @@ def _build_cars(tabs: dict, phones_out=None, names_out=None) -> dict:
     if h is not None:
         hc = _hdr_cells(rows[h])
         tcol = hc.index("ประเภทรถ") if "ประเภทรถ" in hc else (hc.index("น้ำหนัก") if "น้ำหนัก" in hc else None)   # ชีตต้นฉบับเก็บ "10 Tons/Trailer" ไว้ในคอลัมน์ น้ำหนัก
+        acol = next((k for k, c in enumerate(hc) if "พื้นที่" in c), None)      # คอลัมน์ "ประจำพื้นที่" (ถ้ามี)
         for r in rows[h + 1:]:
             car = _cell(r, ix["เบอร์รถ"])
             if _CAR_RE.match(car):
                 e = cars.setdefault(car, blank())
                 e["plate"] = _cell(r, ix["ทะเบียนรถ"])
                 e["t"] = norm_type(_cell(r, tcol)) if tcol is not None else ""
+                if acol is not None and _area_of(_cell(r, acol)):
+                    e["area"] = _area_of(_cell(r, acol))
 
     phones: dict = {}
     rows = tabs.get("ข้อมูลพขร.") or []
@@ -2853,12 +2866,22 @@ def _build_cars(tabs: dict, phones_out=None, names_out=None) -> dict:
                 blocks.append((j, nxt("พขร.1"), nxt("พขร.2"), nxt("ประเภทรถ")))
         if not blocks:
             continue
+        starts = [b[0] for b in blocks]
+        block_area = {}                        # ชื่อพื้นที่เหนือ/ข้างหัวตารางแต่ละชุด เช่น "บางปะกง" | "ศรีราชา"
+        for bi, jc in enumerate(starts):
+            end = starts[bi + 1] if bi + 1 < len(starts) else jc + 10
+            for rr in rows[max(0, h - 6): h + 1]:
+                hit = next((_area_of(_cell(rr, k)) for k in range(max(0, jc - 2), end) if _area_of(_cell(rr, k))), "")
+                if hit:
+                    block_area[jc] = hit
         for r in rows[h + 1:]:
             for jc, j1, j2, jt in blocks:
                 car = _cell(r, jc)
                 if not _CAR_RE.match(car):
                     continue
                 e = cars.setdefault(car, blank())
+                if block_area.get(jc) and not e.get("area"):
+                    e["area"] = block_area[jc]
                 e["d1"], e["d2"] = person(_cell(r, j1)), (person(_cell(r, j2)) if j2 is not None else "")
                 e["p1"], e["p2"] = phones.get(e["d1"], ""), phones.get(e["d2"], "")
                 if not e["t"] and jt is not None:
@@ -4605,6 +4628,7 @@ PLAN_HTML = """<!doctype html>
   .imp .xcar{position:absolute;right:3px;top:50%;margin-top:-10px;width:20px;height:20px;line-height:20px;text-align:center;border-radius:50%;
              font-size:11px;background:#fee2e2;color:#b91c1c;cursor:pointer;opacity:.35}
   .imp td:hover .xcar{opacity:1}
+  .imp .pv{color:var(--mut);font-style:italic;font-size:.9em}
   .imp .iorg{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:10px 0 2px}
   .imp .iorg .chip{font-size:14px;padding:6px 14px}
   .imp .iorg .chip.on{background:#2563eb;border-color:#2563eb;color:#fff}
@@ -5222,8 +5246,8 @@ function buildDatalists(){               // รายชื่อที่เด
 }
 function applyDrivers(){                 // ช่อง พขร.1/พขร.2 = พิมพ์ได้ (พิมพ์บางส่วนของชื่อ รายชื่อคนขับที่ยังทำงานเด้งให้เลือก)
   if(OPTS && DRIVERS.length){
-    OPTS.suggest['18'] = DRIVERS; OPTS.suggest['19'] = DRIVERS;
-    delete OPTS.strict['18']; delete OPTS.strict['19'];
+    OPTS.suggest['18'] = DRIVERS; OPTS.suggest['19'] = DRIVERS; OPTS.suggest['22'] = DRIVERS;
+    delete OPTS.strict['18']; delete OPTS.strict['19']; delete OPTS.strict['22'];
     buildDatalists();
   }
 }
@@ -5624,7 +5648,38 @@ async function impRecheck(){             // แสดงผลที่แก้
   impRender();
 }
 
+function serialDay(iso){                  // วันที่ → เลขวันแบบชีต (เช่น 2026-10-06 = 46301) ใช้ในเลข JOB
+  if(!iso) return '';
+  return String(Math.round((Date.UTC(Number(iso.slice(0, 4)), Number(iso.slice(5, 7)) - 1, Number(iso.slice(8, 10))) - Date.UTC(1899, 11, 30)) / 86400000));
+}
+function impAutoD(){                      // D ลำดับเที่ยว: นับเที่ยว (รถ+เที่ยววิ่ง) ไม่ซ้ำของวัน ต่อจากที่มีในชีต — ช่องที่คุณพิมพ์เองไม่แตะ
+  IMP.autoD = IMP.autoD || {}; IMP.prevA = {};
+  const known = {}; let mx = 0, amx = 0;
+  (IMPDAY.date === (IMP.info && IMP.info.date) ? IMPDAY.rows : []).forEach(c => {
+    const n = parseInt(String(c[3] || ''), 10), k = String(c[15] || '').trim() + '|' + String(c[4] || '').trim();
+    if(n > 0){ mx = Math.max(mx, n); if(String(c[15] || '').trim() && !known[k]) known[k] = n; }
+    amx = Math.max(amx, parseInt(String(c[0] || ''), 10) || 0);
+  });
+  IMP.rows.forEach((row, r) => { if(String(row[15] || '').trim()) IMP.prevA[r] = ++amx; });   // A = ลำดับรันต่อจากของวันนั้น (ชีตนับเฉพาะแถวที่มีเบอร์รถ)
+  IMP.rows.forEach((row, r) => {
+    const car = String(row[15] || '').trim(), trip = String(row[4] || '').trim();
+    if(String(row[3] || '').trim() && !IMP.autoD[r]) return;                 // มีค่าอยู่แล้ว (ไม่ได้มาจากระบบ) = คงไว้
+    let v = '';
+    if(car && trip){ const k = car + '|' + trip; if(!known[k]) known[k] = ++mx; v = String(known[k]); }
+    if(row[3] !== v){ row[3] = v; }
+    IMP.autoD[r] = 1;
+  });
+}
+function impPreview(row, ri, c){          // A/B ว่าง (สูตรในชีต) → แสดงตัวอย่างสีจาง
+  if(c === 1){
+    const car = String(row[15] || '').trim(), trip = String(row[4] || '').trim();
+    return car && trip ? '<span class="pv" title="ตัวอย่าง — ชีตคำนวณเองตอนลง (วันที่+เบอร์รถ+เที่ยว)">' + esc(serialDay((IMP.info && IMP.info.date) || '') + car + trip) + '</span>' : '';
+  }
+  if(c === 0) return IMP.prevA && IMP.prevA[ri] ? '<span class="pv" title="ตัวอย่าง — ชีตรันลำดับให้เองตอนลง">' + IMP.prevA[ri] + '</span>' : '';
+  return '';
+}
 function impRender(){
+  impAutoD();
   const j = IMP.info, nerr = j.errors_total || 0;
   const oldTbl = document.querySelector('#impBody .tbl');
   const sx = oldTbl ? oldTbl.scrollLeft : 0, sy = oldTbl ? oldTbl.scrollTop : 0;
@@ -5645,7 +5700,7 @@ function impRender(){
       : IMP.warns[k] ? ' class="iwarn" title="' + esc(IMP.warns[k]) + '"'
       : IMP.edited[k] ? ' class="ied"' : '';
     const sel = IMP.sel && IMP.sel.r === ri && IMP.sel.c === c;
-    return '<td data-ir="' + ri + '" data-ic="' + c + '"' + cls + (sel ? ' data-sel="1"' : '') + '>' + (c === 14 ? '<div class="nt" title="' + esc(v) + '">' + impHl(v) + '</div>' : impHl(v)) +
+    return '<td data-ir="' + ri + '" data-ic="' + c + '"' + cls + (sel ? ' data-sel="1"' : '') + '>' + (c === 14 ? '<div class="nt" title="' + esc(v) + '">' + impHl(v) + '</div>' : (c <= 1 && !String(v || '').trim() ? impPreview(r, ri, c) : impHl(v))) +
       (c === 15 && String(v || '').trim() ? '<b class="xcar" data-xr="' + ri + '" title="เอารถออกจากแถวนี้">✕</b>' : '') + (sel ? '<i class="fh" title="ลากลงเพื่อคัดลอกค่าไปแถวล่าง"></i>' : '') + '</td>';
   }).join('') + '</tr>').join('');
   const nedit = Object.keys(IMP.edited).length;
@@ -5778,6 +5833,18 @@ function impApply(r, c, v){              // ใส่ค่าในแถว r 
     if(IMP.near) impTrip(r, v);
   }
 }
+function impAutoXZ(r){
+  IMP.autoXZ = IMP.autoXZ || {};
+  const row = IMP.rows[r], d = (IMP.info && IMP.info.date) || '';
+  const manual = !IMP.autoXZ[r] && (String(row[23] || '').trim() || String(row[25] || '').trim()) && IMP.userXZ && IMP.userXZ[r];
+  if(manual) return;
+  const v = xzFrom(row, d);
+  if(!v) return;
+  if(row[24] !== v[2]){ row[24] = v[2]; IMP.edited[r + ',24'] = 1; }     // พิมพ์แค่ 08:00 → เติมวันที่ให้เหมือนช่องอื่น
+  if(row[23] !== v[0]){ row[23] = v[0]; IMP.edited[r + ',23'] = 1; }
+  if(row[25] !== v[1]){ row[25] = v[1]; IMP.edited[r + ',25'] = 1; }
+  IMP.autoXZ[r] = 1;
+}
 function impSnap(){                     // เก็บสภาพตารางก่อนแก้ไว้ย้อนกลับ (สูงสุด 30 ครั้ง)
   IMP.hist = IMP.hist || [];
   IMP.hist.push(JSON.stringify([IMP.rows, IMP.edited]));
@@ -5806,6 +5873,8 @@ function impSet(r, c, v){                // แก้ช่องในตาร
   const oldCar = c === 15 ? String(IMP.rows[r][15] || '').trim() : '';
   impApply(r, c, v);
   if(c === 15 && !v && oldCar) impUnfillCar(r, oldCar);
+  if(c === 23 || c === 25){ IMP.userXZ = IMP.userXZ || {}; IMP.userXZ[r] = 1; if(IMP.autoXZ) delete IMP.autoXZ[r]; }   // พิมพ์ X/Z เอง = ไม่คำนวณทับ
+  if(c === 24 || c === 15 || c === 11) impAutoXZ(r);
   impRecheck();
 }
 function impUnfillCar(r, oldCar){         // เอารถออก → ล้างช่องที่เติมมาจากรถคันนั้น (ช่องที่พิมพ์เองค่าอื่นไม่แตะ)
@@ -5972,6 +6041,25 @@ function stampFrom(v, ref){              // ค่าที่วางมาเ
   if(d > ref) d.setDate(d.getDate() - 1);
   return d;
 }
+// เวลาเดินทาง (นาที) จากพื้นที่ประจำรถ → คลังต้นทาง · ไม่รู้พื้นที่/คลัง = 30 นาทีเหมือนเดิม
+const AREA_MIN = {'บางปะกง': {'SC BPK': 30, 'PTT TANK': 180, 'BSRC': 90, 'IRPC': 180},
+                  'ศรีราชา': {'SC BPK': 90, 'PTT TANK': 90, 'BSRC': 30, 'IRPC': 90}};
+function travelMin(car, origin){
+  const a = (CARS && CARS[String(car || '').trim()] || {}).area || '', o = String(origin || '').trim();
+  return (AREA_MIN[a] && AREA_MIN[a][o] != null) ? AREA_MIN[a][o] : 30;
+}
+function xzFrom(row, iso){                // คำนวณ X/Z ของแถวจาก Y + รถ + ต้นทาง → [X, Z] (ข้อความวันที่เวลา) หรือ null
+  const y = String(row[24] || '').trim();
+  if(!y) return null;
+  let dY = parseStamp(y);
+  if(!dY){
+    const t = tp(y), d = iso || '';
+    if(!t || !d) return null;
+    dY = new Date(Number(d.slice(0, 4)), Number(d.slice(5, 7)) - 1, Number(d.slice(8, 10)), t[0], t[1], t[2]);
+  }
+  const dX = new Date(dY.getTime() - travelMin(row[15], row[11]) * 60000), dZ = new Date(dX.getTime() - 60 * 60000);
+  return [fmtStamp(dX), fmtStamp(dZ), fmtStamp(dY)];
+}
 function pasteParse(txt, iso, used){
   const TAB = String.fromCharCode(9), NL = String.fromCharCode(10), CR = String.fromCharCode(13);
   const grid = parseTsv(txt);
@@ -6027,7 +6115,7 @@ function pasteParse(txt, iso, used){
       if(out[24]) dY = stampFrom(out[24], ref0);
       if(out[23]) dX = stampFrom(out[23], dY || ref0);
       if(out[25]) dZ = stampFrom(out[25], dX || dY || ref0);
-      if(dY && !out[23]) dX = new Date(dY.getTime() - 30 * 60000);
+      if(dY && !out[23]) dX = new Date(dY.getTime() - travelMin(out[15], out[11]) * 60000);   // ตามพื้นที่ประจำรถ → คลัง
       if(dX && !out[25]) dZ = new Date(dX.getTime() - 60 * 60000);
       if(dY) out[24] = fmtStamp(dY);
       if(dX) out[23] = fmtStamp(dX);
