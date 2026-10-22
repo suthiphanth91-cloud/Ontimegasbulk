@@ -4730,6 +4730,7 @@ PLAN_HTML = """<!doctype html>
   <div id="pasteBox" style="margin:10px 0">
     <div style="margin:0 0 10px;padding:10px;border-radius:10px;background:#ecfdf5;border:1px solid #a7f3d0">
       <button id="fleetGo" class="go">📄 ดึงงานจากชีตแผนรถ PTGLG</button>
+      <button id="fleetSync" class="go" style="background:#0e7490" title="งานที่ลงชีตแล้ว: เติมเลขออเดอร์/เลขโหลดที่มาทีหลัง · งานที่เพิ่มในแผนรถ: นำไปจัดรถ">🔄 เทียบกับชีต (เติมเลข / งานเพิ่ม)</button>
       แท็บวันที่: <select id="fleetDate" style="font:inherit;padding:6px 8px;border-radius:8px"><option value="">กำลังโหลด...</option></select>
       <span class="mut" style="font-size:13px">งาน SC + งานภูมิภาค แสดงให้ตรวจ/แก้ก่อน · ยังไม่เขียนอะไรจนกว่าจะกดยืนยัน</span>
       <div id="fleetMsg" class="mut" style="font-size:13px;margin-top:4px"></div>
@@ -6178,6 +6179,67 @@ async function fleetDates(){                                      // ราย�
   }catch(e){ sel.innerHTML = '<option value="">(แท็บล่าสุด)</option>'; }
 }
 document.getElementById('pasteOpen').addEventListener('click', fleetDates);
+// ── เทียบแผนรถกับชีตแผนงานของวันเดียวกัน: เติมเลขที่มาทีหลัง + หางานที่เพิ่มเข้ามาใหม่ ──
+function syncKey(origin, dest, time){ return [origin, dest, time].map(v => String(v || '').replace(/ /g, '').toLowerCase()).join('|'); }
+function hhmmOf(v){ const t = tp(String(v || '').trim()); return t ? pad2(t[0]) + ':' + pad2(t[1]) : String(v || '').trim(); }
+let SYNC = null;
+async function fleetSync(){
+  const msg = document.getElementById('fleetMsg'), d = document.getElementById('fleetDate').value;
+  msg.textContent = 'กำลังเทียบแผนรถกับชีต...';
+  try{
+    const fr = await fetch('/api/plan/fleet' + (d ? '?date=' + d : '')), fj = await fr.json();
+    if(!fr.ok) throw new Error(fj.detail || fr.status);
+    const pr = await fetch('/api/plan?date=' + fj.date + '&fresh=1'), pj = await pr.json();      // อ่านชีตสด (ไม่ใช้แคช) จะได้เห็นเลขล่าสุด
+    if(!pr.ok) throw new Error(pj.detail || pr.status);
+    const pool = {};                                                    // งานในชีต จัดกลุ่มตาม ต้นทาง+ปลายทาง+เวลาส่งมอบ
+    pj.rows.forEach(x => { if(x.cancelled) return; const k = syncKey(x.cells[11], x.cells[12], hhmmOf(x.cells[6])); (pool[k] = pool[k] || []).push(x); });
+    const fill = [], fresh = [];
+    fj.rows.forEach(f => {                                              // f = [เวลา, เลขออเดอร์, เลขโหลด, ปริมาณ, ต้นทาง, ปลายทาง, เงื่อนไข]
+      const list = pool[syncKey(f[4], f[5], f[0])];
+      const x = list && list.length ? list.shift() : null;
+      if(!x){ fresh.push(f); return; }
+      const ch = [];
+      if(f[1] && !String(x.cells[7] || '').trim()) ch.push([7, f[1]]);
+      if(f[2] && !String(x.cells[8] || '').trim()) ch.push([8, f[2]]);
+      if(ch.length) fill.push({row: x.row, dest: x.cells[12], time: hhmmOf(x.cells[6]), car: x.cells[15] || '', ch: ch});
+    });
+    SYNC = {date: fj.date, tab: fj.tab, head: fj.head, fill: fill, fresh: fresh};
+    msg.textContent = 'เทียบแท็บ ' + fj.tab + ' กับชีต ' + dmy(fj.date) + ' แล้ว';
+    const tbl = fill.length ? '<div class="tbl" style="max-height:260px"><table><thead><tr><th>แถวในชีต</th><th>ปลายทาง</th><th>เวลาส่ง</th><th>เบอร์รถ</th><th>เลขออเดอร์ (H)</th><th>เลขโหลด (I)</th></tr></thead><tbody>' +
+      fill.map(u => '<tr><td>' + u.row + '</td><td>' + esc(u.dest) + '</td><td>' + esc(u.time) + '</td><td>' + esc(u.car) + '</td><td>' +
+        esc((u.ch.find(c => c[0] === 7) || ['', '–'])[1]) + '</td><td>' + esc((u.ch.find(c => c[0] === 8) || ['', '–'])[1]) + '</td></tr>').join('') + '</tbody></table></div>' : '';
+    impBody('<div class="box"><b>🔄 ผลเทียบแผนรถ (แท็บ ' + esc(fj.tab) + ') กับชีตวันที่ ' + dmy(fj.date) + '</b></div>' +
+      '<div class="box"><b>🔢 เติมเลขที่มาทีหลัง: ' + fill.length + ' แถว</b>' +
+      (fill.length ? '<p class="mut" style="margin:4px 0 8px;font-size:13px">เติมเฉพาะช่องที่ยังว่าง · ไม่แตะรถ/ข้อมูลที่จัดไว้</p>' + tbl +
+        '<button class="go" id="syncFill" style="margin-top:8px">เติมเลข ' + fill.length + ' แถวลงชีต</button>' : '<p class="mut" style="margin:4px 0 0">ไม่มีเลขที่ต้องเติม</p>') + '</div>' +
+      '<div class="box"><b>➕ งานใหม่ในแผนรถที่ยังไม่มีในชีต: ' + fresh.length + ' งาน</b>' +
+      (fresh.length ? '<ul>' + fresh.slice(0, 30).map(f => '<li>' + esc(f[4] + ' → ' + f[5] + ' · ' + (f[0] || 'ไม่มีเวลา') + (f[1] ? ' · ' + f[1] : '')) + '</li>').join('') + '</ul>' +
+        '<button class="go" id="syncNew" style="margin-top:8px">นำ ' + fresh.length + ' งานใหม่ไปจัดรถ</button>' : '<p class="mut" style="margin:4px 0 0">ไม่มีงานเพิ่ม</p>') + '</div>');
+    const bf = document.getElementById('syncFill'); if(bf) bf.onclick = syncFill;
+    const bn = document.getElementById('syncNew'); if(bn) bn.onclick = () => {
+      const TAB = String.fromCharCode(9), NL = String.fromCharCode(10);
+      document.getElementById('pasteTxt').value = [SYNC.head].concat(SYNC.fresh).map(r => r.join(TAB)).join(NL);
+      document.getElementById('pasteDate').value = SYNC.date;
+      msg.textContent = 'งานใหม่ ' + SYNC.fresh.length + ' งาน — จัดรถในตารางด้านล่าง แล้วกดเขียนลงชีต (ระบบเพิ่มต่อ ไม่ลบงานเดิม)';
+      pasteGo();
+    };
+  }catch(e){ msg.textContent = 'เทียบไม่สำเร็จ: ' + e.message; }
+}
+async function syncFill(){                                            // เขียนผ่านคิวบันทึกปกติของตารางหลัก (เหมือนพิมพ์เองทีละช่อง)
+  if(!SYNC || !SYNC.fill.length) return;
+  if(!EDITING){ setEditing(true); if(!EDITING) return; }
+  const btn = document.getElementById('syncFill'); btn.disabled = true; btn.textContent = 'กำลังเติม...';
+  if(!DATA || DATA.date !== SYNC.date){ document.getElementById('date').value = SYNC.date; await load(); }
+  let n = 0;
+  SYNC.fill.forEach(u => {
+    const x = DATA.rows.find(r => r.row === u.row);
+    if(!x) return;
+    u.ch.forEach(c => { if(!String(x.cells[c[0]] || '').trim()){ saveCell(x, c[0], '', c[1], false); n++; } });
+  });
+  btn.textContent = 'ส่งเติมแล้ว ' + n + ' ช่อง ✓';
+  toast('กำลังบันทึกเลข ' + n + ' ช่องลงชีต (ดูสถานะมุมล่าง) — ปิดหน้าต่างนี้เพื่อดูในตาราง', false);
+}
+document.getElementById('fleetSync').onclick = fleetSync;
 document.getElementById('fleetGo').onclick = async () => {        // ดึงจากชีตแผนรถ → ใส่ในกล่องวาง → ตรวจแบบเดียวกับวางเอง
   const msg = document.getElementById('fleetMsg');
   msg.textContent = 'กำลังอ่านชีตแผนรถ...';
