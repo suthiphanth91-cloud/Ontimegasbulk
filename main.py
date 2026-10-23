@@ -2372,13 +2372,35 @@ def _dup_rows(rows: list, date_iso: str) -> list:
         sheet = _fetch_sheet(PLAN_PAGE_ID, PLAN_PAGE_TAB)
     except Exception:
         return []
+    from collections import Counter
     have = set()
+    sec_all, sec_nonum = Counter(), Counter()          # งานที่ยังไม่มีเลข: เทียบด้วย ต้นทาง+ปลายทาง+เวลาส่งมอบ+Drop (นับจำนวน กันงานเหมือนกันหลายคัน)
     for r in sheet:
         if _parse_date(_cell(r, PLAN_DATE)) == date_iso:
-            k = _dup_key([_cell(r, c) for c in range(PLAN_LAST_COL)])
+            cells = [_cell(r, c) for c in range(PLAN_LAST_COL)]
+            k, sk = _dup_key(cells), _dup_sec(cells)
             if k:
                 have.add(k)
-    return [n for n, r in enumerate(rows) if (_dup_key(r) in have and _dup_key(r) is not None)]
+            if sk:
+                sec_all[sk] += 1
+                if not k:
+                    sec_nonum[sk] += 1
+    out = []
+    for n, r in enumerate(rows):
+        k, sk = _dup_key(r), _dup_sec(r)
+        if k is not None and k in have:
+            out.append(n)
+        elif sk and (sec_nonum if k is not None else sec_all)[sk] > 0:     # ฝั่งใดฝั่งหนึ่งยังไม่มีเลข → เทียบด้วยงาน/เวลา
+            (sec_nonum if k is not None else sec_all)[sk] -= 1
+            out.append(n)
+    return out
+
+
+def _dup_sec(r: list):
+    """กุญแจสำรองสำหรับงานที่ยังไม่มีเลขออเดอร์/เลขโหลด: ต้นทาง + ปลายทาง + เวลาส่งมอบ + Drop"""
+    if len(r) <= 13 or not str(r[12]).strip():
+        return None
+    return (str(r[11]).strip().upper(), re.sub(r"\s+", "", str(r[12])), _cell_time(str(r[6])) or str(r[6]).strip(), str(r[13]).strip() or "1")
 
 
 def _triple(r: list):
@@ -2459,6 +2481,14 @@ def _write_near(ws, head: int, hit: list, sheet_rows: list) -> dict:
         ws._properties["gridProperties"]["rowCount"] += len(sheet_rows)
     except Exception:
         pass
+    for _a, idx, first in placed:                        # มีคนแทรก/เขียนพร้อมกันจนแถวเลื่อน → แถวที่จะเขียนไม่ว่างแล้ว → หยุด ไม่เขียนทับงานคนอื่น
+        try:
+            got = ws.get(f"M{first}:M{first + len(idx) - 1}") or []
+        except Exception:
+            got = []
+        if any(str(c).strip() for r in got for c in r):
+            raise HTTPException(status_code=409, detail="มีคนเพิ่มงานเข้าชีตพร้อมกันพอดี ระบบหยุดไว้ไม่ให้เขียนทับงานของคนอื่น — "
+                                                        "รอสักครู่แล้วกดเขียนอีกครั้ง (งานที่ลงไปแล้วระบบจะข้ามให้ ไม่ซ้ำ) และลบแถวว่างที่เกินในชีตถ้ามี")
     data = [{"range": f"A{first}", "values": [[None if c in protect else sheet_rows[i][c] for c in range(PLAN_LAST_COL)] for i in idx]}
             for _a, idx, first in placed]
     try:
@@ -2518,7 +2548,7 @@ async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = 
         except Exception:
             info["existing"] = None
     dups: list = []
-    if near and rv["date"]:                       # โหมดวางข้อมูล: เตือนงานที่ซ้ำกับในชีต (ไม่เช็กตอนนำเข้าไฟล์ เพราะนั้นแทนที่ทั้งวันอยู่แล้ว)
+    if rv["date"]:                                # ทุกโหมด (วาง/ดึงแผนรถ/Excel): เตือนงานที่ซ้ำกับในชีต (ไม่เช็กตอนนำเข้าไฟล์ เพราะนั้นแทนที่ทั้งวันอยู่แล้ว)
         dups = _dup_rows(rv["rows"], rv["date"])
         info["dups"] = dups
         if dups:
@@ -2544,7 +2574,8 @@ async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = 
                             f"คอลัมน์ {_col_name(e0['c'])}: {e0['msg']}) — แก้ในตารางก่อนเขียนลงชีต")
     if not rv["rows"] or not rv["date"]:
         raise HTTPException(status_code=400, detail="ไม่มีแถวงาน หรืออ่านวันที่ไม่ได้ — ไม่เขียนอะไรลงชีต")
-    if near and skip_dups and dups:                # ข้ามแถวที่ซ้ำกับชีต (อ่านสดอีกรอบก่อนตัดสิน)
+    adding = bool(near) or not replace             # เพิ่มเข้าวันเดิม (ไม่แทนที่ทั้งวัน) → งานซ้ำต้องข้าม
+    if adding and skip_dups and dups:              # ข้ามแถวที่ซ้ำกับชีต (อ่านสดอีกรอบก่อนตัดสิน)
         _drop_sheet_cache(PLAN_PAGE_ID, PLAN_PAGE_TAB)
         dups = _dup_rows(rv["rows"], rv["date"])
         skip = set(dups)
@@ -2558,7 +2589,7 @@ async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = 
         n_new = len(sheet_rows)
         removed = inserted = 0
         hit = [i + 1 for i, v in enumerate(col_c) if i > head and _parse_date(v) == rv["date"]]   # แถวของวันนี้ (อ้างอิงคอลัมน์ C)
-        if near and hit:                                  # วางข้อมูลลูกค้าเข้าวันที่มีอยู่แล้ว: เพิ่มโดยไม่ลบ แทรกติดรถคันเดิม
+        if adding and hit:                                # วางข้อมูล/Excel แบบไม่แทนที่ เข้าวันที่มีอยู่แล้ว: เพิ่มโดยไม่ลบ แทรกติดรถคันเดิม
             res = _write_near(ws, head, hit, sheet_rows)
             _drop_sheet_cache(PLAN_PAGE_ID, PLAN_PAGE_TAB)
             return {**info, "written": len(sheet_rows), "removed": 0, "inserted": res["inserted"], "first_row": res["first"],
@@ -5622,7 +5653,7 @@ async function impPreview(){             // อ่านไฟล์ครั้
     await loadOpts();                    // รายการเลือก (ต้นทาง/ปลายทาง/รถ ฯลฯ) ไว้ใช้ตอนแก้ในตาราง
     const j = await impSend({});
     if(!j) return;
-    IMP = {rows: j.rows, headers: j.headers, edited: {}, errs: {}, warns: {}, info: j, replace: true, onlyBad: false, master: j.master || null};
+    IMP = {rows: j.rows, headers: j.headers, edited: {}, errs: {}, warns: {}, info: j, replace: !j.existing, onlyBad: false, master: j.master || null};
     impMarkErrors(j);
     impRender();
   }catch(e){ impBody('<div class="box bad">อ่านไฟล์ไม่ได้: ' + esc(e.message) + '</div>'); }
@@ -5713,14 +5744,13 @@ function impRender(){
     : 'วันที่ ' + dmy(j.date) + ' ยังไม่มีในชีต จะลงต่อท้ายวันสุดท้าย ข้ามแถวสีดำ') + '</label>';
   const ndup = (j.dups || []).length;
   if(IMP.skip === undefined) IMP.skip = ndup > 0;
-  const nw = j.total - (IMP.near && IMP.skip ? ndup : 0);
+  const PL = impPlan(), adding = PL.adding, nw = PL.nw;
   const ok = j.can_commit && nw > 0 && !nerr && !IMP.checking;
   const nmaster = IMP.master ? Object.keys(IMP.master).length : 0;
   impBody(
     '<div class="box"><b>วันที่ ' + dmy(j.date) + '</b> · ' + j.total + ' แถวงาน · ปลายทาง: <b>' + esc(j.target) + '</b>' +
     (nedit ? ' · <span class="ied" style="padding:1px 8px;border-radius:6px">แก้แล้ว ' + nedit + ' ช่อง</span>' : '') + '</div>' +
-    '<p class="mut" style="margin:6px 2px;font-size:13px">✏️ คลิกช่องในตารางเพื่อแก้ก่อนเขียนลงชีต · Enter = ตกลง · Esc = ยกเลิก · ' +
-    '<b class="bad">ช่องสีแดง = มีปัญหา (เอาเมาส์ชี้ดูสาเหตุ)</b> · ช่องสีเหลือง = ที่คุณแก้</p>' + er + w +
+    er + w +
     '<label style="display:block;margin:6px 2px"><input type="checkbox" id="impOnlyBad"' + (IMP.onlyBad ? ' checked' : '') +
     '> ดูเฉพาะแถวที่มีช่องสีแดง (' + nbad + ' แถว)</label>' +
     impOriginBar() +
@@ -5734,16 +5764,19 @@ function impRender(){
     '<div class="tblrow"><aside class="carbar" id="impCars">' + impCarPane() + '</aside>' +
     '<div class="tbl" style="flex:1;min-width:0"><table><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div></div>' +
     '<div class="box">' + ex + '</div>' +
-    (ndup ? '<div class="box"><label><input type="checkbox" id="impSkip"' + (IMP.skip ? ' checked' : '') + '> <b>ข้ามแถวที่ซ้ำกับชีต (' + ndup +
+    (ndup && !(IMP.near || !IMP.replace) ? '<div class="box ok">🔁 พบ ' + ndup + ' แถวที่มีในชีตแล้ว — เลือก "แทนที่งานเดิมทั้งวัน" อยู่ จึงไม่เกิดงานซ้ำ</div>' : '') +
+    (ndup && (IMP.near || !IMP.replace) ? '<div class="box" style="border-color:#f59e0b;background:#fffbeb"><b style="color:#b45309">🔁 พบ ' + ndup + ' แถวที่มีในชีตแล้ว (นำเข้าซ้ำ)</b><br>' +
+      '<label><input type="checkbox" id="impSkip"' + (IMP.skip ? ' checked' : '') + '> <b>ข้ามแถวที่ซ้ำกับชีต (' + ndup +
       ' แถว)</b> — งานที่มีเลขออเดอร์/เลขโหลด/ปลายทางเหมือนที่อยู่ในชีตวันนี้แล้ว จะไม่ถูกเพิ่มซ้ำ (แถวสีเหลืองในช่องเลขออเดอร์)</label></div>' : '') +
     (IMP.near ? '' : '<div class="box ' + (nmaster ? 'ok' : '') + '">' + (nmaster
       ? '🚚 พบข้อมูลรถ/พขร. ' + nmaster + ' คันในไฟล์นี้ — จะเก็บไว้ใช้เติมประเภท/ทะเบียน/พขร./เบอร์โทรอัตโนมัติตอนเลือกเบอร์รถ'
       : 'ไม่พบแท็บข้อมูลรถ/พขร. ในไฟล์นี้ — ถ้าเคยนำเข้าไว้แล้ว ระบบใช้ข้อมูลเดิมต่อ') + '</div>') +
     (j.can_commit ? '' : '<div class="box bad">เขียนลงชีตไม่ได้ตอนนี้: ' + esc(j.block_reason) + '</div>') +
-    '<button class="go" id="impGo"' + (ok ? '' : ' disabled') + '>เขียน ' + nw + ' แถวลงชีต</button>');
+    (IMP.origin && IMP.replace ? '<div class="box">ℹ️ เขียนทีละกลุ่มต้นทาง = เพิ่มเข้าไป ไม่แทนที่ทั้งวัน (กันงานของกลุ่มอื่นหาย)</div>' : '') +
+    '<button class="go" id="impGo"' + (ok ? '' : ' disabled') + '>เขียน ' + nw + ' แถว' + PL.label + 'ลงชีต</button>');
   const t = document.querySelector('#impBody .tbl');
   if(t){ t.scrollLeft = sx; t.scrollTop = sy; }
-  const rp = document.getElementById('impReplace'); if(rp) rp.onchange = e => { IMP.replace = e.target.checked; };
+  const rp = document.getElementById('impReplace'); if(rp) rp.onchange = e => { IMP.replace = e.target.checked; impRender(); };
   const sk = document.getElementById('impSkip'); if(sk) sk.onchange = e => { IMP.skip = e.target.checked; impRender(); };
   document.getElementById('impOnlyBad').onchange = e => { IMP.onlyBad = e.target.checked; impRender(); };
   document.querySelectorAll('#impBody [data-iorg]').forEach(bt => { bt.onclick = () => { IMP.origin = bt.dataset.iorg; impRender(); }; });
@@ -5775,6 +5808,21 @@ function impOriginBar(){                  // ปุ่มแยกต้นท�
   const b = (v, label, n) => '<button type="button" class="chip' + (cur === v ? ' on' : '') + '" data-iorg="' + esc(v) + '"' + (n ? '' : ' disabled') + '>' + label + ' <b>' + n + '</b></button>';
   return '<div class="iorg"><span class="mut" style="font-size:13px">ต้นทาง:</span>' + b('', 'ทั้งหมด', IMP.rows.length) +
     IMP_ORIGINS.map(o => b(o, esc(o), cnt[o] || 0)).join('') + (other ? b('*', 'อื่นๆ', other) : '') + '</div>';
+}
+function impGroupIdx(){                  // แถวที่จะเขียน: เลือกต้นทางอยู่ = เฉพาะกลุ่มนั้น (หัวหน้างานแต่ละคนเขียนกลุ่มตัวเอง)
+  const o = IMP.origin || '';
+  return IMP.rows.map((_, i) => i).filter(i => {
+    const org = String(IMP.rows[i][11] || '').trim();
+    return !o || (o === '*' ? IMP_ORIGINS.indexOf(org) < 0 : org === o);
+  });
+}
+function impPlan(){                       // → {idx, nw, nd, adding, replace, label}
+  const j = IMP.info, idx = impGroupIdx(), grp = !!IMP.origin;
+  const replace = IMP.replace && !grp;    // เขียนทีละกลุ่ม = ห้ามแทนที่ทั้งวัน (จะลบงานกลุ่มอื่น)
+  const adding = IMP.near || !replace, dset = {}; (j.dups || []).forEach(i => { dset[i] = 1; });
+  const nd = idx.filter(i => dset[i]).length;
+  return {idx: idx, nd: nd, adding: adding, replace: replace, nw: idx.length - (adding && IMP.skip ? nd : 0),
+          label: grp ? ' (เฉพาะ ' + (IMP.origin === '*' ? 'ต้นทางอื่นๆ' : IMP.origin) + ') ' : ' '};
 }
 function impHidden(ri){                  // ถูกซ่อนด้วยช่องค้นหา / ปุ่มต้นทางไหม
   const o = IMP.origin || '', org = String(IMP.rows[ri][11] || '').trim();
@@ -5977,20 +6025,30 @@ document.getElementById('impBody').addEventListener('mousedown', e => {
 });
 
 async function impCommit(){
-  const j = IMP.info, replace = IMP.replace;
-  const nd = (j.dups || []).length, nw = j.total - (IMP.near && IMP.skip ? nd : 0);
-  if(!confirm('เขียน ' + nw + ' แถวของวันที่ ' + dmy(j.date) + ' ลง' + j.target + (IMP.near && !IMP.skip && nd ? ' (⚠ รวม ' + nd + ' แถวที่ซ้ำกับชีต)' : '') +
+  const j = IMP.info, PL = impPlan(), replace = PL.replace, adding = PL.adding, nd = PL.nd, nw = PL.nw;
+  if(!nw){ toast('ไม่มีแถวที่จะเขียน' + PL.label, true); return; }
+  if(!confirm('เขียน ' + nw + ' แถว' + PL.label + 'ของวันที่ ' + dmy(j.date) + ' ลง' + j.target + (adding && !IMP.skip && nd ? ' (⚠ รวม ' + nd + ' แถวที่ซ้ำกับชีต)' : '') +
               (IMP.near ? ' (เพิ่มเข้าไป ไม่ลบงานเดิม)' : replace ? ' และลบงานเดิมของวันนั้นก่อน' : '') + ' — ยืนยัน?')) return;
   const btn = document.getElementById('impGo'); btn.disabled = true; btn.textContent = 'กำลังเขียนลงชีต...';
   try{
-    const r = await impSend({rows: IMP.rows, commit: true, replace: replace, master: IMP.master, near: IMP.near, skip: IMP.near && IMP.skip});
+    const r = await impSend({rows: PL.idx.map(i => IMP.rows[i]), commit: true, replace: replace, master: IMP.master, near: IMP.near, skip: adding && IMP.skip});
     if(!r) return;
+    const left = IMP.rows.length - PL.idx.length;
     impBody('<div class="box ok">✓ เขียนแล้ว ' + r.written + ' แถว (แถวที่ ' + r.first_row + '–' + r.last_row + ' ในชีต)' +
       (r.removed ? ' · ลบแถวส่วนเกิน ' + r.removed + ' แถว' : '') + (r.inserted ? ' · แทรกเพิ่ม ' + r.inserted + ' แถว' : '') +
       (r.kept_formula_cols && r.kept_formula_cols.length ? ' · ช่องที่เป็นสูตรในคอลัมน์ ' + r.kept_formula_cols.join(', ') + ' ระบบไม่ได้เขียนทับ ให้ชีตคำนวณเอง' : '') + '</div>' +
       (r.master_saved ? '<p class="mut">🚚 เก็บข้อมูลรถ/พขร. ' + r.master_saved + ' คันแล้ว (ใช้เติมอัตโนมัติ)</p>' : '') +
       (r.master_note ? '<div class="box bad">' + esc(r.master_note) + '</div>' : '') +
-      '<p class="mut">' + esc(r.note || '') + '</p><p class="mut">ปิดหน้าต่างนี้เพื่อดูผลในหน้าแผนงาน (เปลี่ยนไปวันที่ ' + dmy(r.date) + ' ให้แล้ว)</p>');
+      '<p class="mut">' + esc(r.note || '') + '</p><p class="mut">ปิดหน้าต่างนี้เพื่อดูผลในหน้าแผนงาน (เปลี่ยนไปวันที่ ' + dmy(r.date) + ' ให้แล้ว)</p>' +
+      (left > 0 && PL.label ? '<button class="go" id="impNext">จัดกลุ่มอื่นต่อ (เหลือ ' + left + ' แถวในตาราง)</button>' : ''));
+    const nx = document.getElementById('impNext');
+    if(nx) nx.onclick = () => {                                       // เอากลุ่มที่เขียนแล้วออกจากตาราง แล้วจัดกลุ่มที่เหลือต่อ
+      const keep = IMP.rows.map((_, i) => i).filter(i => PL.idx.indexOf(i) < 0), ed = {};
+      keep.forEach((oi, ni) => Object.keys(IMP.edited).forEach(k => { const p = k.split(','); if(Number(p[0]) === oi) ed[ni + ',' + p[1]] = 1; }));
+      IMP.rows = keep.map(i => IMP.rows[i]); IMP.edited = ed; IMP.origin = ''; IMP.autoD = {}; IMP.autoXZ = {}; IMP.userXZ = {}; IMP.hist = [];
+      IMPDAY = {date: '', rows: []}; IMP.near = true;
+      fetch('/api/plan?date=' + r.date + '&fresh=1').then(x => x.json()).then(pj => { IMPDAY = {date: r.date, rows: (pj.rows || []).map(x => x.cells)}; }).catch(() => {}).finally(impRecheck);
+    };
     document.getElementById('date').value = r.date; load(true);
     if(r.master_saved){ CARS = null; loadCars(); }
   }catch(e){ impBody('<div class="box bad">เขียนไม่สำเร็จ: ' + esc(e.message) + '</div>'); }
