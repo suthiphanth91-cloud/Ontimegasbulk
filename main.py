@@ -4852,7 +4852,7 @@ READY_HTML = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>รถ/คนพร้อมใช้งาน — Gasbulk Track</title>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet" crossorigin="anonymous">
 <style>
   /* สีสถานะ: ตรวจตาบอดสีแล้ว (คู่ติดกัน ΔE ≥ 10) ทั้งโหมดสว่าง/มืด · เหลืองบนพื้นขาวคอนทราสต์ต่ำ → มีตัวเลข/ตารางกำกับเสมอ */
   :root{color-scheme:light;
@@ -4891,9 +4891,15 @@ READY_HTML = """<!doctype html>
   .seg button.on{background:var(--card);color:var(--ink);box-shadow:var(--shadow)}
   input{font:inherit;font-size:15px;padding:7px 10px;border-radius:9px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
   .btn{font:inherit;font-size:15px;font-weight:600;padding:7px 14px;border-radius:9px;border:1px solid var(--acc);background:var(--acc);color:#fff;cursor:pointer}
+  .btn2{font:inherit;font-size:15px;font-weight:600;padding:7px 14px;border-radius:9px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+  .btn2:hover{background:var(--hover)}
+  .btn2:disabled{opacity:.6;cursor:wait}
+  .snapcap{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline;padding:4px 2px 12px}
+  .snapcap b{font-size:19px}
+  .snapcap span{font-size:13.5px;color:var(--mut)}
   .tgt{display:flex;align-items:center;gap:7px;font-size:14px;color:var(--mut)}
   .tgt input{width:68px;text-align:right}
-  main{padding:18px 22px 40px;transition:opacity .15s;max-width:1500px}
+  main{padding:18px 22px 40px;transition:opacity .15s}
   main.busy{opacity:.55;pointer-events:none}
   .err{background:#fdecec;border:1px solid #f6caca;color:#b42318;border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:14.5px}
   .note{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--nod);border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:14px;color:var(--ink2)}
@@ -4912,7 +4918,7 @@ READY_HTML = """<!doctype html>
   .sub{font-size:13px;color:var(--mut);margin-top:4px;line-height:1.5}
   .sub b{color:var(--ink2);font-weight:600}
   @media (max-width:1100px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
-  @media (max-width:560px){.kpis{grid-template-columns:1fr}.w2{grid-column:auto}}
+  @media (max-width:560px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.w2{grid-column:1/-1}}
 
   /* แท่งต่อกัน (stack): ช่องว่าง 2px สีพื้นคั่นทุกช่วง · ปลายข้อมูลมน 4px ฐานเหลี่ยม */
   .stk{display:flex;gap:2px;height:14px;border-radius:0 4px 4px 0;overflow:hidden}
@@ -4920,7 +4926,7 @@ READY_HTML = """<!doctype html>
   .sg{position:relative;min-width:3px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;cursor:default}
   .sg b{font-weight:700;padding:0 4px}
   .legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13.5px;color:var(--ink2);margin-top:10px}
-  .legend span{display:inline-flex;align-items:center;gap:7px}
+  .legend span{display:inline-flex;align-items:center;gap:7px;white-space:nowrap}
   .legend b{color:var(--ink);font-weight:600}
   .legend em{font-style:normal;color:var(--mut)}
   .meter{position:relative;height:14px;background:var(--track);border-radius:0 4px 4px 0;margin:14px 0 8px}
@@ -4935,9 +4941,9 @@ READY_HTML = """<!doctype html>
   .c7{grid-column:span 7}.c5{grid-column:span 5}.c6{grid-column:span 6}.c12{grid-column:span 12}
   @media (max-width:1100px){.c7,.c5,.c6{grid-column:span 12}}
   .ph{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:2px}
-  .ph h3{margin:0;font-size:15.5px;font-weight:700}
+  .ph h3{margin:0;font-size:15.5px;font-weight:700;white-space:nowrap}
   .ph .s2{font-size:13px;color:var(--mut)}
-  .ph .legend{margin:0 0 0 auto}
+  .ph .legend{margin:0 0 0 auto;flex:0 0 auto}
   .desc{font-size:13px;color:var(--mut);margin:2px 0 12px}
   .chart{position:relative;width:100%}
   .chart svg{display:block;overflow:visible}
@@ -4992,6 +4998,29 @@ READY_HTML = """<!doctype html>
   #tip .r{display:flex;align-items:center;gap:8px;justify-content:space-between}
   #tip .r span{display:inline-flex;align-items:center;gap:7px;color:var(--ink2)}
   #tip .r b{font-variant-numeric:tabular-nums}
+  @media (max-width:700px){
+    body{font-size:14.5px}
+    .side{gap:4px;padding:6px 8px}
+    .side .menu{font-size:13px;padding:8px 4px;gap:5px;text-align:center}
+    header{position:static;padding:12px 14px}
+    .hd{gap:8px}
+    .ttl{flex:1 1 100%}
+    .ttl h1{font-size:19px}
+    .seg{flex:1 1 100%}.seg button{flex:1}
+    #d{flex:1 1 auto;min-width:0}
+    .tgt{flex:0 0 auto}
+    .btn,.btn2{flex:1 1 40%}
+    main{padding:12px 12px 32px}
+    .card,.panel{padding:14px 14px 12px;border-radius:11px}
+    .big{font-size:42px}
+    .val{font-size:26px}
+    .ph .legend{margin:6px 0 0;flex:1 1 100%}
+    .rows{grid-template-columns:minmax(78px,110px) 1fr auto;column-gap:10px}
+    .tools input[type=search]{min-width:0 !important;flex:1 1 100%}
+    th,td{padding:7px 9px}
+    .m-hide{display:none}
+    .tw{max-height:70vh !important}
+  }
   [hidden]{display:none !important}
 </style>
 </head>
@@ -5010,10 +5039,11 @@ READY_HTML = """<!doctype html>
   <input type="date" id="d" aria-label="วันที่">
   <label class="tgt">เป้า <input type="number" id="tg" min="0" max="20" step="0.5" aria-label="เป้าเที่ยวต่อคันต่อวัน"> เที่ยว/คัน</label>
   <button class="btn" id="go">ดูรายงาน</button>
+  <button class="btn2" id="snap" title="บันทึกหน้านี้เป็นรูป เพื่อส่งต่อทาง LINE / อีเมล">📷 แคปส่ง</button>
 </div></header>
 <main id="main">
   <div id="err" class="err" hidden></div>
-  <div id="notes" class="note" hidden></div>
+  <div id="notes" class="note" hidden data-nosnap="1"></div>
   <div class="kpis" id="kpis"></div>
   <div class="panels">
     <section class="panel c7"><div class="ph"><h3>สถานะรถรายวัน</h3><span class="s2" id="trSub"></span><div class="legend" id="trLeg"></div></div>
@@ -5030,12 +5060,12 @@ READY_HTML = """<!doctype html>
       <p class="desc">แยกตามรหัสที่ลงในชีตของวันนั้น</p><div id="cDown"></div></section>
     <section class="panel c6"><div class="ph"><h3>พนักงานขับรถ</h3><span class="s2" id="pplSub"></span></div>
       <p class="desc">มีงาน = มีชื่อในแผนงานของวันนั้น · ไม่พร้อม = ลา / หยุด / อบรม ฯลฯ ตามชีต</p><div id="cPpl"></div></section>
-    <section class="panel c12" id="carsP"><div class="tools"><div class="ph" style="margin:0"><h3>รายคัน</h3><span class="s2" id="rowSub"></span></div>
+    <section class="panel c12" id="carsP" data-nosnap="1"><div class="tools"><div class="ph" style="margin:0"><h3>รายคัน</h3><span class="s2" id="rowSub"></span></div>
       <div class="chips" id="carChips"></div>
       <span class="grow"></span><input type="search" id="q" placeholder="ค้นหา เบอร์รถ / ทะเบียน / สถานะ" style="min-width:240px"></div>
-      <div class="tw"><table><thead><tr><th>เบอร์รถ</th><th>พื้นที่</th><th>ประเภท</th><th>ทะเบียน</th><th>สถานะ</th><th>เหตุผล</th><th class="n">เที่ยว</th><th class="n">Drop</th></tr></thead>
+      <div class="tw"><table><thead><tr><th>เบอร์รถ</th><th>พื้นที่</th><th>ประเภท</th><th class="m-hide">ทะเบียน</th><th>สถานะ</th><th>เหตุผล</th><th class="n">เที่ยว</th><th class="n">Drop</th></tr></thead>
         <tbody id="rows"></tbody></table></div></section>
-    <section class="panel c12" id="pplP"><div class="tools"><div class="ph" style="margin:0"><h3>รายชื่อ พขร.</h3><span class="s2" id="pSub"></span></div>
+    <section class="panel c12" id="pplP" data-nosnap="1"><div class="tools"><div class="ph" style="margin:0"><h3>รายชื่อ พขร.</h3><span class="s2" id="pSub"></span></div>
       <div class="chips" id="pplChips"></div></div>
       <div class="tw" style="max-height:360px"><table><thead><tr><th>ชื่อ-สกุล</th><th>สถานะ</th><th>เหตุผล</th><th class="n">เที่ยว</th></tr></thead>
         <tbody id="prows"></tbody></table></div></section>
@@ -5220,7 +5250,7 @@ function drawRows(){
   chips(FC, K, 'carChips');
   document.getElementById('rowSub').textContent = list.length + ' คัน' + (q || Object.keys(FC).length ? ' (จาก ' + REP.rows.length + ')' : '');
   document.getElementById('rows').innerHTML = list.map(x =>
-    '<tr><td><b>' + esc(x.car) + '</b></td><td>' + esc(x.area) + '</td><td>' + esc(x.vtype) + '</td><td>' + esc(x.plate) + '</td>' +
+    '<tr><td><b>' + esc(x.car) + '</b></td><td>' + esc(x.area) + '</td><td>' + esc(x.vtype) + '</td><td class="m-hide">' + esc(x.plate) + '</td>' +
     '<td><span class="st"><i style="background:' + K[x.kind].c + '"></i>' + K[x.kind].t + '</span></td><td>' + esc(x.why) + (x.why && x.code ? '<span class="code">' + esc(x.code) + '</span>' : '') + '</td>' +
     '<td class="n">' + (x.trips || '–') + '</td><td class="n">' + (x.drops || '–') + '</td></tr>').join('') || '<tr><td colspan="8" class="empty">ไม่พบรถที่ตรงกับคำค้น</td></tr>';
 }
@@ -5275,6 +5305,53 @@ document.addEventListener('click', e => {
   sec.scrollIntoView({behavior: 'smooth', block: 'start'});
   sec.classList.remove('flash'); void sec.offsetWidth; sec.classList.add('flash');
 });
+// แคปส่ง: ถ่ายส่วนกราฟเป็นรูป (ไม่รวมหมายเหตุ/ตารางยาว) — มือถือเปิดเมนูแชร์, คอมดาวน์โหลดไฟล์
+let H2I = null;
+function loadH2I(){
+  if(window.htmlToImage) return Promise.resolve(window.htmlToImage);
+  if(H2I) return H2I;
+  H2I = new Promise((ok, bad) => {
+    const sc = document.createElement('script');
+    sc.src = 'https://cdn.jsdelivr.net/npm/html-to-image@1.11.11/dist/html-to-image.js';
+    sc.integrity = 'sha384-UbfRVKN3/elS1r7JcK2FhmPP+KlJ4CvYwbyYD7tH+uTkbT9bNJr9eJeQ0FoFbAgz';
+    sc.crossOrigin = 'anonymous';
+    sc.onload = () => ok(window.htmlToImage);
+    sc.onerror = () => { H2I = null; bad(new Error('โหลดตัวแคปไม่ได้')); };
+    document.head.appendChild(sc);
+  });
+  return H2I;
+}
+document.getElementById('snap').onclick = async () => {
+  if(!REP) return;
+  const b = document.getElementById('snap'), main = document.getElementById('main');
+  b.disabled = true; b.textContent = '⏳ กำลังแคป…'; tip.hidden = true;
+  const cap = document.createElement('div'); cap.className = 'snapcap';
+  const day = thaiDate(REP.date) + ' ' + (dt(REP.date).getFullYear() + 543);
+  cap.innerHTML = '<b>รถ/คนพร้อมใช้งาน · ' + esc(day) + '</b><span>เป้า ' + esc(REP.target) + ' เที่ยว/คัน · แคปเมื่อ ' +
+    new Date().toLocaleString('th-TH', {dateStyle: 'short', timeStyle: 'short'}) + '</span>';
+  main.insertBefore(cap, main.firstChild);
+  const hide = [...main.querySelectorAll('[data-nosnap]')].filter(e => !e.hidden);   // ซ่อนจริงระหว่างแคป ไม่งั้นรูปมีที่ว่างเท่าความสูงตาราง
+  hide.forEach(e => e.hidden = true);
+  try{
+    const lib = await loadH2I();
+    let fontCss = '';
+    try{ fontCss = await lib.getFontEmbedCSS(main); }catch(e){}                       // ฝังฟอนต์ไทย ตัวหนังสือในรูปจะได้กว้างเท่าบนจอ
+    const blob = await lib.toBlob(main, {pixelRatio: 2, backgroundColor: getComputedStyle(document.body).backgroundColor,
+      fontEmbedCSS: fontCss || undefined, skipFonts: !fontCss});
+    const name = 'ready_' + REP.date + '.png';
+    const file = new File([blob], name, {type: 'image/png'});
+    if(navigator.canShare && navigator.canShare({files: [file]}) && matchMedia('(pointer:coarse)').matches){
+      try{ await navigator.share({files: [file], title: 'รถ/คนพร้อมใช้งาน ' + day}); }catch(e){}
+    }else{
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+      document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+    }
+  }catch(e){
+    alert('แคปไม่สำเร็จ: ' + (e && e.message ? e.message : e) + ' — ลองใหม่อีกครั้ง หรือใช้ปุ่มแคปหน้าจอของเครื่องแทน');
+  }finally{
+    cap.remove(); hide.forEach(e => e.hidden = false); b.disabled = false; b.textContent = '📷 แคปส่ง';
+  }
+};
 let rz = 0;
 addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if(REP) render(); }, 150); });
 document.getElementById('d').value = iso(new Date());
