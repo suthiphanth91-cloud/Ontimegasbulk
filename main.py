@@ -84,6 +84,7 @@ PLAN_TAB     = "แผนงาน Gasbulk"
 PLAN_DATE    = 2   # C  วันที่
 PLAN_DUE     = 5   # F  วันที่ส่งมอบ  ← ใช้คู่กับ G เป็นกำหนดจริง (อาจข้ามวันจาก C)
 PLAN_SCHED   = 6   # G  เวลาส่งมอบ (HH:MM)
+PLAN_TRIP_SEQ= 3   # D  ลำดับเที่ยว (เลขเที่ยวของวัน — drop ของเที่ยวเดียวกันได้เลขเดียวกัน)
 PLAN_TRIP    = 4   # E  เที่ยววิ่ง
 PLAN_INVOICE = 7   # H  เลขที่ใบกำกับ
 PLAN_VOLUME  = 9   # J  ปริมาณ
@@ -3666,21 +3667,30 @@ def _ready_sheet(tab: str, need: list, date_iso: str) -> dict:
 
 
 def _ready_plan(rows: list, date_iso: str) -> tuple:
-    """แผนงานของวันนั้น → ({คีย์รถ: จำนวน drop}, {ชื่อ พขร.: จำนวน drop}, จำนวนงานที่ยกเลิก)"""
+    """แผนงานของวันนั้น → ({คีย์รถ: {jobs: เซ็ตเลขเที่ยว, drops: จำนวนแถว}}, {ชื่อ พขร.: เซ็ตเลขเที่ยว}, จำนวนงานที่ยกเลิก)
+
+    1 แถว = 1 drop · 1 เที่ยว = เลข JOB เดียวกัน (คอลัมน์ B = วันที่+รถ+เที่ยว เช่น 46266PTL.451เที่ยว 1)
+    นับแบบเดียวกับหน้ารายงาน On Time · งานที่ยกเลิก/โหลดเก็บไม่นับ
+    แถวที่ไม่มีเลข JOB ใช้ลำดับเที่ยว (D) → รถ+เที่ยววิ่ง (E) → ถ้าไม่มีเลยนับ 1 เที่ยวต่อแถว"""
     cars: dict = {}
     people: dict = {}
     cancelled = 0
-    for r in rows:
+    for i, r in enumerate(rows):
         if _parse_date(_cell(r, PLAN_DATE)) != date_iso:
             continue
         if any(k in (_cell(r, PLAN_STATUS) + " " + _cell(r, PLAN_DEST)).lower() for k in CANCEL_KEYWORDS):
             cancelled += 1
             continue
-        if key := _car_key(_cell(r, PLAN_CARNO)):
-            cars[key] = cars.get(key, 0) + 1
+        key = _car_key(_cell(r, PLAN_CARNO))
+        seq = _cell(r, PLAN_TRIP_SEQ)
+        job = _cell(r, 1) or (f"D{seq}" if seq else "") or (f"{key}|{_cell(r, PLAN_TRIP)}" if key and _cell(r, PLAN_TRIP) else f"row{i}")
+        if key:
+            e = cars.setdefault(key, {"jobs": set(), "drops": 0})
+            e["jobs"].add(job)
+            e["drops"] += 1
         for c in (PLAN_DRIVER, PLAN_DRIVER2):
             if (nm := _cell(r, c)) and nm not in _NO_PERSON:
-                people[nm] = people.get(nm, 0) + 1
+                people.setdefault(nm, set()).add(job)
     return cars, people, cancelled
 
 
@@ -3702,7 +3712,9 @@ def _ready_count(items: list, key: str) -> list:
 
 def build_ready_report(date_iso: str, plan_rows: list, target: float) -> dict:
     """สรุปรถ/คนพร้อมใช้งานของวันที่ระบุ — รวมชีตสถานะรายวันเข้ากับงานจริงในชีตแผนงาน"""
-    trips, driver_jobs, cancelled = _ready_plan(plan_rows, date_iso)
+    plan, driver_jobs, cancelled = _ready_plan(plan_rows, date_iso)
+    trips = {k: len(v["jobs"]) for k, v in plan.items()}          # เบอร์รถ → จำนวนเที่ยว (เลข JOB ไม่ซ้ำ)
+    drops = {k: v["drops"] for k, v in plan.items()}              # เบอร์รถ → จำนวน drop (แถว)
     notes: list = []
 
     # ── รถ ──
@@ -3739,7 +3751,7 @@ def build_ready_report(date_iso: str, plan_rows: list, target: float) -> dict:
         cars.append({"car": car, "key": key, "area": _area_of(area) or area,
                      "vtype": _cell(r["cells"], c_type) if c_type is not None else "",
                      "plate": _cell(r["cells"], c_plate) if c_plate is not None else "",
-                     "code": code, "why": why, "kind": kind, "trips": n})
+                     "code": code, "why": why, "kind": kind, "trips": n, "drops": drops.get(key, 0)})
     if mismatch:
         notes.append(f"มี {mismatch} คันที่ชีตลงรหัสวิ่งงานไว้ แต่วันนั้นไม่มีงานในชีตแผนงาน — นับเป็นว่างงาน")
     busy_down = [c["car"] for c in cars if c["kind"] == "down" and c["trips"]]
@@ -3753,7 +3765,8 @@ def build_ready_report(date_iso: str, plan_rows: list, target: float) -> dict:
     by_kind = lambda k: [c for c in cars if c["kind"] == k]
     run, free, nodrv, down = by_kind("run"), by_kind("free"), by_kind("nodriver"), by_kind("down")
     ready = run + free + nodrv
-    total_trips = sum(trips.values())
+    total_trips = len({j for v in plan.values() for j in v["jobs"]})
+    total_drops = sum(drops.values())
     # เป้า = เที่ยวต่อรถพร้อมใช้ 1 คัน → ทั้งวันควรได้กี่เที่ยว และตอนนี้ขาดอีกเท่าไร
     goal = round(target * len(ready)) if target > 0 else 0
 
@@ -3774,7 +3787,7 @@ def build_ready_report(date_iso: str, plan_rows: list, target: float) -> dict:
         code = r["code"]
         desc = d_legend.get(code, "")
         kind = _ready_kind(desc) if code else "free"
-        n = driver_jobs.get(name, 0)
+        n = len(driver_jobs.get(name, ()))
         why = (desc or "ไม่ระบุ") if kind == "down" else ""
         if kind != "down":
             kind = "run" if n else "free"
@@ -3801,7 +3814,7 @@ def build_ready_report(date_iso: str, plan_rows: list, target: float) -> dict:
                  "pct_ready": round(len(ready) * 100 / len(cars), 1) if cars else None,
                  "pct_used": round(len(run) * 100 / len(ready), 1) if ready else None,
                  "down_by": _ready_count(down, "why"), "free_by": _ready_count(free + nodrv, "area")},
-        "trips": {"total": total_trips, "cancelled": cancelled,
+        "trips": {"total": total_trips, "drops": total_drops, "cancelled": cancelled,
                   "per_ready": round(total_trips / len(ready), 2) if ready else None,
                   "per_run": round(total_trips / len(run), 2) if run else None,
                   "goal": goal, "gap": max(0, goal - total_trips) if goal else 0},
@@ -5007,7 +5020,7 @@ READY_HTML = """<!doctype html>
       <p class="desc">จำนวนรถแต่ละสถานะ ย้อนหลัง 14 วัน · ชี้ที่แท่งเพื่อดูตัวเลข · กดแท่งเพื่อดูวันนั้น</p>
       <div class="chart" id="cTrend"></div></section>
     <section class="panel c5"><div class="ph"><h3>เที่ยวต่อวัน เทียบเป้า</h3><div class="legend"><span><i class="key" style="background:var(--trip)"></i>เที่ยว</span><span><i class="key" style="background:var(--goal);height:2px;width:14px;border-radius:0"></i>เป้า</span></div></div>
-      <p class="desc">เป้า = เป้าเที่ยวต่อคัน × รถพร้อมใช้ของวันนั้น</p>
+      <p class="desc">นับเที่ยวจาก “เลข JOB” ในแผนงาน (หลาย drop ในเที่ยวเดียวกัน = 1 เที่ยว) · เป้า = เป้าเที่ยวต่อคัน × รถพร้อมใช้</p>
       <div class="chart" id="cTrips"></div></section>
     <section class="panel c6"><div class="ph"><h3>แยกตามพื้นที่ประจำรถ</h3></div>
       <p class="desc">ความยาวแท่ง = จำนวนรถของพื้นที่ · ตัวเลขขวา = เที่ยวที่วิ่ง</p><div id="cArea"></div></section>
@@ -5020,7 +5033,7 @@ READY_HTML = """<!doctype html>
     <section class="panel c12" id="carsP"><div class="tools"><div class="ph" style="margin:0"><h3>รายคัน</h3><span class="s2" id="rowSub"></span></div>
       <div class="chips" id="carChips"></div>
       <span class="grow"></span><input type="search" id="q" placeholder="ค้นหา เบอร์รถ / ทะเบียน / สถานะ" style="min-width:240px"></div>
-      <div class="tw"><table><thead><tr><th>เบอร์รถ</th><th>พื้นที่</th><th>ประเภท</th><th>ทะเบียน</th><th>สถานะ</th><th>เหตุผล</th><th class="n">เที่ยว</th></tr></thead>
+      <div class="tw"><table><thead><tr><th>เบอร์รถ</th><th>พื้นที่</th><th>ประเภท</th><th>ทะเบียน</th><th>สถานะ</th><th>เหตุผล</th><th class="n">เที่ยว</th><th class="n">Drop</th></tr></thead>
         <tbody id="rows"></tbody></table></div></section>
     <section class="panel c12" id="pplP"><div class="tools"><div class="ph" style="margin:0"><h3>รายชื่อ พขร.</h3><span class="s2" id="pSub"></span></div>
       <div class="chips" id="pplChips"></div></div>
@@ -5156,7 +5169,7 @@ function render(){
       '<div class="big">' + n(t.total) + '<small>' + (t.goal ? 'จากเป้า ' + n(t.goal) + ' เที่ยว' : 'เที่ยว') + '</small></div>' +
       '<div class="meter"><i style="width:' + fill + '%"></i>' + (t.goal ? '<u style="left:calc(' + goalLine + '% - 1px)"></u>' : '') + '</div>' +
       '<div class="sub">' + (t.goal ? (t.gap ? 'ขาดอีก <b>' + n(t.gap) + '</b> เที่ยวถึงเป้า (' + r.target + ' เที่ยว/คัน)' : '<span class="ok">✓ ถึงเป้าแล้ว</span> เกินเป้า ' + n(t.total - t.goal) + ' เที่ยว') : 'ยังไม่ได้ตั้งเป้า') +
-        ' · เฉลี่ย <b>' + (t.per_ready == null ? '–' : t.per_ready) + '</b> เที่ยว/คันพร้อมใช้ · <b>' + (t.per_run == null ? '–' : t.per_run) + '</b> เที่ยว/คันที่วิ่ง' +
+        ' · <b>' + n(t.drops) + '</b> drop · เฉลี่ย <b>' + (t.per_ready == null ? '–' : t.per_ready) + '</b> เที่ยว/คันพร้อมใช้ · <b>' + (t.per_run == null ? '–' : t.per_run) + '</b> เที่ยว/คันที่วิ่ง' +
         (t.cancelled ? ' · ยกเลิก ' + t.cancelled + ' งาน' : '') + '</div></div>' +
     '<div class="card"' + fattr({t: 'c', kind: 'run'}) + '><div class="lab">' + key(K.run.c) + 'วิ่งงาน</div><div class="val">' + n(c.run) + '<small>คัน</small></div>' +
       '<div class="sub">ใช้รถ <b>' + pct(c.run, c.ready) + '</b> ของรถพร้อมใช้</div></div>' +
@@ -5209,7 +5222,7 @@ function drawRows(){
   document.getElementById('rows').innerHTML = list.map(x =>
     '<tr><td><b>' + esc(x.car) + '</b></td><td>' + esc(x.area) + '</td><td>' + esc(x.vtype) + '</td><td>' + esc(x.plate) + '</td>' +
     '<td><span class="st"><i style="background:' + K[x.kind].c + '"></i>' + K[x.kind].t + '</span></td><td>' + esc(x.why) + (x.why && x.code ? '<span class="code">' + esc(x.code) + '</span>' : '') + '</td>' +
-    '<td class="n">' + (x.trips || '–') + '</td></tr>').join('') || '<tr><td colspan="7" class="empty">ไม่พบรถที่ตรงกับคำค้น</td></tr>';
+    '<td class="n">' + (x.trips || '–') + '</td><td class="n">' + (x.drops || '–') + '</td></tr>').join('') || '<tr><td colspan="8" class="empty">ไม่พบรถที่ตรงกับคำค้น</td></tr>';
 }
 function markPreset(){
   const v = document.getElementById('d').value;
