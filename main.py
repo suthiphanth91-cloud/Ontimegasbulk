@@ -4868,6 +4868,7 @@ READY_HTML = """<!doctype html>
     .side .menu{flex:1;justify-content:center;padding:9px 6px;font-size:14.5px}
     .side .menu.out{flex:0 0 auto;margin-top:0} .side .menu.out span{display:none}}
   header{background:var(--card);border-bottom:1px solid var(--line);padding:14px 22px;position:sticky;top:0;z-index:10}
+  .panel{scroll-margin-top:84px}
   .hd{display:flex;flex-wrap:wrap;gap:12px 16px;align-items:center}
   .ttl h1{font-size:21px;margin:0;font-weight:700;letter-spacing:-.2px}
   .ttl p{margin:2px 0 0;font-size:13.5px;color:var(--mut)}
@@ -4958,6 +4959,20 @@ READY_HTML = """<!doctype html>
   .st i{width:9px;height:9px;border-radius:50%;display:inline-block}
   .code{color:var(--mut);font-size:12.5px;margin-left:4px}
 
+  /* กดกราฟ → กรองตาราง */
+  [data-f]{cursor:pointer}
+  .card[data-f]:hover{border-color:var(--acc)}
+  .rw[data-f]:hover > *{background:var(--hover)}
+  .legend span[data-f]{border-radius:6px;padding:1px 5px;margin:-1px -5px}
+  .legend span[data-f]:hover{background:var(--hover)}
+  .sg:hover,.bar:hover{filter:brightness(1.08)}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+  .chip{font:inherit;font-size:13px;font-weight:600;border-radius:999px;padding:3px 10px;border:1px solid #bfd5fb;background:#eaf1fe;color:#1d4ed8;cursor:pointer}
+  .chip.clr{background:var(--card);border-color:var(--line);color:var(--ink2)}
+  @media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])) .chip:not(.clr){background:#14243a;border-color:#24497a;color:#9ec5f4}}
+  :root[data-theme="dark"] .chip:not(.clr){background:#14243a;border-color:#24497a;color:#9ec5f4}
+  .flash{animation:flash 1.2s ease-out}
+  @keyframes flash{0%{box-shadow:0 0 0 3px var(--acc)}100%{box-shadow:var(--shadow)}}
   #tip{position:fixed;z-index:50;pointer-events:none;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:10px;
        box-shadow:0 6px 20px rgba(16,24,40,.16);padding:9px 12px;font-size:13px;line-height:1.55;max-width:280px}
   #tip .t{font-weight:700;margin-bottom:3px}
@@ -5002,11 +5017,13 @@ READY_HTML = """<!doctype html>
       <p class="desc">แยกตามรหัสที่ลงในชีตของวันนั้น</p><div id="cDown"></div></section>
     <section class="panel c6"><div class="ph"><h3>พนักงานขับรถ</h3><span class="s2" id="pplSub"></span></div>
       <p class="desc">มีงาน = มีชื่อในแผนงานของวันนั้น · ไม่พร้อม = ลา / หยุด / อบรม ฯลฯ ตามชีต</p><div id="cPpl"></div></section>
-    <section class="panel c12"><div class="tools"><div class="ph" style="margin:0"><h3>รายคัน</h3><span class="s2" id="rowSub"></span></div>
+    <section class="panel c12" id="carsP"><div class="tools"><div class="ph" style="margin:0"><h3>รายคัน</h3><span class="s2" id="rowSub"></span></div>
+      <div class="chips" id="carChips"></div>
       <span class="grow"></span><input type="search" id="q" placeholder="ค้นหา เบอร์รถ / ทะเบียน / สถานะ" style="min-width:240px"></div>
       <div class="tw"><table><thead><tr><th>เบอร์รถ</th><th>พื้นที่</th><th>ประเภท</th><th>ทะเบียน</th><th>สถานะ</th><th>เหตุผล</th><th class="n">เที่ยว</th></tr></thead>
         <tbody id="rows"></tbody></table></div></section>
-    <section class="panel c12"><div class="tools"><div class="ph" style="margin:0"><h3>รายชื่อ พขร.</h3><span class="s2" id="pSub"></span></div></div>
+    <section class="panel c12" id="pplP"><div class="tools"><div class="ph" style="margin:0"><h3>รายชื่อ พขร.</h3><span class="s2" id="pSub"></span></div>
+      <div class="chips" id="pplChips"></div></div>
       <div class="tw" style="max-height:360px"><table><thead><tr><th>ชื่อ-สกุล</th><th>สถานะ</th><th>เหตุผล</th><th class="n">เที่ยว</th></tr></thead>
         <tbody id="prows"></tbody></table></div></section>
   </div>
@@ -5017,7 +5034,18 @@ READY_HTML = """<!doctype html>
 const K = {run: {t: 'วิ่งงาน', c: 'var(--run)', ink: '#0b0b0b'}, free: {t: 'ว่างงาน', c: 'var(--free)', ink: '#fff'},
            nodriver: {t: 'ไม่มีคนขับ', c: 'var(--nod)', ink: '#0b0b0b'}, down: {t: 'ไม่พร้อมใช้', c: 'var(--down)', ink: '#fff'}};
 const PK = {run: {t: 'มีงาน', c: 'var(--run)', ink: '#0b0b0b'}, free: {t: 'ว่าง', c: 'var(--free)', ink: '#fff'}, down: {t: 'ไม่พร้อม', c: 'var(--down)', ink: '#fff'}};
+K.idle = {t: 'ว่างงาน', c: 'var(--free)', ink: '#fff'};          // ในแท่งพื้นที่/ประเภทรถ: ว่างงาน + ไม่มีคนขับ รวมกัน
 const ORDER = ['run', 'free', 'nodriver', 'down'];
+// ตัวกรองตารางที่มาจากการกดกราฟ: c = รายคัน · p = รายชื่อ พขร.
+let FC = {}, FP = {};
+const FNAME = {kind: 'สถานะ', area: 'พื้นที่', vtype: 'ประเภท', why: 'เหตุผล'};
+function fattr(o){ return o ? ' data-f="' + esc(JSON.stringify(o)) + '"' : ''; }
+function kindOk(f, k){ return !f.kind || f.kind === k || (f.kind === 'idle' && (k === 'free' || k === 'nodriver')); }
+function chips(f, map, id){
+  const ks = Object.keys(f);
+  document.getElementById(id).innerHTML = ks.map(k => '<button class="chip" data-clr="' + id + '|' + k + '">' + FNAME[k] + ': ' +
+    esc(k === 'kind' ? map[f[k]].t : f[k]) + ' ✕</button>').join('') + (ks.length ? '<button class="chip clr" data-clr="' + id + '|*">ล้าง</button>' : '');
+}
 const DOW = ['อา', 'จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส'];
 const MON = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
 let REP = null;
@@ -5033,15 +5061,18 @@ function tipHtml(title, rows){
   return '<div class="t">' + esc(title) + '</div>' + rows.map(r => '<div class="r"><span>' + (r[0] ? key(r[0]) : '') + esc(r[1]) + '</span><b>' + esc(r[2]) + '</b></div>').join('');
 }
 // แท่งต่อกัน: กว้างตาม flex-grow (= จำนวน) ช่องว่าง 2px · ตัวเลขในช่วงแสดงเฉพาะเมื่อพอดี (fitLabels วัดให้)
-function stack(segs, map, total, title, tall){
+// fb = ตัวกรองพื้นฐานของแท่งนี้ (เช่น {t:'c', area:'บางปะกง'}) — กดช่วงไหนก็กรองตารางตามสถานะของช่วงนั้นเพิ่ม
+function stack(segs, map, total, title, tall, fb){
   const live = segs.filter(s => s[1] > 0);
   if(!live.length) return '<div class="stk' + (tall ? ' tall' : '') + '" style="background:var(--track)"></div>';
-  const tip = esc(tipHtml(title, live.map(s => [map[s[0]].c, map[s[0]].t, s[1] + ' (' + pct(s[1], total) + ')'])));
+  const tip = esc(tipHtml(title, live.map(s => [map[s[0]].c, map[s[0]].t, s[1] + ' (' + pct(s[1], total) + ')']).concat(fb ? [['', 'กดเพื่อดูรายการ', '']] : [])));
   return '<div class="stk' + (tall ? ' tall' : '') + '">' + live.map(s =>
-    '<span class="sg" style="flex:' + s[1] + ' 1 0;background:' + map[s[0]].c + ';color:' + map[s[0]].ink + '" data-tip="' + tip + '"><b>' + s[1] + '</b></span>').join('') + '</div>';
+    '<span class="sg" style="flex:' + s[1] + ' 1 0;background:' + map[s[0]].c + ';color:' + map[s[0]].ink + '" data-tip="' + tip + '"' +
+    fattr(fb && Object.assign({}, fb, {kind: s[0]})) + '><b>' + s[1] + '</b></span>').join('') + '</div>';
 }
-function legend(segs, map, total){
-  return '<div class="legend">' + segs.map(s => '<span>' + key(map[s[0]].c) + map[s[0]].t + ' <b>' + n(s[1]) + '</b><em>' + pct(s[1], total) + '</em></span>').join('') + '</div>';
+function legend(segs, map, total, fb){
+  return '<div class="legend">' + segs.map(s => '<span' + fattr(fb && s[1] && Object.assign({}, fb, {kind: s[0]})) + '>' + key(map[s[0]].c) + map[s[0]].t +
+    ' <b>' + n(s[1]) + '</b><em>' + pct(s[1], total) + '</em></span>').join('') + '</div>';
 }
 function fitLabels(){
   document.querySelectorAll('.sg b').forEach(b => { b.style.visibility = (b.scrollWidth + 6 <= b.parentElement.clientWidth) ? 'visible' : 'hidden'; });
@@ -5094,19 +5125,22 @@ function rowsChart(items, nameKey){
   if(!items.length) return '<div class="empty">ไม่มีข้อมูล</div>';
   const mx = Math.max(...items.map(i => i.total));
   return '<div class="rows">' + items.map(i => {
-    const segs = [['run', i.run], ['free', i.free], ['down', i.down]];
-    return '<div class="rw"><div class="rn">' + esc(i[nameKey]) + '<small>รถ ' + i.total + ' คัน</small></div>' +
-      '<div><div style="width:' + (i.total / mx * 100) + '%">' + stack(segs, K, i.total, i[nameKey] + ' · รถ ' + i.total + ' คัน', true) + '</div></div>' +
-      '<div class="rv"><b>' + n(i.trips) + '</b> เที่ยว</div></div>';
+    const segs = [['run', i.run], ['idle', i.free], ['down', i.down]], fb = {t: 'c'};
+    fb[nameKey] = i[nameKey];
+    return '<div class="rw"><div class="rn"' + fattr(fb) + '>' + esc(i[nameKey]) + '<small>รถ ' + i.total + ' คัน</small></div>' +
+      '<div><div style="width:' + (i.total / mx * 100) + '%">' + stack(segs, K, i.total, i[nameKey] + ' · รถ ' + i.total + ' คัน', true, fb) + '</div></div>' +
+      '<div class="rv"' + fattr(fb) + '><b>' + n(i.trips) + '</b> เที่ยว</div></div>';
   }).join('') + '</div>';
 }
-function bars(items, total, unit){
+function bars(items, total, unit, fb){
   if(!items.length) return '<div class="empty">ไม่มี — พร้อมครบทุก' + unit + '</div>';
   const mx = Math.max(...items.map(i => i.n));
-  return '<div class="rows">' + items.map(i =>
-    '<div class="rw"><div class="rn" title="' + esc(i.name) + '">' + esc(i.name) + '</div>' +
-    '<div><div class="bar" style="width:' + (i.n / mx * 100) + '%" data-tip="' + esc(tipHtml(i.name, [['var(--down)', 'จำนวน', i.n + ' ' + unit + ' (' + pct(i.n, total) + ' ของทั้งหมด)']])) + '"></div></div>' +
-    '<div class="rv"><b>' + i.n + '</b> ' + unit + '</div></div>').join('') + '</div>';
+  return '<div class="rows">' + items.map(i => {
+    const f = fattr(Object.assign({}, fb, {kind: 'down', why: i.name}));
+    return '<div class="rw"' + f + '><div class="rn" title="' + esc(i.name) + '">' + esc(i.name) + '</div>' +
+    '<div><div class="bar" style="width:' + (i.n / mx * 100) + '%" data-tip="' + esc(tipHtml(i.name, [['var(--down)', 'จำนวน', i.n + ' ' + unit + ' (' + pct(i.n, total) + ' ของทั้งหมด)'], ['', 'กดเพื่อดูรายชื่อ', '']])) + '"></div></div>' +
+    '<div class="rv"><b>' + i.n + '</b> ' + unit + '</div></div>';
+  }).join('') + '</div>';
 }
 function render(){
   const r = REP, c = r.cars, t = r.trips, p = r.people;
@@ -5117,20 +5151,20 @@ function render(){
   document.getElementById('kpis').innerHTML =
     '<div class="card w2"><div class="lab">รถพร้อมใช้งาน · ' + esc(thaiDate(r.date)) + '</div>' +
       '<div class="big">' + n(c.ready) + '<small>จาก ' + n(c.total) + ' คัน · ' + pct(c.ready, c.total) + '</small></div>' +
-      '<div style="margin-top:14px">' + stack(segs, K, c.total, 'รถทั้งหมด ' + c.total + ' คัน', true) + '</div>' + legend(segs, K, c.total) + '</div>' +
+      '<div style="margin-top:14px">' + stack(segs, K, c.total, 'รถทั้งหมด ' + c.total + ' คัน', true, {t: 'c'}) + '</div>' + legend(segs, K, c.total, {t: 'c'}) + '</div>' +
     '<div class="card w2"><div class="lab">เที่ยววิ่งงาน</div>' +
       '<div class="big">' + n(t.total) + '<small>' + (t.goal ? 'จากเป้า ' + n(t.goal) + ' เที่ยว' : 'เที่ยว') + '</small></div>' +
       '<div class="meter"><i style="width:' + fill + '%"></i>' + (t.goal ? '<u style="left:calc(' + goalLine + '% - 1px)"></u>' : '') + '</div>' +
       '<div class="sub">' + (t.goal ? (t.gap ? 'ขาดอีก <b>' + n(t.gap) + '</b> เที่ยวถึงเป้า (' + r.target + ' เที่ยว/คัน)' : '<span class="ok">✓ ถึงเป้าแล้ว</span> เกินเป้า ' + n(t.total - t.goal) + ' เที่ยว') : 'ยังไม่ได้ตั้งเป้า') +
         ' · เฉลี่ย <b>' + (t.per_ready == null ? '–' : t.per_ready) + '</b> เที่ยว/คันพร้อมใช้ · <b>' + (t.per_run == null ? '–' : t.per_run) + '</b> เที่ยว/คันที่วิ่ง' +
         (t.cancelled ? ' · ยกเลิก ' + t.cancelled + ' งาน' : '') + '</div></div>' +
-    '<div class="card"><div class="lab">' + key(K.run.c) + 'วิ่งงาน</div><div class="val">' + n(c.run) + '<small>คัน</small></div>' +
+    '<div class="card"' + fattr({t: 'c', kind: 'run'}) + '><div class="lab">' + key(K.run.c) + 'วิ่งงาน</div><div class="val">' + n(c.run) + '<small>คัน</small></div>' +
       '<div class="sub">ใช้รถ <b>' + pct(c.run, c.ready) + '</b> ของรถพร้อมใช้</div></div>' +
-    '<div class="card"><div class="lab">' + key(K.free.c) + 'ว่างงาน</div><div class="val">' + n(c.free) + '<small>คัน</small></div>' +
+    '<div class="card"' + fattr({t: 'c', kind: 'free'}) + '><div class="lab">' + key(K.free.c) + 'ว่างงาน</div><div class="val">' + n(c.free) + '<small>คัน</small></div>' +
       '<div class="sub">พร้อมใช้ แต่ยังไม่มีงานในแผน</div></div>' +
-    '<div class="card"><div class="lab">' + key(K.nodriver.c) + 'ไม่มีคนขับ</div><div class="val">' + n(c.nodriver) + '<small>คัน</small></div>' +
+    '<div class="card"' + fattr({t: 'c', kind: 'nodriver'}) + '><div class="lab">' + key(K.nodriver.c) + 'ไม่มีคนขับ</div><div class="val">' + n(c.nodriver) + '<small>คัน</small></div>' +
       '<div class="sub">รถพร้อม · พขร. ว่าง <b>' + n(p.free) + '</b> คน</div></div>' +
-    '<div class="card"><div class="lab">' + key(K.down.c) + 'ไม่พร้อมใช้</div><div class="val">' + n(c.down) + '<small>คัน</small></div>' +
+    '<div class="card"' + fattr({t: 'c', kind: 'down'}) + '><div class="lab">' + key(K.down.c) + 'ไม่พร้อมใช้</div><div class="val">' + n(c.down) + '<small>คัน</small></div>' +
       '<div class="sub">' + (top ? 'มากสุด: <b>' + esc(top.name) + '</b> ' + top.n + ' คัน' : 'ไม่มีรถเสีย/ซ่อม') + '</div></div>';
 
   const tr = r.trend || [];
@@ -5144,26 +5178,34 @@ function render(){
 
   document.getElementById('cArea').innerHTML = rowsChart(r.by_area, 'area');
   document.getElementById('cType').innerHTML = rowsChart(r.by_type, 'vtype');
-  document.getElementById('cDown').innerHTML = bars(c.down_by, c.total, 'คัน');
+  document.getElementById('cDown').innerHTML = bars(c.down_by, c.total, 'คัน', {t: 'c'});
   document.getElementById('downSub').textContent = c.down ? 'รวม ' + c.down + ' คัน จาก ' + c.total : '';
   const ps = [['run', p.run], ['free', p.free], ['down', p.down]];
-  document.getElementById('cPpl').innerHTML = (p.total ? stack(ps, PK, p.total, 'พขร. ทั้งหมด ' + p.total + ' คน', true) + legend(ps, PK, p.total) : '<div class="empty">ไม่มีข้อมูล พขร.</div>') +
-    (p.down_by.length ? '<div class="divider"></div>' + bars(p.down_by, p.total, 'คน') : '');
+  document.getElementById('cPpl').innerHTML = (p.total ? stack(ps, PK, p.total, 'พขร. ทั้งหมด ' + p.total + ' คน', true, {t: 'p'}) + legend(ps, PK, p.total, {t: 'p'}) : '<div class="empty">ไม่มีข้อมูล พขร.</div>') +
+    (p.down_by.length ? '<div class="divider"></div>' + bars(p.down_by, p.total, 'คน', {t: 'p'}) : '');
   document.getElementById('pplSub').textContent = p.total ? 'ทั้งหมด ' + p.total + ' คน · พร้อมทำงาน ' + (p.run + p.free) : '';
-  document.getElementById('pSub').textContent = p.total + ' คน';
   drawRows();
-  document.getElementById('prows').innerHTML = r.people_rows.map(x =>
-    '<tr><td>' + esc(x.name) + '</td><td><span class="st"><i style="background:' + PK[x.kind].c + '"></i>' + PK[x.kind].t + '</span></td><td>' + esc(x.why) + '</td><td class="n">' + (x.trips || '–') + '</td></tr>').join('')
-    || '<tr><td colspan="4" class="empty">ไม่มีข้อมูล พขร.</td></tr>';
+  drawPeople();
   const nt = document.getElementById('notes');
   nt.innerHTML = r.notes.length ? '<b>หมายเหตุจากการอ่านชีต</b><ul>' + r.notes.map(x => '<li>' + esc(x) + '</li>').join('') + '</ul>' : '';
   nt.hidden = !r.notes.length;
   fitLabels();
 }
+function drawPeople(){
+  const list = REP.people_rows.filter(x => kindOk(FP, x.kind) && (!FP.why || x.why === FP.why));
+  chips(FP, PK, 'pplChips');
+  document.getElementById('pSub').textContent = list.length + ' คน' + (Object.keys(FP).length ? ' (จาก ' + REP.people_rows.length + ')' : '');
+  document.getElementById('prows').innerHTML = list.map(x =>
+    '<tr><td>' + esc(x.name) + '</td><td><span class="st"><i style="background:' + PK[x.kind].c + '"></i>' + PK[x.kind].t + '</span></td><td>' + esc(x.why) + '</td><td class="n">' + (x.trips || '–') + '</td></tr>').join('')
+    || '<tr><td colspan="4" class="empty">ไม่มี พขร. ที่ตรงกับตัวกรอง</td></tr>';
+}
 function drawRows(){
   const q = document.getElementById('q').value.trim().toLowerCase();
-  const list = REP.rows.filter(x => !q || (x.car + ' ' + x.plate + ' ' + x.why + ' ' + K[x.kind].t + ' ' + x.area + ' ' + x.vtype).toLowerCase().includes(q));
-  document.getElementById('rowSub').textContent = list.length + ' คัน' + (q ? ' (จาก ' + REP.rows.length + ')' : '');
+  const list = REP.rows.filter(x => kindOk(FC, x.kind) && (!FC.area || (x.area || 'ไม่ระบุ') === FC.area) &&
+    (!FC.vtype || (x.vtype || 'ไม่ระบุ') === FC.vtype) && (!FC.why || x.why === FC.why) &&
+    (!q || (x.car + ' ' + x.plate + ' ' + x.why + ' ' + K[x.kind].t + ' ' + x.area + ' ' + x.vtype).toLowerCase().includes(q)));
+  chips(FC, K, 'carChips');
+  document.getElementById('rowSub').textContent = list.length + ' คัน' + (q || Object.keys(FC).length ? ' (จาก ' + REP.rows.length + ')' : '');
   document.getElementById('rows').innerHTML = list.map(x =>
     '<tr><td><b>' + esc(x.car) + '</b></td><td>' + esc(x.area) + '</td><td>' + esc(x.vtype) + '</td><td>' + esc(x.plate) + '</td>' +
     '<td><span class="st"><i style="background:' + K[x.kind].c + '"></i>' + K[x.kind].t + '</span></td><td>' + esc(x.why) + (x.why && x.code ? '<span class="code">' + esc(x.code) + '</span>' : '') + '</td>' +
@@ -5183,6 +5225,7 @@ async function load(){
     if(res.status === 401){ location.href = '/login'; return; }
     if(!res.ok){ let m = 'HTTP ' + res.status; try{ m = (await res.json()).detail || m; }catch(e){} throw new Error(m); }
     REP = await res.json();
+    FC = {}; FP = {};
     render();
     document.getElementById('stamp').textContent = 'สถานะจากชีตข้อมูลรถ+พขร. · งานจากชีตแผนงาน · อัปเดต ' + new Date().toLocaleTimeString('th-TH', {hour: '2-digit', minute: '2-digit'});
   }catch(e){ err.textContent = 'โหลดไม่สำเร็จ: ' + e.message; err.hidden = false; }
@@ -5201,7 +5244,23 @@ document.addEventListener('mousemove', e => {
 });
 document.addEventListener('click', e => {
   const el = e.target.closest && e.target.closest('.hit[data-date]');
-  if(el){ document.getElementById('d').value = el.dataset.date; markPreset(); load(); }
+  if(el){ document.getElementById('d').value = el.dataset.date; markPreset(); load(); return; }
+  const cl = e.target.closest && e.target.closest('[data-clr]');
+  if(cl){                                                   // ปุ่ม ✕ บนชิปตัวกรอง
+    const [id, k] = cl.dataset.clr.split('|'), f = id === 'carChips' ? FC : FP;
+    if(k === '*') Object.keys(f).forEach(x => delete f[x]); else delete f[k];
+    id === 'carChips' ? drawRows() : drawPeople();
+    return;
+  }
+  const fe = e.target.closest && e.target.closest('[data-f]');
+  if(!fe || !REP) return;
+  const f = JSON.parse(fe.dataset.f), t = f.t;            // กดกราฟ → กรองตารางนั้นใหม่ทั้งชุด แล้วเลื่อนลงไปให้เห็น
+  delete f.t;
+  if(t === 'p'){ FP = f; drawPeople(); } else { FC = f; document.getElementById('q').value = ''; drawRows(); }
+  const sec = document.getElementById(t === 'p' ? 'pplP' : 'carsP');
+  tip.hidden = true;
+  sec.scrollIntoView({behavior: 'smooth', block: 'start'});
+  sec.classList.remove('flash'); void sec.offsetWidth; sec.classList.add('flash');
 });
 let rz = 0;
 addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if(REP) render(); }, 150); });
