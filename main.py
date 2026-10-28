@@ -3537,6 +3537,8 @@ def report_ontime(date_from: str = Query(None, alias="from"), date_to: str = Que
 READY_CAR_TAB    = os.environ.get("READY_CAR_TAB", "ข้อมูลรถ")
 READY_DRIVER_TAB = os.environ.get("READY_DRIVER_TAB", "ข้อมูลพขร.")
 READY_TARGET     = float(os.environ.get("READY_TARGET", "2") or 2)   # เป้าเที่ยวต่อรถพร้อมใช้ 1 คันต่อวัน (หน้าเว็บแก้ได้)
+READY_TREND_DAYS = 14                                                 # กราฟแนวโน้มย้อนหลังกี่วัน (นับวันที่เลือกด้วย)
+_ready_parse_memo: dict = {}                                          # แท็บ → (ตารางที่อ่านมา, ผลแยกหัว/รหัส) ไม่ต้องแยกซ้ำทุกวันของกราฟ
 _TH_MONTHS = {m: i for i, m in enumerate(
     ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
      "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"], 1)}
@@ -3639,13 +3641,20 @@ def _ready_sheet(tab: str, need: list, date_iso: str) -> dict:
     except Exception as e:
         return {"rows": [], "legend": {}, "head": [], "ix": {}, "has_day": False,
                 "note": f"อ่านแท็บ “{tab}” ไม่ได้ — {type(e).__name__} (ต้องแชร์ชีตให้บัญชีของเว็บแบบผู้ดู)"}
-    h, ix, days = _ready_grid(grid, need)
+    memo = _ready_parse_memo.get(tab)
+    if memo and memo[0] is grid:              # ตารางเดิมจากแคช → ใช้ผลแยกหัว/รหัสเดิม
+        h, ix, days, legend = memo[1]
+    else:
+        h, ix, days = _ready_grid(grid, need)
+        legend = {}
+        if h is not None:
+            day_cols = set(days.values())
+            used = {_cell(r, c).upper() for r in grid[h + 1:] for c in day_cols if _cell(r, c)}
+            legend = _ready_legend(grid[:h], used)
+        _ready_parse_memo[tab] = (grid, (h, ix, days, legend))
     if h is None:
         return {"rows": [], "legend": {}, "head": [], "ix": {}, "has_day": False,
                 "note": f"แท็บ “{tab}” ไม่พบหัวตาราง ({' + '.join(need)}) จึงยังสรุปจากแท็บนี้ไม่ได้"}
-    day_cols = set(days.values())
-    used = {_cell(r, c).upper() for r in grid[h + 1:] for c in day_cols if _cell(r, c)}
-    legend = _ready_legend(grid[:h], used)
     col = days.get(date_iso)
     out = []
     for r in grid[h + 1:]:
@@ -3733,6 +3742,10 @@ def build_ready_report(date_iso: str, plan_rows: list, target: float) -> dict:
                      "code": code, "why": why, "kind": kind, "trips": n})
     if mismatch:
         notes.append(f"มี {mismatch} คันที่ชีตลงรหัสวิ่งงานไว้ แต่วันนั้นไม่มีงานในชีตแผนงาน — นับเป็นว่างงาน")
+    busy_down = [c["car"] for c in cars if c["kind"] == "down" and c["trips"]]
+    if busy_down:
+        notes.append(f"มี {len(busy_down)} คันที่ชีตลงว่าไม่พร้อมใช้ แต่มีงานในแผนงานวันนั้น — นับเป็นไม่พร้อมใช้ ตรวจชีตอีกครั้ง: "
+                     + ", ".join(busy_down[:8]))
     ghost = sorted(set(trips) - seen)
     if ghost:
         notes.append(f"มี {len(ghost)} คันที่มีงานในแผนงาน แต่ไม่มีในแท็บ “{READY_CAR_TAB}”: " + ", ".join(ghost[:8]))
@@ -3769,6 +3782,9 @@ def build_ready_report(date_iso: str, plan_rows: list, target: float) -> dict:
     d_run = [p for p in people if p["kind"] == "run"]
     d_free = [p for p in people if p["kind"] == "free"]
     d_down = [p for p in people if p["kind"] == "down"]
+    busy_off = [p["name"] for p in d_down if p["trips"]]
+    if busy_off:
+        notes.append(f"มี {len(busy_off)} คนที่ชีตลงว่าลา/หยุด แต่มีชื่อในแผนงานวันนั้น: " + ", ".join(busy_off[:6]))
     unknown = sorted(set(driver_jobs) - dseen)
     if unknown:
         notes.append(f"มี {len(unknown)} คนที่รับงานในแผนงาน แต่ไม่มีในแท็บ “{READY_DRIVER_TAB}”: " + ", ".join(unknown[:6]))
@@ -3818,7 +3834,20 @@ def report_ready(date_str: str = Query(None, alias="date"), target: float = Quer
     except Exception as e:
         raise HTTPException(502, f"อ่านชีตแผนงานไม่ได้ — {type(e).__name__}")
     tg = READY_TARGET if target is None else max(0.0, min(float(target), 99.0))
-    return build_ready_report(day, plan_rows, tg)
+    by_date: dict = {}                        # แยกแถวแผนงานตามวันครั้งเดียว ไม่ต้องไล่ทั้งชีตซ้ำทุกวันของกราฟแนวโน้ม
+    for r in plan_rows:
+        by_date.setdefault(_parse_date(_cell(r, PLAN_DATE)), []).append(r)
+    rep = build_ready_report(day, by_date.get(day, []), tg)
+    d0 = datetime.strptime(day, "%Y-%m-%d")
+    trend = []
+    for k in range(READY_TREND_DAYS - 1, -1, -1):
+        d = (d0 - timedelta(days=k)).strftime("%Y-%m-%d")
+        x = rep if d == day else build_ready_report(d, by_date.get(d, []), tg)
+        c, t = x["cars"], x["trips"]
+        trend.append({"date": d, "run": c["run"], "free": c["free"], "nodriver": c["nodriver"], "down": c["down"],
+                      "trips": t["total"], "goal": t["goal"], "p_down": x["people"]["down"]})
+    rep["trend"] = trend
+    return rep
 
 
 @app.get("/ready", response_class=HTMLResponse, include_in_schema=False)
@@ -4812,18 +4841,23 @@ READY_HTML = """<!doctype html>
 <title>รถ/คนพร้อมใช้งาน — Gasbulk Track</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
+  /* สีสถานะ: ตรวจตาบอดสีแล้ว (คู่ติดกัน ΔE ≥ 10) ทั้งโหมดสว่าง/มืด · เหลืองบนพื้นขาวคอนทราสต์ต่ำ → มีตัวเลข/ตารางกำกับเสมอ */
   :root{color-scheme:light;
-    --plane:#f4f5f7;--card:#ffffff;--line:#e6e8ec;--hair:#eceae4;
+    --plane:#f4f5f7;--card:#ffffff;--surface:#fcfcfb;--line:#e6e8ec;--hair:#eceae4;--track:#eef0f3;
     --ink:#0b0b0b;--ink2:#3f3e3b;--mut:#6b6964;--hover:#f3f6fb;--acc:#2563eb;
-    --run:#0ca30c;--free:#2a78d6;--nod:#6250d6;--down:#d03b3b;
-    --shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.08)}
+    --run:#0ca30c;--free:#2a78d6;--nod:#eda100;--down:#d03b3b;--trip:#5b6b82;--goal:#0b0b0b;
+    --shadow:0 1px 2px rgba(16,24,40,.05),0 1px 3px rgba(16,24,40,.07)}
   @media (prefers-color-scheme:dark){
     :root:where(:not([data-theme="light"])){color-scheme:dark;
-      --plane:#0d0d0d;--card:#161616;--line:#2a2a28;--hair:#2c2c2a;
+      --plane:#0d0d0d;--card:#161616;--surface:#1a1a19;--line:#2a2a28;--hair:#2c2c2a;--track:#242422;
       --ink:#f0efec;--ink2:#d6d5cc;--mut:#a9a7a0;--hover:#1f2733;--acc:#3b82f6;
-      --run:#3fcf3f;--free:#3987e5;--nod:#9b8cf0;--down:#ff8a80;--shadow:none}}
+      --run:#0ca30c;--free:#3987e5;--nod:#c98500;--down:#d03b3b;--trip:#8d9bb0;--goal:#f0efec;--shadow:none}}
+  :root[data-theme="dark"]{color-scheme:dark;
+      --plane:#0d0d0d;--card:#161616;--surface:#1a1a19;--line:#2a2a28;--hair:#2c2c2a;--track:#242422;
+      --ink:#f0efec;--ink2:#d6d5cc;--mut:#a9a7a0;--hover:#1f2733;--acc:#3b82f6;
+      --run:#0ca30c;--free:#3987e5;--nod:#c98500;--down:#d03b3b;--trip:#8d9bb0;--goal:#f0efec;--shadow:none}
   *{box-sizing:border-box}
-  body{margin:0;background:var(--plane);color:var(--ink);font-family:'Noto Sans Thai',system-ui,-apple-system,"Segoe UI",sans-serif;font-size:15.5px;padding-left:148px}
+  body{margin:0;background:var(--plane);color:var(--ink);font-family:'Noto Sans Thai',system-ui,-apple-system,"Segoe UI",sans-serif;font-size:15px;padding-left:148px}
   .side{position:fixed;left:0;top:0;bottom:0;width:148px;background:var(--card);border-right:1px solid var(--line);padding:14px 10px;display:flex;flex-direction:column;gap:6px;z-index:20}
   .side .menu{display:flex;align-items:center;gap:9px;text-decoration:none;font-weight:700;font-size:16px;color:var(--ink);padding:11px 12px;border-radius:10px}
   .side .menu:hover{background:var(--hover)}
@@ -4834,9 +4868,9 @@ READY_HTML = """<!doctype html>
     .side .menu{flex:1;justify-content:center;padding:9px 6px;font-size:14.5px}
     .side .menu.out{flex:0 0 auto;margin-top:0} .side .menu.out span{display:none}}
   header{background:var(--card);border-bottom:1px solid var(--line);padding:14px 22px;position:sticky;top:0;z-index:10}
-  .hd{display:flex;flex-wrap:wrap;gap:12px 18px;align-items:center}
+  .hd{display:flex;flex-wrap:wrap;gap:12px 16px;align-items:center}
   .ttl h1{font-size:21px;margin:0;font-weight:700;letter-spacing:-.2px}
-  .ttl p{margin:2px 0 0;font-size:14px;color:var(--mut)}
+  .ttl p{margin:2px 0 0;font-size:13.5px;color:var(--mut)}
   .grow{flex:1}
   .seg{display:inline-flex;background:var(--plane);border:1px solid var(--line);border-radius:10px;padding:3px}
   .seg button{border:0;background:transparent;padding:6px 12px;border-radius:7px;font:inherit;font-size:14.5px;font-weight:600;color:var(--ink2);cursor:pointer}
@@ -4844,52 +4878,92 @@ READY_HTML = """<!doctype html>
   input{font:inherit;font-size:15px;padding:7px 10px;border-radius:9px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
   .btn{font:inherit;font-size:15px;font-weight:600;padding:7px 14px;border-radius:9px;border:1px solid var(--acc);background:var(--acc);color:#fff;cursor:pointer}
   .tgt{display:flex;align-items:center;gap:7px;font-size:14px;color:var(--mut)}
-  .tgt input{width:72px;text-align:right}
-  main{padding:18px 22px 40px;transition:opacity .15s}
+  .tgt input{width:68px;text-align:right}
+  main{padding:18px 22px 40px;transition:opacity .15s;max-width:1500px}
   main.busy{opacity:.55;pointer-events:none}
   .err{background:#fdecec;border:1px solid #f6caca;color:#b42318;border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:14.5px}
-  @media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])) .err{background:#2d1414;border-color:#5a2222;color:#ff8a80}}
-  .note{background:var(--card);border:1px solid var(--line);border-left:4px solid #eda100;border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:14px;color:var(--ink2)}
+  .note{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--nod);border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:14px;color:var(--ink2)}
   .note ul{margin:4px 0 0;padding-left:20px}
-  .tiles{display:grid;grid-template-columns:minmax(300px,1.5fr) repeat(3,minmax(0,1fr));gap:12px;margin-bottom:12px}
-  .tile{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;box-shadow:var(--shadow);min-width:0}
-  .tile .l{font-size:14px;color:var(--ink2);font-weight:600}
-  .tile .v{font-size:28.5px;font-weight:700;line-height:1.15;margin-top:6px;letter-spacing:-.3px}
-  .tile .v small{font-size:14.5px;font-weight:600;color:var(--mut);margin-left:4px;letter-spacing:0}
-  .tile .s{font-size:13.5px;color:var(--mut);margin-top:3px}
-  .tile.hero{grid-row:span 2;display:flex;flex-direction:column;justify-content:center}
-  .hero .v{font-size:42.5px}
-  .pbar{display:flex;gap:2px;height:10px;border-radius:5px;overflow:hidden;background:var(--hair);margin:12px 0 9px}
-  .pbar i{display:block;height:100%}
-  .leg2{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:14.5px;color:var(--ink2)}
-  .leg2 b{color:var(--ink);font-variant-numeric:tabular-nums}
-  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:0}
-  @media (max-width:1100px){.tiles{grid-template-columns:repeat(3,minmax(0,1fr))}.tile.hero{grid-column:1/-1;grid-row:auto}}
-  @media (max-width:640px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
-  .panels{display:grid;grid-template-columns:repeat(12,1fr);gap:12px}
-  .panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;box-shadow:var(--shadow);min-width:0}
-  .w6{grid-column:span 6}.w12{grid-column:span 12}
-  @media (max-width:1100px){.w6{grid-column:span 12}}
-  .ph{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:10px}
-  .ph h3{margin:0;font-size:16px;font-weight:700}
-  .ph .sub{font-size:14px;color:var(--mut)}
-  .hint{font-size:13.5px;color:var(--mut);margin:0 0 12px;line-height:1.5}
-  table{width:100%;border-collapse:collapse;font-size:14.5px}
-  th,td{text-align:right;padding:8px 10px;border-bottom:1px solid var(--hair);white-space:nowrap}
-  th:first-child,td:first-child{text-align:left}
-  thead th{font-size:13.5px;color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card)}
-  tbody tr:hover td{background:var(--hover)}
-  td{font-variant-numeric:tabular-nums}
+
+  /* ── การ์ดตัวเลข ── */
+  .kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:12px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;box-shadow:var(--shadow);min-width:0}
+  .w2{grid-column:span 2}
+  .lab{font-size:13.5px;color:var(--ink2);font-weight:600;display:flex;align-items:center;gap:8px}
+  .key{display:inline-block;width:10px;height:10px;border-radius:3px;flex:0 0 auto}
+  .big{font-size:48px;font-weight:700;line-height:1.05;letter-spacing:-.8px;margin-top:8px}
+  .big small{font-size:16px;font-weight:600;color:var(--mut);letter-spacing:0;margin-left:6px}
+  .val{font-size:30px;font-weight:700;line-height:1.1;letter-spacing:-.4px;margin-top:8px}
+  .val small{font-size:14px;font-weight:600;color:var(--mut);letter-spacing:0;margin-left:4px}
+  .sub{font-size:13px;color:var(--mut);margin-top:4px;line-height:1.5}
+  .sub b{color:var(--ink2);font-weight:600}
+  @media (max-width:1100px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  @media (max-width:560px){.kpis{grid-template-columns:1fr}.w2{grid-column:auto}}
+
+  /* แท่งต่อกัน (stack): ช่องว่าง 2px สีพื้นคั่นทุกช่วง · ปลายข้อมูลมน 4px ฐานเหลี่ยม */
+  .stk{display:flex;gap:2px;height:14px;border-radius:0 4px 4px 0;overflow:hidden}
+  .stk.tall{height:22px}
+  .sg{position:relative;min-width:3px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;cursor:default}
+  .sg b{font-weight:700;padding:0 4px}
+  .legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13.5px;color:var(--ink2);margin-top:10px}
+  .legend span{display:inline-flex;align-items:center;gap:7px}
+  .legend b{color:var(--ink);font-weight:600}
+  .legend em{font-style:normal;color:var(--mut)}
+  .meter{position:relative;height:14px;background:var(--track);border-radius:0 4px 4px 0;margin:14px 0 8px}
+  .meter i{position:absolute;left:0;top:0;bottom:0;background:var(--trip);border-radius:0 4px 4px 0}
+  .meter u{position:absolute;top:-5px;bottom:-5px;width:2px;background:var(--goal);text-decoration:none}
+  .meter u::after{content:'เป้า';position:absolute;top:-17px;left:50%;transform:translateX(-50%);font-size:11.5px;color:var(--ink2);font-weight:600}
+  .ok{color:var(--ink);font-weight:700}
+
+  /* ── แผงกราฟ ── */
+  .panels{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:12px}
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px 14px;box-shadow:var(--shadow);min-width:0}
+  .c7{grid-column:span 7}.c5{grid-column:span 5}.c6{grid-column:span 6}.c12{grid-column:span 12}
+  @media (max-width:1100px){.c7,.c5,.c6{grid-column:span 12}}
+  .ph{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:2px}
+  .ph h3{margin:0;font-size:15.5px;font-weight:700}
+  .ph .s2{font-size:13px;color:var(--mut)}
+  .ph .legend{margin:0 0 0 auto}
+  .desc{font-size:13px;color:var(--mut);margin:2px 0 12px}
+  .chart{position:relative;width:100%}
+  .chart svg{display:block;overflow:visible}
+  .chart .gl{stroke:var(--line);stroke-width:1}
+  .chart .ax{fill:var(--mut);font-size:11px;font-variant-numeric:tabular-nums}
+  .chart .ax.sel{fill:var(--ink);font-weight:700}
+  .chart .hit{fill:transparent;cursor:pointer}
+  .chart .hit:hover{fill:var(--hover);fill-opacity:.6}
+  .chart .vl{fill:var(--ink);font-size:11.5px;font-weight:700}
+  /* แถวแท่งแนวนอน */
+  .rows{display:grid;grid-template-columns:minmax(96px,150px) 1fr auto;align-items:center;column-gap:14px}
+  .rw{display:contents}
+  .rw > *{padding:9px 0;border-bottom:1px solid var(--hair)}
+  .rw:last-child > *{border-bottom:0}
+  .rn{font-size:14.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .rn small{display:block;font-size:12.5px;font-weight:400;color:var(--mut)}
+  .rv{font-size:13.5px;color:var(--ink2);text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+  .rv b{color:var(--ink);font-size:14.5px}
+  .bar{height:12px;border-radius:0 4px 4px 0;background:var(--down);min-width:3px}
+  .divider{height:1px;background:var(--hair);margin:14px 0 10px}
+  .empty{color:var(--mut);font-size:14px;padding:10px 2px}
+
+  /* ── ตาราง ── */
+  .tools{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:10px}
   .tw{max-height:460px;overflow:auto;border:1px solid var(--line);border-radius:10px}
-  .pill{display:inline-block;font-size:13px;font-weight:600;border-radius:999px;padding:2px 9px;color:#fff}
-  .bars{display:grid;grid-template-columns:minmax(90px,200px) 1fr 54px;align-items:center;column-gap:12px}
-  .brow{display:contents}
-  .brow > *{padding:7px 0;border-bottom:1px solid var(--hair)}
-  .blab{font-size:14.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .btrack{position:relative;height:22px}
-  .bfill{position:absolute;left:0;top:6px;height:10px;border-radius:0 4px 4px 0;min-width:3px;background:var(--down)}
-  .bval{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
-  .empty{color:var(--mut);font-size:14.5px;padding:8px 2px}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--hair);white-space:nowrap}
+  th.n,td.n{text-align:right;font-variant-numeric:tabular-nums}
+  thead th{font-size:12.5px;color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card);text-transform:none}
+  tbody tr:hover td{background:var(--hover)}
+  .st{display:inline-flex;align-items:center;gap:7px;font-weight:600}
+  .st i{width:9px;height:9px;border-radius:50%;display:inline-block}
+  .code{color:var(--mut);font-size:12.5px;margin-left:4px}
+
+  #tip{position:fixed;z-index:50;pointer-events:none;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:10px;
+       box-shadow:0 6px 20px rgba(16,24,40,.16);padding:9px 12px;font-size:13px;line-height:1.55;max-width:280px}
+  #tip .t{font-weight:700;margin-bottom:3px}
+  #tip .r{display:flex;align-items:center;gap:8px;justify-content:space-between}
+  #tip .r span{display:inline-flex;align-items:center;gap:7px;color:var(--ink2)}
+  #tip .r b{font-variant-numeric:tabular-nums}
   [hidden]{display:none !important}
 </style>
 </head>
@@ -4912,129 +4986,228 @@ READY_HTML = """<!doctype html>
 <main id="main">
   <div id="err" class="err" hidden></div>
   <div id="notes" class="note" hidden></div>
-  <div class="tiles" id="tiles"></div>
+  <div class="kpis" id="kpis"></div>
   <div class="panels">
-    <section class="panel w6"><div class="ph"><h3>แยกตามพื้นที่ประจำรถ</h3></div>
-      <p class="hint">💡 รถของแต่ละพื้นที่ วันนี้วิ่งไปกี่คัน ว่างกี่คัน และเสีย/ซ่อมกี่คัน</p>
-      <div id="tArea"></div></section>
-    <section class="panel w6"><div class="ph"><h3>แยกตามประเภทรถ</h3></div>
-      <p class="hint">💡 ดูว่ารถขนาดไหนว่างอยู่ จะได้รู้ว่ารับงานเพิ่มได้แบบไหน</p>
-      <div id="tType"></div></section>
-    <section class="panel w6"><div class="ph"><h3>รถไม่พร้อมใช้ — เพราะอะไร</h3><span class="sub" id="downSub"></span></div>
-      <p class="hint">💡 นับจากรหัสที่ลงไว้ในชีตของวันนั้น เช่น ซ่อมทั่วไป เช็คระยะ เสียระหว่างทาง</p>
-      <div id="cDown"></div></section>
-    <section class="panel w6"><div class="ph"><h3>พขร. ไม่พร้อม — เพราะอะไร</h3><span class="sub" id="pplSub"></span></div>
-      <p class="hint">💡 นับจากรหัสในแท็บข้อมูลพขร. ของวันนั้น เช่น ลา หยุด อบรม</p>
-      <div id="cPpl"></div></section>
-    <section class="panel w12"><div class="ph"><h3>รายคัน</h3><span class="sub" id="rowSub"></span>
+    <section class="panel c7"><div class="ph"><h3>สถานะรถรายวัน</h3><span class="s2" id="trSub"></span><div class="legend" id="trLeg"></div></div>
+      <p class="desc">จำนวนรถแต่ละสถานะ ย้อนหลัง 14 วัน · ชี้ที่แท่งเพื่อดูตัวเลข · กดแท่งเพื่อดูวันนั้น</p>
+      <div class="chart" id="cTrend"></div></section>
+    <section class="panel c5"><div class="ph"><h3>เที่ยวต่อวัน เทียบเป้า</h3><div class="legend"><span><i class="key" style="background:var(--trip)"></i>เที่ยว</span><span><i class="key" style="background:var(--goal);height:2px;width:14px;border-radius:0"></i>เป้า</span></div></div>
+      <p class="desc">เป้า = เป้าเที่ยวต่อคัน × รถพร้อมใช้ของวันนั้น</p>
+      <div class="chart" id="cTrips"></div></section>
+    <section class="panel c6"><div class="ph"><h3>แยกตามพื้นที่ประจำรถ</h3></div>
+      <p class="desc">ความยาวแท่ง = จำนวนรถของพื้นที่ · ตัวเลขขวา = เที่ยวที่วิ่ง</p><div id="cArea"></div></section>
+    <section class="panel c6"><div class="ph"><h3>แยกตามประเภทรถ</h3></div>
+      <p class="desc">ดูว่ารถขนาดไหนยังว่าง รับงานเพิ่มได้</p><div id="cType"></div></section>
+    <section class="panel c6"><div class="ph"><h3>รถไม่พร้อมใช้</h3><span class="s2" id="downSub"></span></div>
+      <p class="desc">แยกตามรหัสที่ลงในชีตของวันนั้น</p><div id="cDown"></div></section>
+    <section class="panel c6"><div class="ph"><h3>พนักงานขับรถ</h3><span class="s2" id="pplSub"></span></div>
+      <p class="desc">มีงาน = มีชื่อในแผนงานของวันนั้น · ไม่พร้อม = ลา / หยุด / อบรม ฯลฯ ตามชีต</p><div id="cPpl"></div></section>
+    <section class="panel c12"><div class="tools"><div class="ph" style="margin:0"><h3>รายคัน</h3><span class="s2" id="rowSub"></span></div>
       <span class="grow"></span><input type="search" id="q" placeholder="ค้นหา เบอร์รถ / ทะเบียน / สถานะ" style="min-width:240px"></div>
-      <p class="hint">💡 เรียงจาก<b>ไม่พร้อมใช้</b> → <b>ว่างงาน</b> → <b>วิ่งงาน</b> เพื่อให้เห็นคันที่ต้องจัดการก่อน</p>
-      <div class="tw"><table><thead><tr><th>เบอร์รถ</th><th>พื้นที่</th><th>ประเภท</th><th>ทะเบียน</th><th>สถานะ</th><th>เหตุผล / รหัส</th><th>เที่ยว</th></tr></thead>
+      <div class="tw"><table><thead><tr><th>เบอร์รถ</th><th>พื้นที่</th><th>ประเภท</th><th>ทะเบียน</th><th>สถานะ</th><th>เหตุผล</th><th class="n">เที่ยว</th></tr></thead>
         <tbody id="rows"></tbody></table></div></section>
-    <section class="panel w12"><div class="ph"><h3>รายชื่อ พขร.</h3><span class="sub" id="pSub"></span></div>
-      <p class="hint">💡 คนที่ว่างอยู่คือคนที่ยังไม่ถูกใส่ชื่อในแผนงานของวันนั้น</p>
-      <div class="tw" style="max-height:360px"><table><thead><tr><th>ชื่อ-สกุล</th><th>สถานะ</th><th>เหตุผล / รหัส</th><th>เที่ยว</th></tr></thead>
+    <section class="panel c12"><div class="tools"><div class="ph" style="margin:0"><h3>รายชื่อ พขร.</h3><span class="s2" id="pSub"></span></div></div>
+      <div class="tw" style="max-height:360px"><table><thead><tr><th>ชื่อ-สกุล</th><th>สถานะ</th><th>เหตุผล</th><th class="n">เที่ยว</th></tr></thead>
         <tbody id="prows"></tbody></table></div></section>
   </div>
 </main>
+<div id="tip" hidden></div>
 <script>
-const K = {run: ['วิ่งงาน', 'var(--run)'], free: ['ว่างงาน', 'var(--free)'], nodriver: ['ไม่มีคนขับ', 'var(--nod)'], down: ['ไม่พร้อมใช้', 'var(--down)']};
-const PK = {run: ['มีงาน', 'var(--run)'], free: ['ว่าง', 'var(--free)'], down: ['ไม่พร้อม', 'var(--down)']};
+// สีตามสถานะ + สีตัวอักษรที่อ่านออกบนสีนั้น (เขียว/เหลือง → ตัวดำ · ฟ้า/แดง → ตัวขาว)
+const K = {run: {t: 'วิ่งงาน', c: 'var(--run)', ink: '#0b0b0b'}, free: {t: 'ว่างงาน', c: 'var(--free)', ink: '#fff'},
+           nodriver: {t: 'ไม่มีคนขับ', c: 'var(--nod)', ink: '#0b0b0b'}, down: {t: 'ไม่พร้อมใช้', c: 'var(--down)', ink: '#fff'}};
+const PK = {run: {t: 'มีงาน', c: 'var(--run)', ink: '#0b0b0b'}, free: {t: 'ว่าง', c: 'var(--free)', ink: '#fff'}, down: {t: 'ไม่พร้อม', c: 'var(--down)', ink: '#fff'}};
+const ORDER = ['run', 'free', 'nodriver', 'down'];
+const DOW = ['อา', 'จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส'];
+const MON = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
 let REP = null;
 function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function iso(d){ return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
 function n(v){ return v == null ? '–' : Number(v).toLocaleString('en-US'); }
-function pill(k, map){ const m = (map || K)[k] || ['ไม่ระบุ', 'var(--mut)']; return '<span class="pill" style="background:' + m[1] + '">' + m[0] + '</span>'; }
-function markPreset(){
-  const v = document.getElementById('d').value;
-  document.querySelectorAll('#presets button').forEach(b => {
-    const t = new Date(); t.setDate(t.getDate() + Number(b.dataset.p));
-    b.classList.toggle('on', iso(t) === v);
+function pct(a, b){ return b ? Math.round(a * 100 / b) + '%' : '–'; }
+function dt(s){ return new Date(s + 'T00:00:00'); }
+function thaiDate(s){ const d = dt(s); return DOW[d.getDay()] + ' ' + d.getDate() + ' ' + MON[d.getMonth()]; }
+function key(c){ return '<i class="key" style="background:' + c + '"></i>'; }
+// ข้อความ tooltip: หัว + แถว [สี, ชื่อ, ค่า]
+function tipHtml(title, rows){
+  return '<div class="t">' + esc(title) + '</div>' + rows.map(r => '<div class="r"><span>' + (r[0] ? key(r[0]) : '') + esc(r[1]) + '</span><b>' + esc(r[2]) + '</b></div>').join('');
+}
+// แท่งต่อกัน: กว้างตาม flex-grow (= จำนวน) ช่องว่าง 2px · ตัวเลขในช่วงแสดงเฉพาะเมื่อพอดี (fitLabels วัดให้)
+function stack(segs, map, total, title, tall){
+  const live = segs.filter(s => s[1] > 0);
+  if(!live.length) return '<div class="stk' + (tall ? ' tall' : '') + '" style="background:var(--track)"></div>';
+  const tip = esc(tipHtml(title, live.map(s => [map[s[0]].c, map[s[0]].t, s[1] + ' (' + pct(s[1], total) + ')'])));
+  return '<div class="stk' + (tall ? ' tall' : '') + '">' + live.map(s =>
+    '<span class="sg" style="flex:' + s[1] + ' 1 0;background:' + map[s[0]].c + ';color:' + map[s[0]].ink + '" data-tip="' + tip + '"><b>' + s[1] + '</b></span>').join('') + '</div>';
+}
+function legend(segs, map, total){
+  return '<div class="legend">' + segs.map(s => '<span>' + key(map[s[0]].c) + map[s[0]].t + ' <b>' + n(s[1]) + '</b><em>' + pct(s[1], total) + '</em></span>').join('') + '</div>';
+}
+function fitLabels(){
+  document.querySelectorAll('.sg b').forEach(b => { b.style.visibility = (b.scrollWidth + 6 <= b.parentElement.clientWidth) ? 'visible' : 'hidden'; });
+}
+// แกน y ตัวเลขกลมๆ (0 / 20 / 40 / 60) ไม่เกิน 5 เส้น
+function scale(max){
+  const raw = Math.max(max, 1) / 4, p = Math.pow(10, Math.floor(Math.log10(raw)));
+  const st = Math.max(1, [1, 2, 2.5, 5, 10].map(m => m * p).find(s => s >= raw));
+  return {top: Math.ceil(Math.max(max, 1) / st) * st, st};
+}
+function topRounded(x, y, w, h, r){
+  if(h <= 0) return '';
+  r = Math.min(r, h, w / 2);
+  return 'M' + x + ',' + (y + h) + 'V' + (y + r) + 'Q' + x + ',' + y + ' ' + (x + r) + ',' + y + 'H' + (x + w - r) + 'Q' + (x + w) + ',' + y + ' ' + (x + w) + ',' + (y + r) + 'V' + (y + h) + 'Z';
+}
+// กราฟแท่งแนวตั้งรายวัน — stacks = [[key, สี], ...] จากล่างขึ้นบน · goal = เส้นเป้าสั้นๆ บนแต่ละแท่ง
+function columns(el, days, stacks, opt){
+  const W = Math.max(el.clientWidth, 280), H = 230, L = 34, R = 6, T = 14, B = 40;
+  const pw = W - L - R, ph = H - T - B, slot = pw / days.length, bw = Math.min(24, slot * 0.62);
+  const max = Math.max(...days.map(d => Math.max(stacks.reduce((a, s) => a + (d[s[0]] || 0), 0), opt.goal ? d.goal || 0 : 0)));
+  const sc = scale(max), y = v => T + ph - v / sc.top * ph;
+  let g = '';
+  for(let v = 0; v <= sc.top + 1e-9; v += sc.st){
+    g += '<line class="gl" x1="' + L + '" x2="' + (W - R) + '" y1="' + y(v) + '" y2="' + y(v) + '"/>' +
+         '<text class="ax" x="' + (L - 6) + '" y="' + (y(v) + 4) + '" text-anchor="end">' + n(v) + '</text>';
+  }
+  days.forEach((d, i) => {
+    const cx = L + slot * i + slot / 2, x0 = cx - bw / 2, sel = d.date === REP.date;
+    let base = T + ph, live = stacks.filter(s => (d[s[0]] || 0) > 0), tot = 0;
+    live.forEach((s, j) => {
+      const h = d[s[0]] / sc.top * ph, gap = j ? 2 : 0, top = base - h;
+      tot += d[s[0]];
+      g += j === live.length - 1
+        ? '<path d="' + topRounded(x0, top + gap, bw, h - gap, 4) + '" fill="' + s[1] + '"/>'
+        : '<rect x="' + x0 + '" y="' + (top + gap) + '" width="' + bw + '" height="' + Math.max(0, h - gap) + '" fill="' + s[1] + '"/>';
+      base = top;
+    });
+    if(opt.goal && d.goal) g += '<line x1="' + (x0 - 4) + '" x2="' + (x0 + bw + 4) + '" y1="' + y(d.goal) + '" y2="' + y(d.goal) + '" stroke="var(--goal)" stroke-width="2" stroke-linecap="round"/>';
+    if(sel && opt.label) g += '<text class="vl" x="' + cx + '" y="' + (Math.min(base, opt.goal && d.goal ? y(d.goal) : base) - 6) + '" text-anchor="middle">' + n(tot) + '</text>';
+    const dd = dt(d.date);
+    g += '<text class="ax' + (sel ? ' sel' : '') + '" x="' + cx + '" y="' + (H - B + 16) + '" text-anchor="middle">' + dd.getDate() + '</text>' +
+         '<text class="ax' + (sel ? ' sel' : '') + '" x="' + cx + '" y="' + (H - B + 30) + '" text-anchor="middle">' + DOW[dd.getDay()] + '</text>';
+    if(sel) g += '<rect x="' + (cx - 11) + '" y="' + (H - 3) + '" width="22" height="3" rx="1.5" fill="var(--acc)"/>';
+    g += '<rect class="hit" x="' + (L + slot * i) + '" y="' + T + '" width="' + slot + '" height="' + (ph + B - 4) + '" rx="6" data-date="' + d.date + '" data-tip="' + esc(opt.tip(d)) + '"/>';
   });
+  el.innerHTML = '<svg width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + esc(opt.aria) + '">' + g + '</svg>';
 }
-function tile(label, value, unit, sub, extra){
-  return '<div class="tile' + (extra || '') + '"><div class="l">' + label + '</div><div class="v">' + value +
-         (unit ? '<small>' + unit + '</small>' : '') + '</div><div class="s">' + (sub || '') + '</div></div>';
-}
-function grid(items, cols){
+// แถวแท่งต่อกันแนวนอน (พื้นที่ / ประเภทรถ) ความยาวเทียบกับแถวที่มีรถมากสุด
+function rowsChart(items, nameKey){
   if(!items.length) return '<div class="empty">ไม่มีข้อมูล</div>';
-  return '<div class="tw" style="max-height:none"><table><thead><tr>' + cols.map(c => '<th>' + c[0] + '</th>').join('') + '</tr></thead><tbody>' +
-    items.map(it => '<tr>' + cols.map(c => '<td>' + c[1](it) + '</td>').join('') + '</tr>').join('') + '</tbody></table></div>';
+  const mx = Math.max(...items.map(i => i.total));
+  return '<div class="rows">' + items.map(i => {
+    const segs = [['run', i.run], ['free', i.free], ['down', i.down]];
+    return '<div class="rw"><div class="rn">' + esc(i[nameKey]) + '<small>รถ ' + i.total + ' คัน</small></div>' +
+      '<div><div style="width:' + (i.total / mx * 100) + '%">' + stack(segs, K, i.total, i[nameKey] + ' · รถ ' + i.total + ' คัน', true) + '</div></div>' +
+      '<div class="rv"><b>' + n(i.trips) + '</b> เที่ยว</div></div>';
+  }).join('') + '</div>';
 }
-function bars(items){
-  if(!items.length) return '<div class="empty">ไม่มี — พร้อมใช้ครบทุกคัน</div>';
+function bars(items, total, unit){
+  if(!items.length) return '<div class="empty">ไม่มี — พร้อมครบทุก' + unit + '</div>';
   const mx = Math.max(...items.map(i => i.n));
-  return '<div class="bars">' + items.map(i =>
-    '<div class="brow"><div class="blab" title="' + esc(i.name) + '">' + esc(i.name) + '</div>' +
-    '<div class="btrack"><i class="bfill" style="width:' + (i.n / mx * 100) + '%"></i></div>' +
-    '<div class="bval">' + i.n + '</div></div>').join('') + '</div>';
+  return '<div class="rows">' + items.map(i =>
+    '<div class="rw"><div class="rn" title="' + esc(i.name) + '">' + esc(i.name) + '</div>' +
+    '<div><div class="bar" style="width:' + (i.n / mx * 100) + '%" data-tip="' + esc(tipHtml(i.name, [['var(--down)', 'จำนวน', i.n + ' ' + unit + ' (' + pct(i.n, total) + ' ของทั้งหมด)']])) + '"></div></div>' +
+    '<div class="rv"><b>' + i.n + '</b> ' + unit + '</div></div>').join('') + '</div>';
 }
 function render(){
   const r = REP, c = r.cars, t = r.trips, p = r.people;
-  const seg = [['run', c.run], ['free', c.free], ['nodriver', c.nodriver], ['down', c.down]].filter(s => s[1] > 0);
-  const tot = c.total || 1;
-  document.getElementById('tiles').innerHTML =
-    '<div class="tile hero"><div class="l">🚦 รถพร้อมใช้งาน</div>' +
-    '<div class="v">' + n(c.ready) + '<small>/ ' + n(c.total) + ' คัน</small></div>' +
-    '<div class="pbar">' + seg.map(s => '<i style="width:' + (s[1] / tot * 100) + '%;background:' + K[s[0]][1] + '"></i>').join('') + '</div>' +
-    '<div class="leg2">' + [['run', c.run], ['free', c.free], ['nodriver', c.nodriver], ['down', c.down]].map(s =>
-      '<span><i class="dot" style="background:' + K[s[0]][1] + '"></i>' + K[s[0]][0] + ' <b>' + s[1] + '</b></span>').join('') + '</div>' +
-    '<div class="s" style="margin-top:8px">พร้อมใช้ ' + (c.pct_ready == null ? '–' : c.pct_ready + '%') + ' ของทั้งหมด · ' +
-      'ใช้งานจริง ' + (c.pct_used == null ? '–' : c.pct_used + '%') + ' ของรถที่พร้อม</div></div>' +
-    tile('🚚 วิ่งงาน', n(c.run), 'คัน', 'มีงานในแผนงานวันนี้') +
-    tile('🅿️ ว่างงาน', n(c.free + c.nodriver), 'คัน', c.nodriver ? 'ในนี้ไม่มีคนขับ ' + c.nodriver + ' คัน' : 'พร้อมใช้ แต่ยังไม่มีงาน') +
-    tile('🔧 ไม่พร้อมใช้', n(c.down), 'คัน', (r.notes.length ? '' : '') + (c.down_by[0] ? 'มากสุด: ' + esc(c.down_by[0].name) + ' ' + c.down_by[0].n + ' คัน' : 'ไม่มีรถเสีย')) +
-    tile('📦 งานทั้งหมด', n(t.total), 'เที่ยว', 'เฉลี่ย <b>' + (t.per_ready == null ? '–' : t.per_ready) + '</b> เที่ยว/คันพร้อมใช้ · ' +
-         'เฉพาะคันที่วิ่ง ' + (t.per_run == null ? '–' : t.per_run) + (t.cancelled ? ' · ยกเลิก ' + t.cancelled + ' งาน' : '')) +
-    tile(t.gap ? '🎯 ขาดอีก' : '🎯 ถึงเป้าแล้ว', t.goal ? n(t.gap) : '–', t.goal ? 'เที่ยว' : '',
-         t.goal ? 'เป้า ' + r.target + ' เที่ยว/คัน = ' + n(t.goal) + ' เที่ยว' : 'ยังไม่ได้ตั้งเป้า') +
-    tile('👷 พขร. พร้อมทำงาน', n(p.run + p.free), 'คน', 'มีงาน ' + p.run + ' · ว่าง ' + p.free + (p.down ? ' · ไม่พร้อม ' + p.down : ''));
+  const segs = ORDER.map(k => [k, c[k]]);
+  const goalLine = t.goal ? Math.min(100, t.goal / Math.max(t.goal, t.total) * 100) : 0;
+  const fill = t.goal ? t.total / Math.max(t.goal, t.total) * 100 : 100;
+  const top = c.down_by[0];
+  document.getElementById('kpis').innerHTML =
+    '<div class="card w2"><div class="lab">รถพร้อมใช้งาน · ' + esc(thaiDate(r.date)) + '</div>' +
+      '<div class="big">' + n(c.ready) + '<small>จาก ' + n(c.total) + ' คัน · ' + pct(c.ready, c.total) + '</small></div>' +
+      '<div style="margin-top:14px">' + stack(segs, K, c.total, 'รถทั้งหมด ' + c.total + ' คัน', true) + '</div>' + legend(segs, K, c.total) + '</div>' +
+    '<div class="card w2"><div class="lab">เที่ยววิ่งงาน</div>' +
+      '<div class="big">' + n(t.total) + '<small>' + (t.goal ? 'จากเป้า ' + n(t.goal) + ' เที่ยว' : 'เที่ยว') + '</small></div>' +
+      '<div class="meter"><i style="width:' + fill + '%"></i>' + (t.goal ? '<u style="left:calc(' + goalLine + '% - 1px)"></u>' : '') + '</div>' +
+      '<div class="sub">' + (t.goal ? (t.gap ? 'ขาดอีก <b>' + n(t.gap) + '</b> เที่ยวถึงเป้า (' + r.target + ' เที่ยว/คัน)' : '<span class="ok">✓ ถึงเป้าแล้ว</span> เกินเป้า ' + n(t.total - t.goal) + ' เที่ยว') : 'ยังไม่ได้ตั้งเป้า') +
+        ' · เฉลี่ย <b>' + (t.per_ready == null ? '–' : t.per_ready) + '</b> เที่ยว/คันพร้อมใช้ · <b>' + (t.per_run == null ? '–' : t.per_run) + '</b> เที่ยว/คันที่วิ่ง' +
+        (t.cancelled ? ' · ยกเลิก ' + t.cancelled + ' งาน' : '') + '</div></div>' +
+    '<div class="card"><div class="lab">' + key(K.run.c) + 'วิ่งงาน</div><div class="val">' + n(c.run) + '<small>คัน</small></div>' +
+      '<div class="sub">ใช้รถ <b>' + pct(c.run, c.ready) + '</b> ของรถพร้อมใช้</div></div>' +
+    '<div class="card"><div class="lab">' + key(K.free.c) + 'ว่างงาน</div><div class="val">' + n(c.free) + '<small>คัน</small></div>' +
+      '<div class="sub">พร้อมใช้ แต่ยังไม่มีงานในแผน</div></div>' +
+    '<div class="card"><div class="lab">' + key(K.nodriver.c) + 'ไม่มีคนขับ</div><div class="val">' + n(c.nodriver) + '<small>คัน</small></div>' +
+      '<div class="sub">รถพร้อม · พขร. ว่าง <b>' + n(p.free) + '</b> คน</div></div>' +
+    '<div class="card"><div class="lab">' + key(K.down.c) + 'ไม่พร้อมใช้</div><div class="val">' + n(c.down) + '<small>คัน</small></div>' +
+      '<div class="sub">' + (top ? 'มากสุด: <b>' + esc(top.name) + '</b> ' + top.n + ' คัน' : 'ไม่มีรถเสีย/ซ่อม') + '</div></div>';
 
-  const col = (k, cls) => (x => '<span style="color:' + cls + ';font-weight:600">' + x[k] + '</span>');
-  document.getElementById('tArea').innerHTML = grid(r.by_area, [['พื้นที่', x => esc(x.area)], ['ทั้งหมด', x => x.total],
-    ['วิ่งงาน', col('run', 'var(--run)')], ['ว่าง', col('free', 'var(--free)')], ['ไม่พร้อม', col('down', 'var(--down)')], ['เที่ยว', x => n(x.trips)]]);
-  document.getElementById('tType').innerHTML = grid(r.by_type, [['ประเภทรถ', x => esc(x.vtype)], ['ทั้งหมด', x => x.total],
-    ['วิ่งงาน', col('run', 'var(--run)')], ['ว่าง', col('free', 'var(--free)')], ['ไม่พร้อม', col('down', 'var(--down)')], ['เที่ยว', x => n(x.trips)]]);
-  document.getElementById('cDown').innerHTML = bars(c.down_by);
-  document.getElementById('downSub').textContent = c.down ? 'รวม ' + c.down + ' คัน' : '';
-  document.getElementById('cPpl').innerHTML = bars(p.down_by);
-  document.getElementById('pplSub').textContent = p.down ? 'รวม ' + p.down + ' คน' : '';
-  document.getElementById('pSub').textContent = 'ทั้งหมด ' + p.total + ' คน';
+  const tr = r.trend || [];
+  document.getElementById('trLeg').innerHTML = ORDER.map(k => '<span>' + key(K[k].c) + K[k].t + '</span>').join('');
+  document.getElementById('trSub').textContent = tr.length ? thaiDate(tr[0].date) + ' – ' + thaiDate(tr[tr.length - 1].date) : '';
+  columns(document.getElementById('cTrend'), tr, ORDER.map(k => [k, K[k].c]), {aria: 'สถานะรถรายวัน', label: false,
+    tip: d => tipHtml(thaiDate(d.date), ORDER.map(k => [K[k].c, K[k].t, d[k] + ' คัน']).concat([['', 'พขร. ไม่พร้อม', d.p_down + ' คน']]))});
+  columns(document.getElementById('cTrips'), tr, [['trips', 'var(--trip)']], {aria: 'เที่ยวต่อวันเทียบเป้า', goal: true, label: true,
+    tip: d => tipHtml(thaiDate(d.date), [['var(--trip)', 'เที่ยว', n(d.trips)], ['var(--goal)', 'เป้า', d.goal ? n(d.goal) : '–'],
+      ['', d.goal ? (d.trips >= d.goal ? 'ถึงเป้า' : 'ขาด') : '', d.goal ? (d.trips >= d.goal ? '✓' : n(d.goal - d.trips)) : '']])});
+
+  document.getElementById('cArea').innerHTML = rowsChart(r.by_area, 'area');
+  document.getElementById('cType').innerHTML = rowsChart(r.by_type, 'vtype');
+  document.getElementById('cDown').innerHTML = bars(c.down_by, c.total, 'คัน');
+  document.getElementById('downSub').textContent = c.down ? 'รวม ' + c.down + ' คัน จาก ' + c.total : '';
+  const ps = [['run', p.run], ['free', p.free], ['down', p.down]];
+  document.getElementById('cPpl').innerHTML = (p.total ? stack(ps, PK, p.total, 'พขร. ทั้งหมด ' + p.total + ' คน', true) + legend(ps, PK, p.total) : '<div class="empty">ไม่มีข้อมูล พขร.</div>') +
+    (p.down_by.length ? '<div class="divider"></div>' + bars(p.down_by, p.total, 'คน') : '');
+  document.getElementById('pplSub').textContent = p.total ? 'ทั้งหมด ' + p.total + ' คน · พร้อมทำงาน ' + (p.run + p.free) : '';
+  document.getElementById('pSub').textContent = p.total + ' คน';
   drawRows();
   document.getElementById('prows').innerHTML = r.people_rows.map(x =>
-    '<tr><td>' + esc(x.name) + '</td><td>' + pill(x.kind, PK) + '</td><td>' + esc(x.why) + '</td><td>' + (x.trips || '–') + '</td></tr>').join('')
+    '<tr><td>' + esc(x.name) + '</td><td><span class="st"><i style="background:' + PK[x.kind].c + '"></i>' + PK[x.kind].t + '</span></td><td>' + esc(x.why) + '</td><td class="n">' + (x.trips || '–') + '</td></tr>').join('')
     || '<tr><td colspan="4" class="empty">ไม่มีข้อมูล พขร.</td></tr>';
   const nt = document.getElementById('notes');
   nt.innerHTML = r.notes.length ? '<b>หมายเหตุจากการอ่านชีต</b><ul>' + r.notes.map(x => '<li>' + esc(x) + '</li>').join('') + '</ul>' : '';
   nt.hidden = !r.notes.length;
+  fitLabels();
 }
 function drawRows(){
   const q = document.getElementById('q').value.trim().toLowerCase();
-  const list = REP.rows.filter(x => !q || (x.car + ' ' + x.plate + ' ' + x.why + ' ' + K[x.kind][0] + ' ' + x.area + ' ' + x.vtype).toLowerCase().includes(q));
+  const list = REP.rows.filter(x => !q || (x.car + ' ' + x.plate + ' ' + x.why + ' ' + K[x.kind].t + ' ' + x.area + ' ' + x.vtype).toLowerCase().includes(q));
   document.getElementById('rowSub').textContent = list.length + ' คัน' + (q ? ' (จาก ' + REP.rows.length + ')' : '');
   document.getElementById('rows').innerHTML = list.map(x =>
     '<tr><td><b>' + esc(x.car) + '</b></td><td>' + esc(x.area) + '</td><td>' + esc(x.vtype) + '</td><td>' + esc(x.plate) + '</td>' +
-    '<td>' + pill(x.kind) + '</td><td>' + esc(x.why) + (x.why && x.code ? ' <span style="color:var(--mut)">(' + esc(x.code) + ')</span>' : '') + '</td>' +
-    '<td>' + (x.trips || '–') + '</td></tr>').join('') || '<tr><td colspan="7" class="empty">ไม่พบรถที่ตรงกับคำค้น</td></tr>';
+    '<td><span class="st"><i style="background:' + K[x.kind].c + '"></i>' + K[x.kind].t + '</span></td><td>' + esc(x.why) + (x.why && x.code ? '<span class="code">' + esc(x.code) + '</span>' : '') + '</td>' +
+    '<td class="n">' + (x.trips || '–') + '</td></tr>').join('') || '<tr><td colspan="7" class="empty">ไม่พบรถที่ตรงกับคำค้น</td></tr>';
+}
+function markPreset(){
+  const v = document.getElementById('d').value;
+  document.querySelectorAll('#presets button').forEach(b => { const t = new Date(); t.setDate(t.getDate() + Number(b.dataset.p)); b.classList.toggle('on', iso(t) === v); });
 }
 async function load(){
   const main = document.getElementById('main'), err = document.getElementById('err');
   err.hidden = true; main.classList.add('busy');
   const tg = document.getElementById('tg').value;
+  try{ localStorage.setItem('readyTarget', tg); }catch(e){}
   try{
-    localStorage.setItem('readyTarget', tg);
     const res = await fetch('/api/report/ready?date=' + document.getElementById('d').value + '&target=' + encodeURIComponent(tg));
     if(res.status === 401){ location.href = '/login'; return; }
     if(!res.ok){ let m = 'HTTP ' + res.status; try{ m = (await res.json()).detail || m; }catch(e){} throw new Error(m); }
     REP = await res.json();
     render();
-    document.getElementById('stamp').textContent = 'สถานะจากชีตข้อมูลรถ+พขร. · งานจากชีตแผนงาน · อัปเดต ' +
-      new Date().toLocaleTimeString('th-TH', {hour: '2-digit', minute: '2-digit'});
+    document.getElementById('stamp').textContent = 'สถานะจากชีตข้อมูลรถ+พขร. · งานจากชีตแผนงาน · อัปเดต ' + new Date().toLocaleTimeString('th-TH', {hour: '2-digit', minute: '2-digit'});
   }catch(e){ err.textContent = 'โหลดไม่สำเร็จ: ' + e.message; err.hidden = false; }
   finally{ main.classList.remove('busy'); }
 }
+// tooltip เดียวใช้ทั้งหน้า: อะไรที่มี data-tip ชี้แล้วขึ้น
+const tip = document.getElementById('tip');
+document.addEventListener('mousemove', e => {
+  const el = e.target.closest && e.target.closest('[data-tip]');
+  if(!el){ tip.hidden = true; return; }
+  if(tip.dataset.src !== el.dataset.tip){ tip.innerHTML = el.dataset.tip; tip.dataset.src = el.dataset.tip; }
+  tip.hidden = false;
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  tip.style.left = Math.min(e.clientX + 14, innerWidth - w - 8) + 'px';
+  tip.style.top = (e.clientY + 16 + h > innerHeight ? e.clientY - h - 12 : e.clientY + 16) + 'px';
+});
+document.addEventListener('click', e => {
+  const el = e.target.closest && e.target.closest('.hit[data-date]');
+  if(el){ document.getElementById('d').value = el.dataset.date; markPreset(); load(); }
+});
+let rz = 0;
+addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if(REP) render(); }, 150); });
 document.getElementById('d').value = iso(new Date());
-document.getElementById('tg').value = localStorage.getItem('readyTarget') || '2';
+let saved = ''; try{ saved = localStorage.getItem('readyTarget') || ''; }catch(e){}
+document.getElementById('tg').value = saved || '2';
 document.getElementById('go').onclick = load;
 document.getElementById('q').oninput = () => { if(REP) drawRows(); };
 document.getElementById('d').onchange = () => { markPreset(); load(); };
