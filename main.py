@@ -3971,7 +3971,7 @@ LOGIN_HTML = """<!doctype html>
 <html lang="th"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>เข้าสู่ระบบ — Gasbulk Track</title>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;600;700&display=swap" rel="stylesheet" crossorigin="anonymous">
 <style>
   :root{--bg:#f1f5f9;--card:#fff;--line:#e2e8f0;--ink:#0f172a;--mut:#64748b}
   @media (prefers-color-scheme:dark){
@@ -4013,7 +4013,7 @@ SETTINGS_HTML = """<!doctype html>
 <html lang="th"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ตั้งค่า — Gasbulk Track</title>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet" crossorigin="anonymous">
 <style>
   :root{--bg:#f1f5f9;--card:#fff;--line:#e2e8f0;--ink:#0f172a;--mut:#64748b}
   @media (prefers-color-scheme:dark){
@@ -4137,7 +4137,7 @@ REPORT_HTML = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>รายงาน On Time — Gasbulk Track</title>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet" crossorigin="anonymous">
 <style>
   :root{color-scheme:light;
     --plane:#f4f5f7;--card:#ffffff;--surface:#fcfcfb;--line:#e6e8ec;--hair:#eceae4;--axis:#c3c2b7;
@@ -4818,10 +4818,14 @@ document.getElementById('snap').onclick = async () => {
   cap.innerHTML = '<b>รายงาน On Time · ' + rng + '</b><span>' + (keys.length ? 'กรอง: ' + keys.map(k => FNAME[k] + ' ' + esc(getF(k))).join(' · ') + ' · ' : '') +
     'แคปเมื่อ ' + new Date().toLocaleString('th-TH', {dateStyle: 'short', timeStyle: 'short'}) + '</span>';
   main.insertBefore(cap, main.firstChild);
+  const hide = [...main.querySelectorAll('[data-nosnap]')].filter(e => !e.hidden);   // ซ่อนจริงระหว่างแคป ไม่งั้นรูปมีที่ว่างเท่าความสูงตาราง
+  hide.forEach(e => e.hidden = true);
   try{
     const lib = await loadH2I();
-    const blob = await lib.toBlob(main, {pixelRatio: 2, skipFonts: true, backgroundColor: getComputedStyle(document.body).backgroundColor,
-      filter: n => !(n.dataset && n.dataset.nosnap)});
+    let fontCss = '';
+    try{ fontCss = await lib.getFontEmbedCSS(main); }catch(e){}                       // ฝังฟอนต์ไทย ตัวหนังสือในรูปจะได้กว้างเท่าบนจอ
+    const blob = await lib.toBlob(main, {pixelRatio: 2, backgroundColor: getComputedStyle(document.body).backgroundColor,
+      fontEmbedCSS: fontCss || undefined, skipFonts: !fontCss, filter: n => !(n.dataset && n.dataset.nosnap)});
     const name = 'ontime_' + REP.from + (REP.to !== REP.from ? '_' + REP.to : '') + '.png';
     const file = new File([blob], name, {type: 'image/png'});
     if(navigator.canShare && navigator.canShare({files: [file]}) && matchMedia('(pointer:coarse)').matches){
@@ -4833,7 +4837,7 @@ document.getElementById('snap').onclick = async () => {
   }catch(e){
     alert('แคปไม่สำเร็จ: ' + (e && e.message ? e.message : e) + ' — ลองใหม่อีกครั้ง หรือใช้ปุ่มแคปหน้าจอของเครื่องแทน');
   }finally{
-    cap.remove(); b.disabled = false; b.textContent = '📷 แคปส่ง';
+    cap.remove(); hide.forEach(e => e.hidden = false); b.disabled = false; b.textContent = '📷 แคปส่ง';
   }
 };
 ['dFrom', 'dTo'].forEach(id => { document.getElementById(id).onchange = () => { markPreset(); load(); }; });
@@ -5377,7 +5381,7 @@ PLAN_HTML = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>แผนงาน — Gasbulk Track</title>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet" crossorigin="anonymous">
 <style>
   :root{--bg:#f1f5f9;--card:#fff;--line:#e2e8f0;--ink:#0f172a;--mut:#64748b;
         --late:#dc2626;--late-bg:#fef2f2;--pd-bg:#f8fafc;--tr-bg:#eff6ff;
@@ -7202,7 +7206,7 @@ DASHBOARD_HTML = """<!doctype html>
 <title>Gasbulk Track — ติดตามรถขนส่ง</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet" crossorigin="anonymous">
 <style>
   :root{
     --bg:#f1f5f9; --card:#fff; --line:#e2e8f0; --ink:#0f172a; --mut:#64748b;
