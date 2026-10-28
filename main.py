@@ -266,7 +266,7 @@ def _need_perm(path: str) -> str:
         return "car"
     if path in ("/plan", "/api/plan") or path.startswith("/api/plan/"):
         return "plan"
-    if path == "/report" or path.startswith("/api/report/"):
+    if path in ("/report", "/ready") or path.startswith("/api/report/"):
         return "report"
     return "admin"                                   # ตั้งค่า / debug / docs ฯลฯ
 
@@ -338,7 +338,7 @@ def _perms_of(token: str):
 def _nav(html: str, request: Request) -> str:
     """ซ่อนเมนูหน้าที่ผู้ใช้ไม่มีสิทธิ์"""
     perms = getattr(request.state, "perms", PERMS_ALL)
-    for k, url in PERM_PAGES + [("admin", "/settings")]:
+    for k, url in PERM_PAGES + [("report", "/ready"), ("admin", "/settings")]:   # /ready ใช้สิทธิ์เดียวกับหน้ารายงาน
         if (k == "admin" and not perms >= PERMS_ALL) or (k != "admin" and k not in perms):
             html = re.sub(r'<a\b[^>]*\bhref="' + re.escape(url) + r'"[^>]*>.*?</a>\s*', "", html)
     return html
@@ -3528,6 +3528,304 @@ def report_ontime(date_from: str = Query(None, alias="from"), date_to: str = Que
     return rep
 
 
+# ─── รถ/คนพร้อมใช้งาน (อ่านอย่างเดียว — ชีตข้อมูลรถ+พขร. และชีตแผนงาน) ──────────────────────────
+# แท็บ "ข้อมูลรถ" / "ข้อมูลพขร." เก็บสถานะเป็นตารางรายวัน แยกบล็อกตามเดือนเรียงไปทางขวา:
+#   แถวเหนือหัวตารางเขียน "สถานะรถพร้อมใช้ ประจำเดือน ตุลาคม Y2026" แล้วหัวตารางเป็น "01 พฤ" "02 ศ" ...
+#   ช่องในตารางเป็นรหัส: R รถวิ่งงาน · W รถพร้อมใช้ว่างงาน · D รถพร้อมใช้ไม่มีคนขับ · CM ซ่อมทั่วไป · BD เสียระหว่างทาง ฯลฯ
+# คำอธิบายรหัสอ่านจากมุมซ้ายบนของชีตเอง (รหัส | คำอธิบาย) เพิ่ม/แก้รหัสในชีตแล้วหน้านี้รู้ตาม ไม่ต้องแก้โค้ด
+# "วิ่งงาน" ยึดจากชีตแผนงานเสมอ ไม่ยึดรหัส R เพราะวันที่ยังไม่ถึงชีตยังไม่ได้ลง R (วันที่ 29–30 ยังเป็น W ทั้งคอลัมน์)
+READY_CAR_TAB    = os.environ.get("READY_CAR_TAB", "ข้อมูลรถ")
+READY_DRIVER_TAB = os.environ.get("READY_DRIVER_TAB", "ข้อมูลพขร.")
+READY_TARGET     = float(os.environ.get("READY_TARGET", "2") or 2)   # เป้าเที่ยวต่อรถพร้อมใช้ 1 คันต่อวัน (หน้าเว็บแก้ได้)
+_TH_MONTHS = {m: i for i, m in enumerate(
+    ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
+     "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"], 1)}
+_TH_MONTHS_ABBR = {"ม.ค.": 1, "ก.พ.": 2, "มี.ค.": 3, "เม.ย.": 4, "พ.ค.": 5, "มิ.ย.": 6,
+                   "ก.ค.": 7, "ส.ค.": 8, "ก.ย.": 9, "ต.ค.": 10, "พ.ย.": 11, "ธ.ค.": 12}
+_THAI_RE = re.compile(r"[ก-๙]")
+# คำอธิบายรหัสที่แปลว่า "ทำงานได้" — คำอื่นทั้งหมด (ซ่อม เครม ลา ขาดงาน อบรม หยุด เบรกงาน ...) = ไม่พร้อม
+_READY_OK_WORDS = ("พร้อม", "วิ่งงาน", "ทำงาน", "ทำโอ", "โอที", "รองาน")
+
+
+def _ready_month(text: str):
+    """'สถานะรถพร้อมใช้ ประจำเดือน ตุลาคม Y2026' → (2026, 10) · ไม่ใช่หัวเดือน = None (พ.ศ. แปลงเป็น ค.ศ. ให้)"""
+    t = (text or "").strip()
+    if not t or "เดือน" not in t:
+        return None
+    mon = (next((n for name, n in _TH_MONTHS.items() if name in t), 0)
+           or next((n for ab, n in _TH_MONTHS_ABBR.items() if ab in t), 0))
+    m = re.search(r"(\d{4})", t)
+    if not mon or not m:
+        return None
+    y = int(m.group(1))
+    return (y - 543 if y > 2400 else y), mon
+
+
+def _ready_legend(rows: list, used: set) -> dict:
+    """คำอธิบายรหัสที่เขียนไว้เหนือตาราง (คู่ช่องติดกัน) → {'R': 'รถวิ่งงาน', 'H': 'พักร้อน', 'อบรม': 'อบรม', ...}
+
+    สองแท็บเขียนไม่เหมือนกัน: ข้อมูลรถ = "รหัส | คำอธิบาย" (CM | ซ่อมทั่วไป) · ข้อมูลพขร. = "คำอธิบาย | รหัส" (ลากิจ | B)
+    และรหัสเป็นภาษาไทยได้ (บ, อบรม, หยุด) จึงตัดสินว่าช่องไหนคือรหัสจาก "ค่าที่ลงอยู่ในตารางจริง" (used)
+    ถ้าเดือนนี้ยังไม่มีใครใช้รหัสนั้น ถือว่าช่องที่สั้นกว่าคือรหัส
+    รหัสที่ไม่มีคำอธิบาย (เช่น N, O) ไม่เก็บ — หน้าเว็บจะโชว์เป็น "ไม่ระบุ" """
+    out: dict = {}
+    num = lambda s: bool(re.fullmatch(r"[\d.,%\s-]*", s))
+    for r in rows:
+        for i in range(min(len(r), 14) - 1):
+            a, b = _cell(r, i), _cell(r, i + 1)
+            if not a or not b or num(a) or num(b) or "เดือน" in a + b:
+                continue
+            ua, ub = a.upper(), b.upper()
+            if ub in used and ua not in used:
+                code, desc = ub, a
+            elif ua in used:
+                code, desc = ua, b
+            elif len(a) <= 6 and len(a) < len(b):
+                code, desc = ua, b
+            elif len(b) <= 6 and len(b) < len(a):
+                code, desc = ub, a
+            else:
+                continue
+            if _THAI_RE.search(desc):
+                out.setdefault(code, re.sub(r"\s+", " ", desc))
+    return out
+
+
+def _ready_kind(desc: str) -> str:
+    """คำอธิบายรหัส → 'run' วิ่งงาน · 'free' พร้อมใช้/ทำงานได้ · 'nodriver' พร้อมใช้แต่ไม่มีคนขับ · 'down' ไม่พร้อม"""
+    d = (desc or "").replace(" ", "")
+    if "ไม่มีคนขับ" in d:
+        return "nodriver"
+    if "ไม่พร้อม" in d:
+        return "down"
+    if "วิ่งงาน" in d:
+        return "run"
+    return "free" if any(w in d for w in _READY_OK_WORDS) else "down"
+
+
+def _ready_grid(rows: list, need: list) -> tuple:
+    """ชีตสถานะรายวัน → (แถวหัวตาราง, {ชื่อหัว: คอลัมน์}, {วันที่ iso: คอลัมน์}) · ไม่เจอหัวตาราง = (None, {}, {})
+
+    เซลล์หัวเดือนผสานกันไว้ Google คืนค่าเฉพาะช่องซ้ายสุด จึงถือว่าหัวเดือนคุมคอลัมน์ไปทางขวา
+    จนกว่าจะเจอหัวเดือนถัดไป (เดือนของคอลัมน์ไหน = หัวเดือนซ้ายสุดที่อยู่ไม่เกินคอลัมน์นั้น)"""
+    h, ix = _hdr_find(rows, need, limit=40)
+    if h is None:
+        return None, {}, {}
+    banners = sorted((i, mo) for r in rows[max(0, h - 4):h]
+                     for i, c in enumerate(r) if (mo := _ready_month(c)))
+    hdr, days, last, done = rows[h], {}, {}, set()
+    for i in range(len(hdr)):
+        m = re.match(r"^(\d{1,2})\b", _cell(hdr, i))
+        b = next((b for b in reversed(banners) if b[0] <= i), None) if m else None
+        if not b or b[0] in done:
+            continue
+        day = int(m.group(1))
+        if day <= last.get(b[0], 0):  # วันวนกลับไป 01 แต่ไม่มีหัวเดือนใหม่ = บล็อกเดือนถัดไปที่อ่านหัวไม่ออก ไม่เดาเดือนให้
+            done.add(b[0])
+            continue
+        last[b[0]] = day
+        try:
+            days.setdefault(datetime(b[1][0], b[1][1], day).strftime("%Y-%m-%d"), i)
+        except ValueError:            # เช่น 31 ในเดือนที่มี 30 วัน — ชีตเว้นช่องไว้
+            continue
+    return h, ix, days
+
+
+def _ready_sheet(tab: str, need: list, date_iso: str) -> dict:
+    """อ่านแท็บสถานะรายวันหนึ่งแท็บ → {rows: [{key, code, cells}], legend, head, ix, has_day, note}"""
+    sid = CARS_SHEET_ID or PLAN_PAGE_ID
+    try:
+        grid = _fetch_sheet(sid, tab)
+    except Exception as e:
+        return {"rows": [], "legend": {}, "head": [], "ix": {}, "has_day": False,
+                "note": f"อ่านแท็บ “{tab}” ไม่ได้ — {type(e).__name__} (ต้องแชร์ชีตให้บัญชีของเว็บแบบผู้ดู)"}
+    h, ix, days = _ready_grid(grid, need)
+    if h is None:
+        return {"rows": [], "legend": {}, "head": [], "ix": {}, "has_day": False,
+                "note": f"แท็บ “{tab}” ไม่พบหัวตาราง ({' + '.join(need)}) จึงยังสรุปจากแท็บนี้ไม่ได้"}
+    day_cols = set(days.values())
+    used = {_cell(r, c).upper() for r in grid[h + 1:] for c in day_cols if _cell(r, c)}
+    legend = _ready_legend(grid[:h], used)
+    col = days.get(date_iso)
+    out = []
+    for r in grid[h + 1:]:
+        key = _cell(r, ix[need[0]])
+        if key:
+            out.append({"key": key, "cells": r, "code": (_cell(r, col).upper() if col is not None else "")})
+    note = "" if col is not None else f"แท็บ “{tab}” ยังไม่มีคอลัมน์ของวันที่นี้ (ชีตลงสถานะถึงเดือนล่าสุดเท่านั้น)"
+    return {"rows": out, "legend": legend, "head": _hdr_cells(grid[h]), "ix": ix, "has_day": col is not None, "note": note}
+
+
+def _ready_plan(rows: list, date_iso: str) -> tuple:
+    """แผนงานของวันนั้น → ({คีย์รถ: จำนวน drop}, {ชื่อ พขร.: จำนวน drop}, จำนวนงานที่ยกเลิก)"""
+    cars: dict = {}
+    people: dict = {}
+    cancelled = 0
+    for r in rows:
+        if _parse_date(_cell(r, PLAN_DATE)) != date_iso:
+            continue
+        if any(k in (_cell(r, PLAN_STATUS) + " " + _cell(r, PLAN_DEST)).lower() for k in CANCEL_KEYWORDS):
+            cancelled += 1
+            continue
+        if key := _car_key(_cell(r, PLAN_CARNO)):
+            cars[key] = cars.get(key, 0) + 1
+        for c in (PLAN_DRIVER, PLAN_DRIVER2):
+            if (nm := _cell(r, c)) and nm not in _NO_PERSON:
+                people[nm] = people.get(nm, 0) + 1
+    return cars, people, cancelled
+
+
+def _ready_col(head: list, *names: str):
+    """หาคอลัมน์จากชื่อหัวตาราง — ลองตามลำดับที่ให้มา แล้วค่อยหาแบบ "มีคำนี้อยู่ในหัว" """
+    for n in names:
+        if n in head:
+            return head.index(n)
+    return next((i for i, c in enumerate(head) if any(n in c for n in names)), None)
+
+
+def _ready_count(items: list, key: str) -> list:
+    """[{...}] → [{'name': ค่า, 'n': จำนวน}] เรียงมาก→น้อย (ค่าว่างรวมเป็น "ไม่ระบุ")"""
+    tally: dict = {}
+    for it in items:
+        tally[it.get(key) or "ไม่ระบุ"] = tally.get(it.get(key) or "ไม่ระบุ", 0) + 1
+    return sorted(({"name": k, "n": v} for k, v in tally.items()), key=lambda d: (-d["n"], d["name"]))
+
+
+def build_ready_report(date_iso: str, plan_rows: list, target: float) -> dict:
+    """สรุปรถ/คนพร้อมใช้งานของวันที่ระบุ — รวมชีตสถานะรายวันเข้ากับงานจริงในชีตแผนงาน"""
+    trips, driver_jobs, cancelled = _ready_plan(plan_rows, date_iso)
+    notes: list = []
+
+    # ── รถ ──
+    cs = _ready_sheet(READY_CAR_TAB, ["เบอร์รถ", "ทะเบียนรถ"], date_iso)
+    if cs["note"]:
+        notes.append(cs["note"])
+    legend = dict(cs["legend"])
+    head = cs["head"]
+    c_area = _ready_col(head, "ประจำพื้นที่", "พื้นที่")
+    c_type = _ready_col(head, "ประเภทรถ", "น้ำหนัก")
+    c_plate = cs["ix"].get("ทะเบียนรถ")
+    cars, seen, mismatch = [], set(), 0
+    for r in cs["rows"]:
+        car = r["key"]
+        if not _CAR_RE.match(car):
+            continue
+        key = _car_key(car)
+        if key in seen:                       # ชีตมีรถคันเดียวกันหลายแถว (เช่น ตารางเรียงข้างกัน) นับครั้งเดียว
+            continue
+        seen.add(key)
+        code = r["code"]
+        desc = legend.get(code, "")
+        kind = _ready_kind(desc) if code else "free"
+        n = trips.get(key, 0)
+        why = (desc or "ไม่ระบุ") if kind == "down" else ""
+        if kind != "down":                    # พร้อมใช้ → วิ่งงานหรือไม่ ดูจากแผนงาน ไม่ดูรหัส R ในชีต
+            if n:
+                kind = "run"
+            elif kind == "run":               # ชีตลง R ไว้ แต่วันนั้นไม่มีงานในแผน — บอกให้รู้ว่าไม่ตรงกัน
+                kind, mismatch, why = "free", mismatch + 1, "ชีตลงวิ่งงาน แต่ไม่มีงานในแผน"
+            elif kind == "nodriver":
+                why = desc
+        area = _cell(r["cells"], c_area) if c_area is not None else ""
+        cars.append({"car": car, "key": key, "area": _area_of(area) or area,
+                     "vtype": _cell(r["cells"], c_type) if c_type is not None else "",
+                     "plate": _cell(r["cells"], c_plate) if c_plate is not None else "",
+                     "code": code, "why": why, "kind": kind, "trips": n})
+    if mismatch:
+        notes.append(f"มี {mismatch} คันที่ชีตลงรหัสวิ่งงานไว้ แต่วันนั้นไม่มีงานในชีตแผนงาน — นับเป็นว่างงาน")
+    ghost = sorted(set(trips) - seen)
+    if ghost:
+        notes.append(f"มี {len(ghost)} คันที่มีงานในแผนงาน แต่ไม่มีในแท็บ “{READY_CAR_TAB}”: " + ", ".join(ghost[:8]))
+
+    by_kind = lambda k: [c for c in cars if c["kind"] == k]
+    run, free, nodrv, down = by_kind("run"), by_kind("free"), by_kind("nodriver"), by_kind("down")
+    ready = run + free + nodrv
+    total_trips = sum(trips.values())
+    # เป้า = เที่ยวต่อรถพร้อมใช้ 1 คัน → ทั้งวันควรได้กี่เที่ยว และตอนนี้ขาดอีกเท่าไร
+    goal = round(target * len(ready)) if target > 0 else 0
+
+    # ── คน ──
+    ds = _ready_sheet(READY_DRIVER_TAB, ["ชื่อ-สกุล"], date_iso)
+    if ds["note"]:
+        notes.append(ds["note"])
+    d_legend = ds["legend"]
+    d_left = _ready_col(ds["head"], "วันที่พ้นสภาพ", "พ้นสภาพ")
+    people, dseen = [], set()
+    for r in ds["rows"]:
+        name = r["key"]
+        if name in _NO_PERSON or name in dseen:
+            continue
+        if d_left is not None and _cell(r["cells"], d_left):      # มีวันพ้นสภาพ = ลาออกแล้ว ไม่นับ
+            continue
+        dseen.add(name)
+        code = r["code"]
+        desc = d_legend.get(code, "")
+        kind = _ready_kind(desc) if code else "free"
+        n = driver_jobs.get(name, 0)
+        why = (desc or "ไม่ระบุ") if kind == "down" else ""
+        if kind != "down":
+            kind = "run" if n else "free"
+        people.append({"name": name, "code": code, "why": why, "kind": kind, "trips": n})
+    d_run = [p for p in people if p["kind"] == "run"]
+    d_free = [p for p in people if p["kind"] == "free"]
+    d_down = [p for p in people if p["kind"] == "down"]
+    unknown = sorted(set(driver_jobs) - dseen)
+    if unknown:
+        notes.append(f"มี {len(unknown)} คนที่รับงานในแผนงาน แต่ไม่มีในแท็บ “{READY_DRIVER_TAB}”: " + ", ".join(unknown[:6]))
+
+    area_rows = sorted({c["area"] or "ไม่ระบุ" for c in cars})
+    return {
+        "date": date_iso,
+        "target": target,
+        "legend": legend,
+        "driver_legend": d_legend,
+        "notes": notes,
+        "cars": {"total": len(cars), "ready": len(ready), "run": len(run), "free": len(free),
+                 "nodriver": len(nodrv), "down": len(down),
+                 "pct_ready": round(len(ready) * 100 / len(cars), 1) if cars else None,
+                 "pct_used": round(len(run) * 100 / len(ready), 1) if ready else None,
+                 "down_by": _ready_count(down, "why"), "free_by": _ready_count(free + nodrv, "area")},
+        "trips": {"total": total_trips, "cancelled": cancelled,
+                  "per_ready": round(total_trips / len(ready), 2) if ready else None,
+                  "per_run": round(total_trips / len(run), 2) if run else None,
+                  "goal": goal, "gap": max(0, goal - total_trips) if goal else 0},
+        "people": {"total": len(people), "run": len(d_run), "free": len(d_free), "down": len(d_down),
+                   "down_by": _ready_count(d_down, "why")},
+        "by_area": [{"area": a,
+                     "total": sum(1 for c in cars if (c["area"] or "ไม่ระบุ") == a),
+                     "run": sum(1 for c in run if (c["area"] or "ไม่ระบุ") == a),
+                     "free": sum(1 for c in free + nodrv if (c["area"] or "ไม่ระบุ") == a),
+                     "down": sum(1 for c in down if (c["area"] or "ไม่ระบุ") == a),
+                     "trips": sum(c["trips"] for c in cars if (c["area"] or "ไม่ระบุ") == a)} for a in area_rows],
+        "by_type": [{"vtype": t,
+                     "total": sum(1 for c in cars if (c["vtype"] or "ไม่ระบุ") == t),
+                     "run": sum(1 for c in run if (c["vtype"] or "ไม่ระบุ") == t),
+                     "free": sum(1 for c in free + nodrv if (c["vtype"] or "ไม่ระบุ") == t),
+                     "down": sum(1 for c in down if (c["vtype"] or "ไม่ระบุ") == t),
+                     "trips": sum(c["trips"] for c in cars if (c["vtype"] or "ไม่ระบุ") == t)}
+                    for t in sorted({c["vtype"] or "ไม่ระบุ" for c in cars})],
+        "rows": sorted(cars, key=lambda c: ({"down": 0, "nodriver": 1, "free": 2, "run": 3}[c["kind"]], -c["trips"], c["car"])),
+        "people_rows": sorted(people, key=lambda p: ({"down": 0, "free": 1, "run": 2}[p["kind"]], -p["trips"], p["name"])),
+    }
+
+
+@app.get("/api/report/ready", include_in_schema=False)
+def report_ready(date_str: str = Query(None, alias="date"), target: float = Query(None)):
+    """สรุปรถ/คนพร้อมใช้งานของวันที่ระบุ (ค่าเริ่มต้น = วันนี้) — อ่านชีตอย่างเดียว"""
+    day = _parse_date(date_str or "") or _today_thai()
+    try:
+        plan_rows = _fetch_sheet(SOURCE_ID, PLAN_TAB)
+    except Exception as e:
+        raise HTTPException(502, f"อ่านชีตแผนงานไม่ได้ — {type(e).__name__}")
+    tg = READY_TARGET if target is None else max(0.0, min(float(target), 99.0))
+    return build_ready_report(day, plan_rows, tg)
+
+
+@app.get("/ready", response_class=HTMLResponse, include_in_schema=False)
+def ready_page(request: Request):
+    return _nav(READY_HTML, request)
+
+
 @app.get("/report", response_class=HTMLResponse, include_in_schema=False)
 def report_page(request: Request):
     return _nav(REPORT_HTML, request)
@@ -4087,6 +4385,7 @@ REPORT_HTML = """<!doctype html>
   <a class="menu" href="/">🚛 เช็กรถ</a>
   <a class="menu" href="/plan">📋 แผนงาน</a>
   <a class="menu on" href="/report">📊 รายงาน On Time</a>
+  <a class="menu" href="/ready">🚦 รถ/คนพร้อมใช้</a>
   <a class="menu out" href="/logout" title="ออกจากระบบ">🚪<span>ออกจากระบบ</span></a>
 </aside>
 <header><div class="hd">
@@ -4505,6 +4804,251 @@ load();
 """
 
 
+READY_HTML = """<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>รถ/คนพร้อมใช้งาน — Gasbulk Track</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{color-scheme:light;
+    --plane:#f4f5f7;--card:#ffffff;--line:#e6e8ec;--hair:#eceae4;
+    --ink:#0b0b0b;--ink2:#3f3e3b;--mut:#6b6964;--hover:#f3f6fb;--acc:#2563eb;
+    --run:#0ca30c;--free:#2a78d6;--nod:#6250d6;--down:#d03b3b;
+    --shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.08)}
+  @media (prefers-color-scheme:dark){
+    :root:where(:not([data-theme="light"])){color-scheme:dark;
+      --plane:#0d0d0d;--card:#161616;--line:#2a2a28;--hair:#2c2c2a;
+      --ink:#f0efec;--ink2:#d6d5cc;--mut:#a9a7a0;--hover:#1f2733;--acc:#3b82f6;
+      --run:#3fcf3f;--free:#3987e5;--nod:#9b8cf0;--down:#ff8a80;--shadow:none}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--plane);color:var(--ink);font-family:'Noto Sans Thai',system-ui,-apple-system,"Segoe UI",sans-serif;font-size:15.5px;padding-left:148px}
+  .side{position:fixed;left:0;top:0;bottom:0;width:148px;background:var(--card);border-right:1px solid var(--line);padding:14px 10px;display:flex;flex-direction:column;gap:6px;z-index:20}
+  .side .menu{display:flex;align-items:center;gap:9px;text-decoration:none;font-weight:700;font-size:16px;color:var(--ink);padding:11px 12px;border-radius:10px}
+  .side .menu:hover{background:var(--hover)}
+  .side .menu.on{background:#2563eb;color:#fff}
+  .side .menu.out{margin-top:auto;color:var(--mut);font-size:14.5px;white-space:nowrap}
+  @media (max-width:820px){body{padding-left:0}
+    .side{position:static;width:auto;flex-direction:row;flex-wrap:wrap;border-right:0;border-bottom:1px solid var(--line);padding:8px 10px}
+    .side .menu{flex:1;justify-content:center;padding:9px 6px;font-size:14.5px}
+    .side .menu.out{flex:0 0 auto;margin-top:0} .side .menu.out span{display:none}}
+  header{background:var(--card);border-bottom:1px solid var(--line);padding:14px 22px;position:sticky;top:0;z-index:10}
+  .hd{display:flex;flex-wrap:wrap;gap:12px 18px;align-items:center}
+  .ttl h1{font-size:21px;margin:0;font-weight:700;letter-spacing:-.2px}
+  .ttl p{margin:2px 0 0;font-size:14px;color:var(--mut)}
+  .grow{flex:1}
+  .seg{display:inline-flex;background:var(--plane);border:1px solid var(--line);border-radius:10px;padding:3px}
+  .seg button{border:0;background:transparent;padding:6px 12px;border-radius:7px;font:inherit;font-size:14.5px;font-weight:600;color:var(--ink2);cursor:pointer}
+  .seg button.on{background:var(--card);color:var(--ink);box-shadow:var(--shadow)}
+  input{font:inherit;font-size:15px;padding:7px 10px;border-radius:9px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
+  .btn{font:inherit;font-size:15px;font-weight:600;padding:7px 14px;border-radius:9px;border:1px solid var(--acc);background:var(--acc);color:#fff;cursor:pointer}
+  .tgt{display:flex;align-items:center;gap:7px;font-size:14px;color:var(--mut)}
+  .tgt input{width:72px;text-align:right}
+  main{padding:18px 22px 40px;transition:opacity .15s}
+  main.busy{opacity:.55;pointer-events:none}
+  .err{background:#fdecec;border:1px solid #f6caca;color:#b42318;border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:14.5px}
+  @media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])) .err{background:#2d1414;border-color:#5a2222;color:#ff8a80}}
+  .note{background:var(--card);border:1px solid var(--line);border-left:4px solid #eda100;border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:14px;color:var(--ink2)}
+  .note ul{margin:4px 0 0;padding-left:20px}
+  .tiles{display:grid;grid-template-columns:minmax(300px,1.5fr) repeat(3,minmax(0,1fr));gap:12px;margin-bottom:12px}
+  .tile{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;box-shadow:var(--shadow);min-width:0}
+  .tile .l{font-size:14px;color:var(--ink2);font-weight:600}
+  .tile .v{font-size:28.5px;font-weight:700;line-height:1.15;margin-top:6px;letter-spacing:-.3px}
+  .tile .v small{font-size:14.5px;font-weight:600;color:var(--mut);margin-left:4px;letter-spacing:0}
+  .tile .s{font-size:13.5px;color:var(--mut);margin-top:3px}
+  .tile.hero{grid-row:span 2;display:flex;flex-direction:column;justify-content:center}
+  .hero .v{font-size:42.5px}
+  .pbar{display:flex;gap:2px;height:10px;border-radius:5px;overflow:hidden;background:var(--hair);margin:12px 0 9px}
+  .pbar i{display:block;height:100%}
+  .leg2{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:14.5px;color:var(--ink2)}
+  .leg2 b{color:var(--ink);font-variant-numeric:tabular-nums}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:0}
+  @media (max-width:1100px){.tiles{grid-template-columns:repeat(3,minmax(0,1fr))}.tile.hero{grid-column:1/-1;grid-row:auto}}
+  @media (max-width:640px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  .panels{display:grid;grid-template-columns:repeat(12,1fr);gap:12px}
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;box-shadow:var(--shadow);min-width:0}
+  .w6{grid-column:span 6}.w12{grid-column:span 12}
+  @media (max-width:1100px){.w6{grid-column:span 12}}
+  .ph{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+  .ph h3{margin:0;font-size:16px;font-weight:700}
+  .ph .sub{font-size:14px;color:var(--mut)}
+  .hint{font-size:13.5px;color:var(--mut);margin:0 0 12px;line-height:1.5}
+  table{width:100%;border-collapse:collapse;font-size:14.5px}
+  th,td{text-align:right;padding:8px 10px;border-bottom:1px solid var(--hair);white-space:nowrap}
+  th:first-child,td:first-child{text-align:left}
+  thead th{font-size:13.5px;color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card)}
+  tbody tr:hover td{background:var(--hover)}
+  td{font-variant-numeric:tabular-nums}
+  .tw{max-height:460px;overflow:auto;border:1px solid var(--line);border-radius:10px}
+  .pill{display:inline-block;font-size:13px;font-weight:600;border-radius:999px;padding:2px 9px;color:#fff}
+  .bars{display:grid;grid-template-columns:minmax(90px,200px) 1fr 54px;align-items:center;column-gap:12px}
+  .brow{display:contents}
+  .brow > *{padding:7px 0;border-bottom:1px solid var(--hair)}
+  .blab{font-size:14.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .btrack{position:relative;height:22px}
+  .bfill{position:absolute;left:0;top:6px;height:10px;border-radius:0 4px 4px 0;min-width:3px;background:var(--down)}
+  .bval{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
+  .empty{color:var(--mut);font-size:14.5px;padding:8px 2px}
+  [hidden]{display:none !important}
+</style>
+</head>
+<body>
+<aside class="side">
+  <a class="menu" href="/">🚛 เช็กรถ</a>
+  <a class="menu" href="/plan">📋 แผนงาน</a>
+  <a class="menu" href="/report">📊 รายงาน On Time</a>
+  <a class="menu on" href="/ready">🚦 รถ/คนพร้อมใช้</a>
+  <a class="menu out" href="/logout" title="ออกจากระบบ">🚪<span>ออกจากระบบ</span></a>
+</aside>
+<header><div class="hd">
+  <div class="ttl"><h1>รถ/คนพร้อมใช้งาน</h1><p id="stamp">สถานะจากชีตข้อมูลรถ+พขร. · งานจากชีตแผนงาน · อ่านอย่างเดียว</p></div>
+  <span class="grow"></span>
+  <div class="seg" id="presets"><button data-p="-1">เมื่อวาน</button><button data-p="0">วันนี้</button><button data-p="1">พรุ่งนี้</button></div>
+  <input type="date" id="d" aria-label="วันที่">
+  <label class="tgt">เป้า <input type="number" id="tg" min="0" max="20" step="0.5" aria-label="เป้าเที่ยวต่อคันต่อวัน"> เที่ยว/คัน</label>
+  <button class="btn" id="go">ดูรายงาน</button>
+</div></header>
+<main id="main">
+  <div id="err" class="err" hidden></div>
+  <div id="notes" class="note" hidden></div>
+  <div class="tiles" id="tiles"></div>
+  <div class="panels">
+    <section class="panel w6"><div class="ph"><h3>แยกตามพื้นที่ประจำรถ</h3></div>
+      <p class="hint">💡 รถของแต่ละพื้นที่ วันนี้วิ่งไปกี่คัน ว่างกี่คัน และเสีย/ซ่อมกี่คัน</p>
+      <div id="tArea"></div></section>
+    <section class="panel w6"><div class="ph"><h3>แยกตามประเภทรถ</h3></div>
+      <p class="hint">💡 ดูว่ารถขนาดไหนว่างอยู่ จะได้รู้ว่ารับงานเพิ่มได้แบบไหน</p>
+      <div id="tType"></div></section>
+    <section class="panel w6"><div class="ph"><h3>รถไม่พร้อมใช้ — เพราะอะไร</h3><span class="sub" id="downSub"></span></div>
+      <p class="hint">💡 นับจากรหัสที่ลงไว้ในชีตของวันนั้น เช่น ซ่อมทั่วไป เช็คระยะ เสียระหว่างทาง</p>
+      <div id="cDown"></div></section>
+    <section class="panel w6"><div class="ph"><h3>พขร. ไม่พร้อม — เพราะอะไร</h3><span class="sub" id="pplSub"></span></div>
+      <p class="hint">💡 นับจากรหัสในแท็บข้อมูลพขร. ของวันนั้น เช่น ลา หยุด อบรม</p>
+      <div id="cPpl"></div></section>
+    <section class="panel w12"><div class="ph"><h3>รายคัน</h3><span class="sub" id="rowSub"></span>
+      <span class="grow"></span><input type="search" id="q" placeholder="ค้นหา เบอร์รถ / ทะเบียน / สถานะ" style="min-width:240px"></div>
+      <p class="hint">💡 เรียงจาก<b>ไม่พร้อมใช้</b> → <b>ว่างงาน</b> → <b>วิ่งงาน</b> เพื่อให้เห็นคันที่ต้องจัดการก่อน</p>
+      <div class="tw"><table><thead><tr><th>เบอร์รถ</th><th>พื้นที่</th><th>ประเภท</th><th>ทะเบียน</th><th>สถานะ</th><th>เหตุผล / รหัส</th><th>เที่ยว</th></tr></thead>
+        <tbody id="rows"></tbody></table></div></section>
+    <section class="panel w12"><div class="ph"><h3>รายชื่อ พขร.</h3><span class="sub" id="pSub"></span></div>
+      <p class="hint">💡 คนที่ว่างอยู่คือคนที่ยังไม่ถูกใส่ชื่อในแผนงานของวันนั้น</p>
+      <div class="tw" style="max-height:360px"><table><thead><tr><th>ชื่อ-สกุล</th><th>สถานะ</th><th>เหตุผล / รหัส</th><th>เที่ยว</th></tr></thead>
+        <tbody id="prows"></tbody></table></div></section>
+  </div>
+</main>
+<script>
+const K = {run: ['วิ่งงาน', 'var(--run)'], free: ['ว่างงาน', 'var(--free)'], nodriver: ['ไม่มีคนขับ', 'var(--nod)'], down: ['ไม่พร้อมใช้', 'var(--down)']};
+const PK = {run: ['มีงาน', 'var(--run)'], free: ['ว่าง', 'var(--free)'], down: ['ไม่พร้อม', 'var(--down)']};
+let REP = null;
+function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function iso(d){ return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+function n(v){ return v == null ? '–' : Number(v).toLocaleString('en-US'); }
+function pill(k, map){ const m = (map || K)[k] || ['ไม่ระบุ', 'var(--mut)']; return '<span class="pill" style="background:' + m[1] + '">' + m[0] + '</span>'; }
+function markPreset(){
+  const v = document.getElementById('d').value;
+  document.querySelectorAll('#presets button').forEach(b => {
+    const t = new Date(); t.setDate(t.getDate() + Number(b.dataset.p));
+    b.classList.toggle('on', iso(t) === v);
+  });
+}
+function tile(label, value, unit, sub, extra){
+  return '<div class="tile' + (extra || '') + '"><div class="l">' + label + '</div><div class="v">' + value +
+         (unit ? '<small>' + unit + '</small>' : '') + '</div><div class="s">' + (sub || '') + '</div></div>';
+}
+function grid(items, cols){
+  if(!items.length) return '<div class="empty">ไม่มีข้อมูล</div>';
+  return '<div class="tw" style="max-height:none"><table><thead><tr>' + cols.map(c => '<th>' + c[0] + '</th>').join('') + '</tr></thead><tbody>' +
+    items.map(it => '<tr>' + cols.map(c => '<td>' + c[1](it) + '</td>').join('') + '</tr>').join('') + '</tbody></table></div>';
+}
+function bars(items){
+  if(!items.length) return '<div class="empty">ไม่มี — พร้อมใช้ครบทุกคัน</div>';
+  const mx = Math.max(...items.map(i => i.n));
+  return '<div class="bars">' + items.map(i =>
+    '<div class="brow"><div class="blab" title="' + esc(i.name) + '">' + esc(i.name) + '</div>' +
+    '<div class="btrack"><i class="bfill" style="width:' + (i.n / mx * 100) + '%"></i></div>' +
+    '<div class="bval">' + i.n + '</div></div>').join('') + '</div>';
+}
+function render(){
+  const r = REP, c = r.cars, t = r.trips, p = r.people;
+  const seg = [['run', c.run], ['free', c.free], ['nodriver', c.nodriver], ['down', c.down]].filter(s => s[1] > 0);
+  const tot = c.total || 1;
+  document.getElementById('tiles').innerHTML =
+    '<div class="tile hero"><div class="l">🚦 รถพร้อมใช้งาน</div>' +
+    '<div class="v">' + n(c.ready) + '<small>/ ' + n(c.total) + ' คัน</small></div>' +
+    '<div class="pbar">' + seg.map(s => '<i style="width:' + (s[1] / tot * 100) + '%;background:' + K[s[0]][1] + '"></i>').join('') + '</div>' +
+    '<div class="leg2">' + [['run', c.run], ['free', c.free], ['nodriver', c.nodriver], ['down', c.down]].map(s =>
+      '<span><i class="dot" style="background:' + K[s[0]][1] + '"></i>' + K[s[0]][0] + ' <b>' + s[1] + '</b></span>').join('') + '</div>' +
+    '<div class="s" style="margin-top:8px">พร้อมใช้ ' + (c.pct_ready == null ? '–' : c.pct_ready + '%') + ' ของทั้งหมด · ' +
+      'ใช้งานจริง ' + (c.pct_used == null ? '–' : c.pct_used + '%') + ' ของรถที่พร้อม</div></div>' +
+    tile('🚚 วิ่งงาน', n(c.run), 'คัน', 'มีงานในแผนงานวันนี้') +
+    tile('🅿️ ว่างงาน', n(c.free + c.nodriver), 'คัน', c.nodriver ? 'ในนี้ไม่มีคนขับ ' + c.nodriver + ' คัน' : 'พร้อมใช้ แต่ยังไม่มีงาน') +
+    tile('🔧 ไม่พร้อมใช้', n(c.down), 'คัน', (r.notes.length ? '' : '') + (c.down_by[0] ? 'มากสุด: ' + esc(c.down_by[0].name) + ' ' + c.down_by[0].n + ' คัน' : 'ไม่มีรถเสีย')) +
+    tile('📦 งานทั้งหมด', n(t.total), 'เที่ยว', 'เฉลี่ย <b>' + (t.per_ready == null ? '–' : t.per_ready) + '</b> เที่ยว/คันพร้อมใช้ · ' +
+         'เฉพาะคันที่วิ่ง ' + (t.per_run == null ? '–' : t.per_run) + (t.cancelled ? ' · ยกเลิก ' + t.cancelled + ' งาน' : '')) +
+    tile(t.gap ? '🎯 ขาดอีก' : '🎯 ถึงเป้าแล้ว', t.goal ? n(t.gap) : '–', t.goal ? 'เที่ยว' : '',
+         t.goal ? 'เป้า ' + r.target + ' เที่ยว/คัน = ' + n(t.goal) + ' เที่ยว' : 'ยังไม่ได้ตั้งเป้า') +
+    tile('👷 พขร. พร้อมทำงาน', n(p.run + p.free), 'คน', 'มีงาน ' + p.run + ' · ว่าง ' + p.free + (p.down ? ' · ไม่พร้อม ' + p.down : ''));
+
+  const col = (k, cls) => (x => '<span style="color:' + cls + ';font-weight:600">' + x[k] + '</span>');
+  document.getElementById('tArea').innerHTML = grid(r.by_area, [['พื้นที่', x => esc(x.area)], ['ทั้งหมด', x => x.total],
+    ['วิ่งงาน', col('run', 'var(--run)')], ['ว่าง', col('free', 'var(--free)')], ['ไม่พร้อม', col('down', 'var(--down)')], ['เที่ยว', x => n(x.trips)]]);
+  document.getElementById('tType').innerHTML = grid(r.by_type, [['ประเภทรถ', x => esc(x.vtype)], ['ทั้งหมด', x => x.total],
+    ['วิ่งงาน', col('run', 'var(--run)')], ['ว่าง', col('free', 'var(--free)')], ['ไม่พร้อม', col('down', 'var(--down)')], ['เที่ยว', x => n(x.trips)]]);
+  document.getElementById('cDown').innerHTML = bars(c.down_by);
+  document.getElementById('downSub').textContent = c.down ? 'รวม ' + c.down + ' คัน' : '';
+  document.getElementById('cPpl').innerHTML = bars(p.down_by);
+  document.getElementById('pplSub').textContent = p.down ? 'รวม ' + p.down + ' คน' : '';
+  document.getElementById('pSub').textContent = 'ทั้งหมด ' + p.total + ' คน';
+  drawRows();
+  document.getElementById('prows').innerHTML = r.people_rows.map(x =>
+    '<tr><td>' + esc(x.name) + '</td><td>' + pill(x.kind, PK) + '</td><td>' + esc(x.why) + '</td><td>' + (x.trips || '–') + '</td></tr>').join('')
+    || '<tr><td colspan="4" class="empty">ไม่มีข้อมูล พขร.</td></tr>';
+  const nt = document.getElementById('notes');
+  nt.innerHTML = r.notes.length ? '<b>หมายเหตุจากการอ่านชีต</b><ul>' + r.notes.map(x => '<li>' + esc(x) + '</li>').join('') + '</ul>' : '';
+  nt.hidden = !r.notes.length;
+}
+function drawRows(){
+  const q = document.getElementById('q').value.trim().toLowerCase();
+  const list = REP.rows.filter(x => !q || (x.car + ' ' + x.plate + ' ' + x.why + ' ' + K[x.kind][0] + ' ' + x.area + ' ' + x.vtype).toLowerCase().includes(q));
+  document.getElementById('rowSub').textContent = list.length + ' คัน' + (q ? ' (จาก ' + REP.rows.length + ')' : '');
+  document.getElementById('rows').innerHTML = list.map(x =>
+    '<tr><td><b>' + esc(x.car) + '</b></td><td>' + esc(x.area) + '</td><td>' + esc(x.vtype) + '</td><td>' + esc(x.plate) + '</td>' +
+    '<td>' + pill(x.kind) + '</td><td>' + esc(x.why) + (x.why && x.code ? ' <span style="color:var(--mut)">(' + esc(x.code) + ')</span>' : '') + '</td>' +
+    '<td>' + (x.trips || '–') + '</td></tr>').join('') || '<tr><td colspan="7" class="empty">ไม่พบรถที่ตรงกับคำค้น</td></tr>';
+}
+async function load(){
+  const main = document.getElementById('main'), err = document.getElementById('err');
+  err.hidden = true; main.classList.add('busy');
+  const tg = document.getElementById('tg').value;
+  try{
+    localStorage.setItem('readyTarget', tg);
+    const res = await fetch('/api/report/ready?date=' + document.getElementById('d').value + '&target=' + encodeURIComponent(tg));
+    if(res.status === 401){ location.href = '/login'; return; }
+    if(!res.ok){ let m = 'HTTP ' + res.status; try{ m = (await res.json()).detail || m; }catch(e){} throw new Error(m); }
+    REP = await res.json();
+    render();
+    document.getElementById('stamp').textContent = 'สถานะจากชีตข้อมูลรถ+พขร. · งานจากชีตแผนงาน · อัปเดต ' +
+      new Date().toLocaleTimeString('th-TH', {hour: '2-digit', minute: '2-digit'});
+  }catch(e){ err.textContent = 'โหลดไม่สำเร็จ: ' + e.message; err.hidden = false; }
+  finally{ main.classList.remove('busy'); }
+}
+document.getElementById('d').value = iso(new Date());
+document.getElementById('tg').value = localStorage.getItem('readyTarget') || '2';
+document.getElementById('go').onclick = load;
+document.getElementById('q').oninput = () => { if(REP) drawRows(); };
+document.getElementById('d').onchange = () => { markPreset(); load(); };
+document.getElementById('tg').onchange = load;
+document.querySelectorAll('#presets button').forEach(b => b.onclick = () => {
+  const t = new Date(); t.setDate(t.getDate() + Number(b.dataset.p));
+  document.getElementById('d').value = iso(t); markPreset(); load();
+});
+markPreset(); load();
+</script>
+</body>
+</html>"""
+
+
 PLAN_HTML = """<!doctype html>
 <html lang="th">
 <head>
@@ -4705,6 +5249,7 @@ PLAN_HTML = """<!doctype html>
   <a class="menu" href="/">🚛 เช็กรถ</a>
   <a class="menu on" href="/plan">📋 แผนงาน</a>
   <a class="menu" href="/report">📊 รายงาน On Time</a>
+  <a class="menu" href="/ready">🚦 รถ/คนพร้อมใช้</a>
   <a class="menu out" href="/logout" title="ออกจากระบบ">🚪<span>ออกจากระบบ</span></a>
 </aside>
 <header><div class="bar">
@@ -6542,6 +7087,7 @@ DASHBOARD_HTML = """<!doctype html>
   <a class="menu on" href="/">🚛 เช็กรถ</a>
   <a class="menu" href="/plan">📋 แผนงาน</a>
   <a class="menu" href="/report">📊 รายงาน On Time</a>
+  <a class="menu" href="/ready">🚦 รถ/คนพร้อมใช้</a>
   <a class="menu out" href="/logout" title="ออกจากระบบ">🚪<span>ออกจากระบบ</span></a>
 </aside>
 <header>
