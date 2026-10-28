@@ -4309,7 +4309,7 @@ REPORT_HTML = """<!doctype html>
   .rband{background:color-mix(in srgb,var(--oc,var(--s1)) 28%,transparent)}
   .rdot{background:var(--oc,var(--s1))}
   .rend{background:var(--oc,var(--s1))}
-  .rname i,.blab i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px;vertical-align:1px;background:var(--oc,var(--s1))}
+  .rname i,.blab i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:8px;vertical-align:0;background:var(--oc,var(--s1))}
   .bfill{background:var(--oc,var(--s1))}
   /* หัวคอลัมน์: กดครั้งแรกเรียงน้อย→มาก กดอีกครั้งมาก→น้อย */
   th.cs{cursor:pointer;user-select:none}
@@ -4419,6 +4419,73 @@ REPORT_HTML = """<!doctype html>
   .tchart .pt{cursor:pointer}
   .tchart .lg{display:flex;gap:14px;font-size:13px;color:var(--ink2);margin-top:4px}
   .tchart .lg i{display:inline-block;width:14px;height:3px;border-radius:2px;vertical-align:middle;margin-right:6px}
+  /* ── หน้าตาชุดเดียวกับหน้า รถ/คนพร้อมใช้: การ์ดเรียบ สี่เหลี่ยมสีบอกกลุ่ม แท่งต่อกันมีช่อง 2px ปลายมน 4px ── */
+  :root{--track:#eef0f3;--bar:#5b6b82}
+  @media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){--track:#242422;--bar:#8d9bb0}}
+  :root[data-theme="dark"]{--track:#242422;--bar:#8d9bb0}
+  body{font-size:15px}
+  .key{display:inline-block;width:10px;height:10px;border-radius:3px;flex:0 0 auto}
+  .tile{padding:16px 18px;border-radius:12px}
+  .tile::before{display:none}
+  .tile .l{font-size:13.5px;color:var(--ink2);font-weight:600;gap:8px}
+  .tile .v{font-size:30px;line-height:1.1;margin-top:8px;letter-spacing:-.4px}
+  .tile .v small{font-size:14px}
+  .tile .s{font-size:13px;line-height:1.5;margin-top:4px}
+  .tile.hero{background:var(--card)}
+  .hero .v{font-size:48px;line-height:1.05;letter-spacing:-.8px}
+  .hero .v small{font-size:16px;margin-left:6px}
+  .pbar{gap:2px;height:22px;border-radius:0 4px 4px 0;background:none;margin:14px 0 10px}
+  .pbar i{display:flex;align-items:center;justify-content:center;font-style:normal;font-size:12px;font-weight:700;min-width:3px;overflow:hidden;white-space:nowrap;cursor:pointer}
+  .pbar i b{padding:0 4px}
+  .leg2{gap:6px 18px;font-size:13.5px}
+  .leg2 span{display:inline-flex;align-items:center;gap:7px;white-space:nowrap}
+  .leg2 em{font-style:normal;color:var(--mut)}
+  .panel{padding:16px 18px 14px;border-radius:12px}
+  .ph{margin-bottom:2px}
+  .ph h3{font-size:15.5px;white-space:nowrap}
+  .ph .sub{font-size:13px}
+  .legend{font-size:13.5px;gap:6px 18px;flex:0 0 auto}
+  .legend span{display:inline-flex;align-items:center;white-space:nowrap}
+  .hint{background:none;padding:0;margin:2px 0 12px;font-size:13px;line-height:1.5;color:var(--mut);border-radius:0}
+  .hint b{color:var(--ink2);font-weight:600}
+  .stack{gap:2px;height:22px;border-radius:0 4px 4px 0;margin:6px 0 14px}
+  .clist{font-size:14px}
+  .btrack{height:26px}
+  .bfill{top:7px;height:12px;border-radius:0 4px 4px 0}
+  .blab{font-size:14px}
+  .bval{font-size:13.5px}
+  .brow.on > *,.rrow.on > *{background:var(--hover)}
+  .oc{gap:0}
+  .orow{border:0;border-bottom:1px solid var(--hair);border-radius:0;padding:10px 4px;background:transparent;min-height:58px}
+  .orow:last-child{border-bottom:0}
+  .orow.on{box-shadow:none;background:var(--hover)}
+  .orow .on1{font-size:15px}
+  .orow .otr{gap:2px;height:22px;border-radius:0 4px 4px 0;background:none}
+  .orow .osg{font-size:12px}
+  .orow .osg.l{box-shadow:none}
+  .orow .omm .w b,.orow .omm .l b{color:var(--ink)}
+  .orow .omm span::before{content:'';display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:6px;vertical-align:0}
+  .orow .omm .w::before{background:var(--wc)} .orow .omm .l::before{background:var(--lc)}
+  .orow .oav b{font-size:24px}
+  .dgrid{gap:16px}
+  .dgrp{border-radius:10px;box-shadow:none}
+  .dgh{border-top:0;border-bottom:1px solid var(--hair);background:var(--card)}
+  .dgh:hover{background:var(--hover)}
+  .dgh.on{box-shadow:none;background:var(--hover)}
+  .dgh .nm{display:flex;align-items:center;gap:8px}
+  .dgh .nm::before{content:'';width:10px;height:10px;border-radius:3px;background:var(--oc);flex:0 0 auto}
+  .dgh .st b{font-size:17px}
+  .tchart h4{font-size:14px;font-weight:700}
+  .tchart .lg{gap:16px}
+  .tchart .lg i{width:14px;height:2px}
+  #tip{background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:10px;box-shadow:0 6px 20px rgba(16,24,40,.16);padding:9px 12px;font-size:13px;line-height:1.55}
+  .tw{border-radius:10px}
+  th{font-size:12.5px;font-weight:600;letter-spacing:0}
+  .pill{background:none !important;padding:0;color:var(--ink) !important;font-weight:600;gap:7px}
+  .pill::before{content:'';width:9px;height:9px;border-radius:50%;display:inline-block}
+  .pill.ok::before{background:var(--good)} .pill.bad::before{background:var(--crit)}
+  .chip.f{font-size:13px}
+  @media (max-width:820px){ .tile .v{font-size:26px} .hero .v{font-size:42px} .orow .oav b{font-size:20px} }
   [hidden]{display:none !important}
 </style>
 </head>
@@ -4454,27 +4521,27 @@ REPORT_HTML = """<!doctype html>
   <div class="cmpnote" id="cmpNote"></div>
   <div class="tiles" id="tiles"></div>
   <section class="panel" id="trendP" hidden style="margin-bottom:12px"><div class="ph"><h3>แนวโน้มรายวัน</h3><span class="sub" id="trendSub"></span></div>
-    <p class="hint">💡 ดูว่าแต่ละวันเพิ่มขึ้นหรือลดลง · <b>On Time ยิ่งสูงยิ่งดี</b> · <b>เวลารอโหลด/โหลด ยิ่งต่ำยิ่งดี</b> · ชี้ที่จุดเพื่อดูตัวเลข</p>
+    <p class="hint">ดูว่าแต่ละวันเพิ่มขึ้นหรือลดลง · <b>On Time ยิ่งสูงยิ่งดี</b> · <b>เวลารอโหลด/โหลด ยิ่งต่ำยิ่งดี</b> · ชี้ที่จุดเพื่อดูตัวเลข</p>
     <div class="tgrid"><div class="tchart" id="tOt"></div><div class="tchart" id="tWl"></div></div></section>
   <div class="panels">
     <section class="panel w8 fillp"><div class="ph"><h3>เวลารอโหลด + โหลดสินค้า แยกตามต้นทาง</h3><span class="sub">นาที (เฉลี่ย)</span>
       <div class="legend"><span><i class="lw"></i>รอโหลดสินค้า</span><span><i class="ll"></i>โหลดสินค้า</span></div></div>
-      <p class="hint">💡 แท่งเดียวต่อกัน: <b style="color:var(--wc)">ม่วง = รอโหลด</b> (เข้าลาน → เริ่มโหลด) ต่อด้วย <b style="color:var(--lc)">ชมพู = โหลด</b> (เริ่มโหลด → โหลดเสร็จ) · ตัวเลขขวา = รวมเวลาอยู่ที่ต้นทาง · <b>แท่งยิ่งยาว = อยู่นาน</b> · กดแถวเพื่อกรอง</p>
+      <p class="hint">แท่งเดียวต่อกัน: <b style="color:var(--wc)">ม่วง = รอโหลด</b> (เข้าลาน → เริ่มโหลด) ต่อด้วย <b style="color:var(--lc)">ชมพู = โหลด</b> (เริ่มโหลด → โหลดเสร็จ) · ตัวเลขขวา = รวมเวลาอยู่ที่ต้นทาง · <b>แท่งยิ่งยาว = อยู่นาน</b> · กดแถวเพื่อกรอง</p>
       <div id="cOrigin"></div></section>
     <div class="w4 col2">
       <section class="panel"><div class="ph"><h3>สัดส่วนตามระยะทาง</h3></div>
-        <p class="hint">💡 งานแบ่งตามระยะทางต้นทาง → ปลายทาง: <b>ใกล้</b> ไม่เกิน 80 กม. · <b>กลาง</b> 81–250 · <b>ไกล</b> เกิน 250 กม. · กดสีเพื่อกรอง</p>
+        <p class="hint">งานแบ่งตามระยะทางต้นทาง → ปลายทาง: <b>ใกล้</b> ไม่เกิน 80 กม. · <b>กลาง</b> 81–250 · <b>ไกล</b> เกิน 250 กม. · กดสีเพื่อกรอง</p>
         <div id="cClass"></div></section>
-      <section class="panel"><div class="ph"><h3>จำนวนเที่ยวตามประเภทรถ</h3></div><p class="hint">💡 รถแต่ละขนาดวิ่งไปกี่เที่ยวในช่วงวันที่ที่เลือก</p><div id="cVtype"></div></section>
+      <section class="panel"><div class="ph"><h3>จำนวนเที่ยวตามประเภทรถ</h3></div><p class="hint">รถแต่ละขนาดวิ่งไปกี่เที่ยวในช่วงวันที่ที่เลือก</p><div id="cVtype"></div></section>
     </div>
-    <section class="panel w12"><div class="ph"><h3>สรุปตามต้นทาง</h3><span class="sub">นาที</span></div><p class="hint">💡 <b>รอโหลด</b> = เข้าลาน → เริ่มโหลด · <b>โหลด</b> = เริ่มโหลด → โหลดเสร็จ · ต่ำสุด / สูงสุด / เฉลี่ย ของแต่ละต้นทาง · กดหัวคอลัมน์เพื่อเรียง</p>
+    <section class="panel w12"><div class="ph"><h3>สรุปตามต้นทาง</h3><span class="sub">นาที</span></div><p class="hint"><b>รอโหลด</b> = เข้าลาน → เริ่มโหลด · <b>โหลด</b> = เริ่มโหลด → โหลดเสร็จ · ต่ำสุด / สูงสุด / เฉลี่ย ของแต่ละต้นทาง · กดหัวคอลัมน์เพื่อเรียง</p>
       <div class="tw" style="max-height:none"><table><thead><tr class="grp"><th colspan="2"></th><th colspan="3" class="gw">⏳ เวลารอโหลดสินค้า (นาที)</th><th colspan="3" class="gl">⛽ เวลาโหลดสินค้า (นาที)</th></tr><tr id="oHead"></tr></thead><tbody id="tOrigin"></tbody></table></div></section>
-    <section class="panel w6"><div class="ph"><h3>สาเหตุ On Time / ล่าช้า</h3><span class="sub" id="whySub"></span></div><p class="hint">💡 จากคอลัมน์ <b>สาเหตุ On Time</b> ในชีต · นับเป็นจำนวนงาน · กดชื่อสาเหตุเพื่อดูงานนั้น</p><div id="cWhy"></div></section>
-    <section class="panel w6"><div class="ph"><h3>สาเหตุแก้ไขงาน</h3><span class="sub" id="fixSub"></span></div><p class="hint">💡 จากคอลัมน์ <b>สาเหตุแก้ไขงาน</b> ในชีต · เช่น ลูกค้ายกเลิก, ปลายทางใหม่ · กดชื่อสาเหตุเพื่อดูงานนั้น</p><div id="cFix"></div></section>
-    <section class="panel w12"><div class="ph"><h3>เวลาที่อยู่ในสถานี (เฉลี่ย)</h3><span class="sub">นาที</span></div><p class="hint">💡 รถจอดอยู่ที่ปลายทางนานเท่าไร (<b>ถึงปลายทาง → ออกจากปลายทาง</b>) แยกตามประเภทงาน · <b>ตัวเลขมาก = ลงของนาน</b> · เรียงจากนานสุดลงมา · กดหัวการ์ดหรือชื่อปลายทางเพื่อกรอง</p><div id="cDest"></div></section>
+    <section class="panel w6"><div class="ph"><h3>สาเหตุ On Time / ล่าช้า</h3><span class="sub" id="whySub"></span></div><p class="hint">จากคอลัมน์ <b>สาเหตุ On Time</b> ในชีต · นับเป็นจำนวนงาน · กดชื่อสาเหตุเพื่อดูงานนั้น</p><div id="cWhy"></div></section>
+    <section class="panel w6"><div class="ph"><h3>สาเหตุแก้ไขงาน</h3><span class="sub" id="fixSub"></span></div><p class="hint">จากคอลัมน์ <b>สาเหตุแก้ไขงาน</b> ในชีต · เช่น ลูกค้ายกเลิก, ปลายทางใหม่ · กดชื่อสาเหตุเพื่อดูงานนั้น</p><div id="cFix"></div></section>
+    <section class="panel w12"><div class="ph"><h3>เวลาที่อยู่ในสถานี (เฉลี่ย)</h3><span class="sub">นาที</span></div><p class="hint">รถจอดอยู่ที่ปลายทางนานเท่าไร (<b>ถึงปลายทาง → ออกจากปลายทาง</b>) แยกตามประเภทงาน · <b>ตัวเลขมาก = ลงของนาน</b> · เรียงจากนานสุดลงมา · กดหัวการ์ดหรือชื่อปลายทางเพื่อกรอง</p><div id="cDest"></div></section>
     <section class="panel w12" data-nosnap="1"><div class="tools"><h3 style="margin:0;font-size:16px">รายการทั้งหมด</h3><span class="sub" id="rowCount" style="font-size:14px;color:var(--mut)"></span><span class="grow"></span>
       <input type="search" id="q" placeholder="ค้นหา รถ / ปลายทาง / ออเดอร์" style="min-width:260px"></div>
-      <p class="hint">💡 ทุกงาน (drop) ในช่วงวันที่ที่เลือก · <b>กดหัวคอลัมน์</b> เพื่อเรียงน้อย→มาก / มาก→น้อย · <b>กดเบอร์รถ</b> เพื่อดูเฉพาะคันนั้น · ช่องค้นหาด้านบนพิมพ์เบอร์รถ/ปลายทาง/ออเดอร์ได้</p>
+      <p class="hint">ทุกงาน (drop) ในช่วงวันที่ที่เลือก · <b>กดหัวคอลัมน์</b> เพื่อเรียงน้อย→มาก / มาก→น้อย · <b>กดเบอร์รถ</b> เพื่อดูเฉพาะคันนั้น · ช่องค้นหาด้านบนพิมพ์เบอร์รถ/ปลายทาง/ออเดอร์ได้</p>
       <div class="tw"><table><thead><tr id="rowsHead"></tr></thead>
         <tbody id="rows"></tbody></table></div>
 </section>
@@ -4547,7 +4614,7 @@ function renderActive(){
     '<button class="chip" data-clr="*">ล้างตัวกรองทั้งหมด</button>' : '';
 }
 function tile(label, value, unit, sub, extra, color, icon, delta){
-  return '<div class="tile' + (extra || '') + '" style="--tc:' + (color || '#2a78d6') + '"><div class="l">' + (icon ? '<span class="ic">' + icon + '</span>' : '') + label + '</div><div class="v">' + value + (unit ? '<small>' + unit + '</small>' : '') + '</div>' +
+  return '<div class="tile' + (extra || '') + '"><div class="l">' + (color ? '<i class="key" style="background:' + color + '"></i>' : '') + label + '</div><div class="v">' + value + (unit ? '<small>' + unit + '</small>' : '') + '</div>' +
     (sub ? '<div class="s">' + sub + '</div>' : '') + (delta || '') + '</div>';
 }
 // เทียบกับช่วงก่อน: better = 'low' (ต่ำดี เช่น นาที) / 'high' (สูงดี เช่น %) / '' (แค่บอกขึ้นลง)
@@ -4573,7 +4640,7 @@ function lineChart(elId, title, days, series, unit, yMax){
   series.forEach(sr => {
     let path = '', pen = false;
     days.forEach((d, i) => { const v = sr.get(d); if(v == null){ pen = false; return; } path += (pen ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(v).toFixed(1); pen = true; });
-    g += '<path d="' + path + '" fill="none" stroke="' + sr.color + '" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>';
+    g += '<path d="' + path + '" fill="none" stroke="' + sr.color + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
     days.forEach((d, i) => { const v = sr.get(d); if(v == null) return;
       const tip = dmy(d.date) + ' · ' + sr.name + ' ' + (unit === '%' ? num(v, 1) : num(v)) + unit + (sr.extra ? ' · ' + sr.extra(d) : '');
       g += '<circle class="pt" cx="' + x(i) + '" cy="' + y(v) + '" r="4" fill="' + sr.color + '" style="stroke:var(--card)" stroke-width="2" data-tip="' + esc(tip) + '"/>' +
@@ -4600,14 +4667,16 @@ function render(){
   const k = REP.kpi, judged = k.pass + k.delay, pct = judged ? k.pass / judged * 100 : null, pk = REP.prev ? REP.prev.kpi : {}, tgt = REP.target || 95;
   document.getElementById('cmpNote').textContent = REP.prev ? 'เพิ่มขึ้น / ลดลง = เทียบกับช่วงก่อน: ' + (REP.prev.from === REP.prev.to ? dmy(REP.prev.from) : dmy(REP.prev.from) + ' – ' + dmy(REP.prev.to)) : '';
   document.getElementById('tiles').innerHTML =
-    '<div class="tile hero" style="' + (pct != null && pct < tgt ? '--hb:var(--crit-bg);--hc:var(--crit)' : '') + '"><div class="l"><span class="ic" style="background:var(--good-bg)">⏱️</span>On Time</div><div class="v">' + (pct == null ? '–' : Math.round(pct * 10) / 10 + '%') + '</div>' +
-      '<div class="pbar" data-tip="PASS ' + k.pass + ' · Delay ' + k.delay + '"><i style="width:' + (pct || 0) + '%;background:var(--good)"></i><i style="width:' + (judged ? 100 - pct : 0) + '%;background:var(--crit)"></i></div>' +
-      '<div class="leg2"><span data-k="status" data-v="PASS"><span class="ico" style="background:var(--good)">✓</span>PASS <b>' + num(k.pass, 0) + '</b></span>' +
-      '<span data-k="status" data-v="Delay"><span class="ico" style="background:var(--crit)">!</span>Delay <b>' + num(k.delay, 0) + '</b></span>' +
-      '<span style="cursor:default;color:var(--mut)">จาก ' + num(judged, 0) + ' drop ที่มีผลในชีต</span></div>' +
+    '<div class="tile hero"><div class="l">On Time · ' + (REP.from === REP.to ? dmy(REP.from) : dmy(REP.from) + ' – ' + dmy(REP.to)) + '</div>' +
+      '<div class="v">' + (pct == null ? '–' : Math.round(pct * 10) / 10 + '%') + '<small>จาก ' + num(judged, 0) + ' drop ที่มีผลในชีต</small></div>' +
+      '<div class="pbar">' + (judged ? [['PASS', k.pass, 'var(--good)', '#0b0b0b'], ['Delay', k.delay, 'var(--crit)', '#fff']].filter(x => x[1] > 0).map(x =>
+        '<i data-k="status" data-v="' + x[0] + '" data-tip="' + esc(x[0] + ' ' + x[1] + ' drop (' + Math.round(x[1] / judged * 100) + '%)') + '" style="flex:' + x[1] + ' 1 0;background:' + x[2] + ';color:' + x[3] + '"><b>' + x[1] + '</b></i>').join('')
+        : '<i style="flex:1;background:var(--track)"></i>') + '</div>' +
+      '<div class="leg2"><span data-k="status" data-v="PASS"><i class="key" style="background:var(--good)"></i>PASS <b>' + num(k.pass, 0) + '</b><em>' + (judged ? Math.round(k.pass / judged * 100) + '%' : '') + '</em></span>' +
+      '<span data-k="status" data-v="Delay"><i class="key" style="background:var(--crit)"></i>Delay <b>' + num(k.delay, 0) + '</b><em>' + (judged ? Math.round(k.delay / judged * 100) + '%' : '') + '</em></span></div>' +
       (pct == null ? '' : '<div class="dl ' + (pct >= tgt ? 'good' : 'bad') + '" data-tip="' + esc('เป้า On Time ' + tgt + '% ขึ้นไป' + (REP.prev && pctOf(REP.prev.kpi) != null ? ' · ช่วงก่อน ' + num(pctOf(REP.prev.kpi), 1) + '%' : '')) + '">' +
-        (pct >= tgt ? 'ผ่านเป้า ' + tgt + '%' : 'ต่ำกว่าเป้า ' + tgt + '%') + '</div>') +
-      '<div class="s" style="margin-top:6px">💡 <b>PASS</b> = ส่งถึงลูกค้าไม่ช้าเกิน 30 นาที · <b>Delay</b> = ช้าเกิน 30 นาที · <b>เป้า ' + tgt + '% ขึ้นไป</b></div></div>' +
+        (pct >= tgt ? '✓ ผ่านเป้า ' + tgt + '%' : '⚠ ต่ำกว่าเป้า ' + tgt + '%') + '</div>') +
+      '<div class="s" style="margin-top:6px"><b>PASS</b> = ส่งถึงลูกค้าไม่ช้าเกิน 30 นาที · <b>Delay</b> = ช้าเกิน 30 นาที · <b>เป้า ' + tgt + '% ขึ้นไป</b></div></div>' +
     tile('จำนวนเที่ยว', num(k.trips, 0), '', REP.from === REP.to ? dmy(REP.from) : dmy(REP.from) + ' – ' + dmy(REP.to), '', '#2a78d6', '🚚', delta(k.trips, pk.trips, ' เที่ยว', 'high')) +
     tile('งานทั้งหมด (drop)', num(REP.n_rows, 0), '', 'จุดส่งทั้งหมด · มีผล On Time ' + num(judged, 0), '', '#6250d6', '📦', delta(REP.n_rows, REP.prev && REP.prev.n_rows, ' drop', 'high')) +
     tile('รอโหลดสินค้า (เฉลี่ย)', num(k.wait), 'นาที', sub2('เข้าลาน → เริ่มโหลด', k.wait), '', '#7c5cd6', '⏳', delta(k.wait, pk.wait, ' นาที', 'low')) +
@@ -4698,28 +4767,20 @@ const JCOL = {'OLP : Station': '#2a78d6', 'ลูกค้า : Industry': '#eb6
               'ลูกค้า : Station': '#e87ba4', 'ลูกค้า : โรงบรรจุ': '#008300'};
 function jname(j){ return j || '(ไม่ระบุ)'; }
 function jcol(j){ return j ? (JCOL[j] || hashc(j)) : '#9ca3af'; }
-// กราฟวงกลม (โดนัท) สาเหตุ: 5 อันดับแรก + อื่นๆ (ชี้ที่ "อื่นๆ" เพื่อดูรายการ)
-const PCOL = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#9ca3af'];
+// สาเหตุ: แท่งแนวนอนเรียงมาก→น้อย 8 อันดับแรก + อื่นๆ (ชี้ที่ "อื่นๆ" เพื่อดูรายการ) · กดชื่อเพื่อกรอง
 function donut(elId, subId, list, key, unitWord){
-  const el = document.getElementById(elId), tot = list.reduce((a, x) => a + x.n, 0), sel = getF(key);
+  const el = document.getElementById(elId), tot = list.reduce((a, x) => a + x.n, 0), sel = getF(key), TOP = 8;
   document.getElementById(subId).textContent = tot ? num(tot, 0) + ' งาน · ' + list.length + ' สาเหตุ' : '';
   if(!tot){ el.innerHTML = '<div class="empty">ไม่มีการบันทึกสาเหตุในช่วงวันที่นี้</div>'; return; }
-  const top = list.slice(0, 5), rest = list.slice(5);
-  const parts = top.map((x, i) => ({t: x.why, n: x.n, c: PCOL[i], k: key, x: x}));
-  if(rest.length) parts.push({t: 'อื่นๆ (' + rest.length + ' สาเหตุ)', n: rest.reduce((a, x) => a + x.n, 0), c: PCOL[5],
-    tip: rest.map(x => x.why + ' ' + x.n).join(' · ')});
-  const R = 70, C = 2 * Math.PI * R; let off = 0;
-  const arcs = parts.map(p => {
-    const len = p.n / tot * C, gap = parts.length > 1 ? Math.min(2, len / 3) : 0;
+  const parts = list.slice(0, TOP).map(x => ({t: x.why, n: x.n, k: key, x: x})), rest = list.slice(TOP);
+  if(rest.length) parts.push({t: 'อื่นๆ (' + rest.length + ' สาเหตุ)', n: rest.reduce((a, x) => a + x.n, 0), tip: rest.map(x => x.why + ' ' + x.n).join(' · ')});
+  const mx = Math.max.apply(null, parts.map(p => p.n));
+  el.innerHTML = '<div class="bars">' + parts.map(p => {
     const tip = p.tip || (p.t + ' · ' + p.n + ' งาน (' + Math.round(p.n / tot * 100) + '%)' + (p.x && p.x.delay != null ? ' · Delay ' + p.x.delay : '') + (p.x && p.x.cancel ? ' · ยกเลิก ' + p.x.cancel : ''));
-    const h = '<circle r="' + R + '" cx="95" cy="95" fill="none" stroke="' + p.c + '" stroke-width="' + (sel && sel === p.t ? 34 : 28) + '" stroke-dasharray="' + Math.max(0.5, len - gap) + ' ' + (C - len + gap) +
-      '" stroke-dashoffset="' + (-off) + '" transform="rotate(-90 95 95)"' + (p.k ? ' data-k="' + p.k + '" data-v="' + esc(p.t) + '"' : '') + ' data-tip="' + esc(tip) + '"></circle>';
-    off += len; return h;
-  }).join('');
-  el.innerHTML = '<div class="pie"><svg viewBox="0 0 190 190" role="img" aria-label="สาเหตุ">' + arcs +
-    '<text x="95" y="93" text-anchor="middle" class="ctr1">' + num(tot, 0) + '</text><text x="95" y="113" text-anchor="middle" class="ctr2">' + unitWord + '</text></svg>' +
-    '<div class="plist">' + parts.map(p => '<div class="pr' + (sel && sel === p.t ? ' on' : '') + '"' + (p.k ? ' data-k="' + p.k + '" data-v="' + esc(p.t) + '"' : '') + (p.tip ? ' data-tip="' + esc(p.tip) + '"' : '') + '>' +
-      '<span class="sw" style="background:' + p.c + '"></span><span>' + esc(p.t) + '</span><span class="n">' + p.n + '</span><span class="pc">' + Math.round(p.n / tot * 100) + '%</span></div>').join('') + '</div></div>';
+    return '<div class="brow' + (sel && sel === p.t ? ' on' : '') + '" style="--oc:var(--bar)"' + (p.k ? ' data-k="' + p.k + '" data-v="' + esc(p.t) + '"' : '') + ' data-tip="' + esc(tip) + '">' +
+      '<div class="blab" title="' + esc(p.t) + '">' + esc(p.t) + '</div><div class="btrack"><div class="bfill" style="width:' + Math.max(0.5, p.n / mx * 100) + '%"></div></div>' +
+      '<div class="bval"><b>' + p.n + '</b> · ' + Math.round(p.n / tot * 100) + '%</div></div>';
+  }).join('') + '</div>';
 }
 function drawWhy(){ donut('cWhy', 'whySub', REP.by_why || [], 'why', 'งานที่มีสาเหตุ'); donut('cFix', 'fixSub', REP.by_fix || [], 'fix', 'งานที่แก้ไข'); }
 function drawDest(){
