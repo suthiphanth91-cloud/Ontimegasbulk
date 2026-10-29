@@ -3539,7 +3539,9 @@ READY_CAR_TAB    = os.environ.get("READY_CAR_TAB", "ข้อมูลรถ")
 READY_DRIVER_TAB = os.environ.get("READY_DRIVER_TAB", "ข้อมูลพขร.")
 # แถวแรกของข้อมูล (เลขแถวในชีต) — แถวระหว่างหัวตารางกับแถวนี้ไม่ใช่รถ/คนที่ต้องนับ
 READY_CAR_FIRST_ROW    = int(os.environ.get("READY_CAR_FIRST_ROW", "20") or 0)
-READY_DRIVER_FIRST_ROW = int(os.environ.get("READY_DRIVER_FIRST_ROW", "39") or 0)
+# พขร.: นับจากคอลัมน์ "สถานะ" = พนักงาน (เหมือนกรองในชีต) ไม่ใช้เลขแถว เพราะพนักงานอยู่ปนกับคนลาออกตั้งแต่ใต้หัวตาราง
+READY_DRIVER_FIRST_ROW = int(os.environ.get("READY_DRIVER_FIRST_ROW", "0") or 0)
+READY_DRIVER_STATUS    = os.environ.get("READY_DRIVER_STATUS", "พนักงาน")   # นับเฉพาะ พขร. ที่คอลัมน์ "สถานะ" เป็นค่านี้
 READY_TARGET     = float(os.environ.get("READY_TARGET", "2") or 2)   # เป้าเที่ยวต่อรถพร้อมใช้ 1 คันต่อวัน (หน้าเว็บแก้ได้)
 READY_TREND_DAYS = 14                                                 # กราฟแนวโน้มย้อนหลังกี่วัน (นับวันที่เลือกด้วย)
 _ready_parse_memo: dict = {}                                          # แท็บ → (ตารางที่อ่านมา, ผลแยกหัว/รหัส) ไม่ต้องแยกซ้ำทุกวันของกราฟ
@@ -3781,12 +3783,18 @@ def build_ready_report(date_iso: str, plan_rows: list, target: float) -> dict:
         notes.append(ds["note"])
     d_legend = ds["legend"]
     d_left = _ready_col(ds["head"], "วันที่พ้นสภาพ", "พ้นสภาพ")
+    d_stat = next((i for i, c in enumerate(ds["head"]) if c == "สถานะ"), None)   # คอลัมน์สถานะการจ้าง (พนักงาน / ลาออก ฯลฯ)
+    if ds["head"] and d_stat is None:
+        notes.append(f"แท็บ “{READY_DRIVER_TAB}” ไม่พบคอลัมน์ “สถานะ” — นับทุกคนที่ยังไม่มีวันพ้นสภาพแทน")
     people, dseen = [], set()
     for r in ds["rows"]:
         name = r["key"]
         if name in _NO_PERSON or name in dseen:
             continue
-        if d_left is not None and _cell(r["cells"], d_left):      # มีวันพ้นสภาพ = ลาออกแล้ว ไม่นับ
+        if d_stat is not None:                                     # นับเฉพาะสถานะ "พนักงาน" ตามยอดรวมในชีต
+            if _cell(r["cells"], d_stat) != READY_DRIVER_STATUS:
+                continue
+        elif d_left is not None and _cell(r["cells"], d_left):    # ไม่มีคอลัมน์สถานะ: มีวันพ้นสภาพ = ลาออกแล้ว ไม่นับ
             continue
         dseen.add(name)
         code = r["code"]
