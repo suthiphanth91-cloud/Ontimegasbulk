@@ -3537,6 +3537,9 @@ def report_ontime(date_from: str = Query(None, alias="from"), date_to: str = Que
 # "วิ่งงาน" ยึดจากชีตแผนงานเสมอ ไม่ยึดรหัส R เพราะวันที่ยังไม่ถึงชีตยังไม่ได้ลง R (วันที่ 29–30 ยังเป็น W ทั้งคอลัมน์)
 READY_CAR_TAB    = os.environ.get("READY_CAR_TAB", "ข้อมูลรถ")
 READY_DRIVER_TAB = os.environ.get("READY_DRIVER_TAB", "ข้อมูลพขร.")
+# แถวแรกของข้อมูล (เลขแถวในชีต) — แถวระหว่างหัวตารางกับแถวนี้ไม่ใช่รถ/คนที่ต้องนับ
+READY_CAR_FIRST_ROW    = int(os.environ.get("READY_CAR_FIRST_ROW", "20") or 0)
+READY_DRIVER_FIRST_ROW = int(os.environ.get("READY_DRIVER_FIRST_ROW", "39") or 0)
 READY_TARGET     = float(os.environ.get("READY_TARGET", "2") or 2)   # เป้าเที่ยวต่อรถพร้อมใช้ 1 คันต่อวัน (หน้าเว็บแก้ได้)
 READY_TREND_DAYS = 14                                                 # กราฟแนวโน้มย้อนหลังกี่วัน (นับวันที่เลือกด้วย)
 _ready_parse_memo: dict = {}                                          # แท็บ → (ตารางที่อ่านมา, ผลแยกหัว/รหัส) ไม่ต้องแยกซ้ำทุกวันของกราฟ
@@ -3634,8 +3637,9 @@ def _ready_grid(rows: list, need: list) -> tuple:
     return h, ix, days
 
 
-def _ready_sheet(tab: str, need: list, date_iso: str) -> dict:
-    """อ่านแท็บสถานะรายวันหนึ่งแท็บ → {rows: [{key, code, cells}], legend, head, ix, has_day, note}"""
+def _ready_sheet(tab: str, need: list, date_iso: str, first_row: int = 0) -> dict:
+    """อ่านแท็บสถานะรายวันหนึ่งแท็บ → {rows: [{key, code, cells}], legend, head, ix, has_day, note}
+    first_row = แถวแรกของข้อมูลตามเลขแถวในชีต (เช่น 20) — แถวเหนือขึ้นไปไม่นับ แม้อยู่ใต้หัวตาราง"""
     sid = CARS_SHEET_ID or PLAN_PAGE_ID
     try:
         grid = _fetch_sheet(sid, tab)
@@ -3643,22 +3647,23 @@ def _ready_sheet(tab: str, need: list, date_iso: str) -> dict:
         return {"rows": [], "legend": {}, "head": [], "ix": {}, "has_day": False,
                 "note": f"อ่านแท็บ “{tab}” ไม่ได้ — {type(e).__name__} (ต้องแชร์ชีตให้บัญชีของเว็บแบบผู้ดู)"}
     memo = _ready_parse_memo.get(tab)
-    if memo and memo[0] is grid:              # ตารางเดิมจากแคช → ใช้ผลแยกหัว/รหัสเดิม
+    if memo and memo[0] is grid and memo[2] == first_row:   # ตารางเดิมจากแคช → ใช้ผลแยกหัว/รหัสเดิม
         h, ix, days, legend = memo[1]
     else:
         h, ix, days = _ready_grid(grid, need)
         legend = {}
         if h is not None:
             day_cols = set(days.values())
-            used = {_cell(r, c).upper() for r in grid[h + 1:] for c in day_cols if _cell(r, c)}
+            start = max(h + 1, first_row - 1)
+            used = {_cell(r, c).upper() for r in grid[start:] for c in day_cols if _cell(r, c)}
             legend = _ready_legend(grid[:h], used)
-        _ready_parse_memo[tab] = (grid, (h, ix, days, legend))
+        _ready_parse_memo[tab] = (grid, (h, ix, days, legend), first_row)
     if h is None:
         return {"rows": [], "legend": {}, "head": [], "ix": {}, "has_day": False,
                 "note": f"แท็บ “{tab}” ไม่พบหัวตาราง ({' + '.join(need)}) จึงยังสรุปจากแท็บนี้ไม่ได้"}
     col = days.get(date_iso)
     out = []
-    for r in grid[h + 1:]:
+    for r in grid[max(h + 1, first_row - 1):]:
         key = _cell(r, ix[need[0]])
         if key:
             out.append({"key": key, "cells": r, "code": (_cell(r, col).upper() if col is not None else "")})
@@ -3718,7 +3723,7 @@ def build_ready_report(date_iso: str, plan_rows: list, target: float) -> dict:
     notes: list = []
 
     # ── รถ ──
-    cs = _ready_sheet(READY_CAR_TAB, ["เบอร์รถ", "ทะเบียนรถ"], date_iso)
+    cs = _ready_sheet(READY_CAR_TAB, ["เบอร์รถ", "ทะเบียนรถ"], date_iso, READY_CAR_FIRST_ROW)
     if cs["note"]:
         notes.append(cs["note"])
     legend = dict(cs["legend"])
@@ -3771,7 +3776,7 @@ def build_ready_report(date_iso: str, plan_rows: list, target: float) -> dict:
     goal = round(target * len(ready)) if target > 0 else 0
 
     # ── คน ──
-    ds = _ready_sheet(READY_DRIVER_TAB, ["ชื่อ-สกุล"], date_iso)
+    ds = _ready_sheet(READY_DRIVER_TAB, ["ชื่อ-สกุล"], date_iso, READY_DRIVER_FIRST_ROW)
     if ds["note"]:
         notes.append(ds["note"])
     d_legend = ds["legend"]
