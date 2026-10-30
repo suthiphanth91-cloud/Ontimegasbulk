@@ -3851,24 +3851,120 @@ def build_ready_report(date_iso: str, plan_rows: list, target: float) -> dict:
     }
 
 
+def _ready_merge(reps: list) -> dict:
+    """รวมรายงานหลายวันเป็นหนึ่ง: รถ/คน = เฉลี่ยต่อวัน · เที่ยว/drop/เป้า = รวมทั้งช่วง · สาเหตุไม่พร้อม = นับเป็น คัน·วัน / คน·วัน
+    รายคัน/รายคน: เที่ยวรวม + จำนวนวันที่วิ่ง/ว่าง/ไม่พร้อม · สถานะที่โชว์ = สถานะที่เป็นบ่อยสุดในช่วง"""
+    n = len(reps)
+    last = reps[-1]
+    if n == 1:
+        return dict(last, days=1)
+    avg = lambda xs: round(sum(xs) / n, 1)
+
+    def summed(lists):
+        t: dict = {}
+        for l in lists:
+            for d in l:
+                t[d["name"]] = t.get(d["name"], 0) + d["n"]
+        return sorted(({"name": k, "n": v} for k, v in t.items()), key=lambda d: (-d["n"], d["name"]))
+
+    cars = {k: avg([r["cars"][k] for r in reps]) for k in ("ready", "run", "free", "nodriver", "down")}
+    s_tot = sum(r["cars"]["total"] for r in reps)
+    s_ready = sum(r["cars"]["ready"] for r in reps)
+    s_run = sum(r["cars"]["run"] for r in reps)
+    cars.update(total=max(r["cars"]["total"] for r in reps),
+                pct_ready=round(s_ready * 100 / s_tot, 1) if s_tot else None,
+                pct_used=round(s_run * 100 / s_ready, 1) if s_ready else None,
+                down_by=summed([r["cars"]["down_by"] for r in reps]), free_by=[])
+    t_total = sum(r["trips"]["total"] for r in reps)
+    goal = sum(r["trips"]["goal"] for r in reps)
+    trips = {"total": t_total, "drops": sum(r["trips"]["drops"] for r in reps),
+             "cancelled": sum(r["trips"]["cancelled"] for r in reps),
+             "per_ready": round(t_total / s_ready, 2) if s_ready else None,
+             "per_run": round(t_total / s_run, 2) if s_run else None,
+             "goal": goal, "gap": max(0, goal - t_total) if goal else 0}
+    people = {k: avg([r["people"][k] for r in reps]) for k in ("run", "free", "down")}
+    people.update(total=max(r["people"]["total"] for r in reps), down_by=summed([r["people"]["down_by"] for r in reps]))
+
+    def groups(key, name):
+        out = {}
+        for r in reps:
+            for g in r[key]:
+                e = out.setdefault(g[name], {name: g[name], "total": 0, "run": 0, "free": 0, "down": 0, "trips": 0})
+                e["total"] = max(e["total"], g["total"])
+                for k in ("run", "free", "down"):
+                    e[k] += g[k] / n
+                e["trips"] += g["trips"]
+        for e in out.values():
+            for k in ("run", "free", "down"):
+                e[k] = round(e[k], 1)
+        return sorted(out.values(), key=lambda e: e[name])
+
+    def per_entity(key, ident, extra):
+        out: dict = {}
+        for r in reps:
+            for x in r[key]:
+                e = out.setdefault(x[ident], dict({f: x.get(f, "") for f in extra}, **{ident: x[ident], "trips": 0, "drops": 0,
+                                                                                       "d_run": 0, "d_free": 0, "d_down": 0, "whys": {}}))
+                e["trips"] += x["trips"]
+                e["drops"] += x.get("drops", 0)
+                k = {"run": "d_run", "down": "d_down"}.get(x["kind"], "d_free")
+                e[k] += 1
+                if x["kind"] == "down" and x["why"]:
+                    e["whys"][x["why"]] = e["whys"].get(x["why"], 0) + 1
+        rows = []
+        for e in out.values():
+            best = max((("run", e["d_run"]), ("free", e["d_free"]), ("down", e["d_down"])), key=lambda kv: kv[1])[0]
+            e["kind"] = best
+            e["why"] = max(e["whys"], key=e["whys"].get) if e["whys"] else ""
+            e["code"] = ""
+            del e["whys"]
+            rows.append(e)
+        return sorted(rows, key=lambda e: ({"down": 0, "free": 1, "run": 2}[e["kind"]], -e["d_down"], -e["trips"], str(e[ident])))
+
+    # หมายเหตุ: แสดงเฉพาะของวันสุดท้ายในช่วง (ทุกวันมีเรื่องคล้ายกัน ซ้อนกันจนอ่านไม่ไหว) — อยากดูวันอื่นเลือกทีละวัน
+    notes = list(last["notes"])
+    return {"date": last["date"], "target": last["target"], "legend": last["legend"], "driver_legend": last["driver_legend"],
+            "notes": notes, "notes_date": last["date"], "cars": cars, "trips": trips, "people": people, "days": n,
+            "by_area": groups("by_area", "area"), "by_type": groups("by_type", "vtype"),
+            "rows": per_entity("rows", "car", ("key", "area", "vtype", "plate")),
+            "people_rows": per_entity("people_rows", "name", ())}
+
+
 @app.get("/api/report/ready", include_in_schema=False)
-def report_ready(date_str: str = Query(None, alias="date"), target: float = Query(None)):
-    """สรุปรถ/คนพร้อมใช้งานของวันที่ระบุ (ค่าเริ่มต้น = วันนี้) — อ่านชีตอย่างเดียว"""
-    day = _parse_date(date_str or "") or _today_thai()
+def report_ready(date_from: str = Query(None, alias="from"), date_to: str = Query(None, alias="to"),
+                 date_str: str = Query(None, alias="date"), target: float = Query(None)):
+    """สรุปรถ/คนพร้อมใช้งานของช่วงวันที่ (ค่าเริ่มต้น = วันนี้) — อ่านชีตอย่างเดียว
+    วันเดียว = สถานะของวันนั้น · หลายวัน = รถ/คนเฉลี่ยต่อวัน + เที่ยวรวมทั้งช่วง"""
+    d_from = _parse_date(date_from or date_str or "") or _today_thai()
+    d_to = _parse_date(date_to or "") or d_from
+    if d_to < d_from:
+        d_from, d_to = d_to, d_from
+    f0, t0 = datetime.strptime(d_from, "%Y-%m-%d"), datetime.strptime(d_to, "%Y-%m-%d")
+    if (t0 - f0).days > 61:
+        raise HTTPException(400, "เลือกช่วงวันที่ได้ไม่เกิน 62 วัน")
     try:
         plan_rows = _fetch_sheet(SOURCE_ID, PLAN_TAB)
     except Exception as e:
         raise HTTPException(502, f"อ่านชีตแผนงานไม่ได้ — {type(e).__name__}")
     tg = READY_TARGET if target is None else max(0.0, min(float(target), 99.0))
-    by_date: dict = {}                        # แยกแถวแผนงานตามวันครั้งเดียว ไม่ต้องไล่ทั้งชีตซ้ำทุกวันของกราฟแนวโน้ม
+    by_date: dict = {}                        # แยกแถวแผนงานตามวันครั้งเดียว ไม่ต้องไล่ทั้งชีตซ้ำทุกวัน
     for r in plan_rows:
         by_date.setdefault(_parse_date(_cell(r, PLAN_DATE)), []).append(r)
-    rep = build_ready_report(day, by_date.get(day, []), tg)
-    d0 = datetime.strptime(day, "%Y-%m-%d")
+    cache: dict = {}
+
+    def day_rep(d):
+        if d not in cache:
+            cache[d] = build_ready_report(d, by_date.get(d, []), tg)
+        return cache[d]
+
+    span = [(f0 + timedelta(days=k)).strftime("%Y-%m-%d") for k in range((t0 - f0).days + 1)]
+    rep = _ready_merge([day_rep(d) for d in span])
+    rep["from"], rep["to"] = d_from, d_to
+    # กราฟรายวัน: ช่วงที่เลือก (ถ้า 7 วันขึ้นไป) หรือ 14 วันล่าสุดจนถึงวันสุดท้ายที่เลือก
+    tdays = span if len(span) >= 7 else [(t0 - timedelta(days=k)).strftime("%Y-%m-%d") for k in range(READY_TREND_DAYS - 1, -1, -1)]
     trend = []
-    for k in range(READY_TREND_DAYS - 1, -1, -1):
-        d = (d0 - timedelta(days=k)).strftime("%Y-%m-%d")
-        x = rep if d == day else build_ready_report(d, by_date.get(d, []), tg)
+    for d in tdays:
+        x = day_rep(d)
         c, t = x["cars"], x["trips"]
         trend.append({"date": d, "run": c["run"], "free": c["free"], "nodriver": c["nodriver"], "down": c["down"],
                       "trips": t["total"], "goal": t["goal"], "p_down": x["people"]["down"]})
@@ -4984,7 +5080,10 @@ READY_HTML = """<!doctype html>
   .note ul{margin:4px 0 0;padding-left:20px}
 
   /* ── การ์ดตัวเลข ── */
-  .kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:12px}
+  .kpis{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:12px;margin-bottom:12px}
+  .k4{grid-column:span 4}.k3{grid-column:span 3}
+  .rng{display:flex;align-items:center;gap:6px}.rng .dash{color:var(--mut)}
+  .ctl{display:flex;flex-wrap:wrap;gap:10px 12px;align-items:center;justify-content:flex-end}
   .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;box-shadow:var(--shadow);min-width:0}
   .w2{grid-column:span 2}
   .lab{font-size:13.5px;color:var(--ink2);font-weight:600;display:flex;align-items:center;gap:8px}
@@ -4995,8 +5094,8 @@ READY_HTML = """<!doctype html>
   .val small{font-size:14px;font-weight:600;color:var(--mut);letter-spacing:0;margin-left:4px}
   .sub{font-size:13px;color:var(--mut);margin-top:4px;line-height:1.5}
   .sub b{color:var(--ink2);font-weight:600}
-  @media (max-width:1100px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
-  @media (max-width:560px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.w2{grid-column:1/-1}}
+  @media (max-width:1100px){.k4{grid-column:span 12}.k3{grid-column:span 6}}
+  @media (max-width:560px){.kpis{gap:10px}}
 
   /* แท่งต่อกัน (stack): ช่องว่าง 2px สีพื้นคั่นทุกช่วง · ปลายข้อมูลมน 4px ฐานเหลี่ยม */
   .stk{display:flex;gap:2px;height:14px;border-radius:0 4px 4px 0;overflow:hidden}
@@ -5083,9 +5182,10 @@ READY_HTML = """<!doctype html>
     header{position:static;padding:12px 14px}
     .hd{gap:8px}
     .ttl{flex:1 1 100%}
+    .ctl{flex:1 1 100%;justify-content:stretch;gap:8px}
     .ttl h1{font-size:19px}
     .seg{flex:1 1 100%}.seg button{flex:1}
-    #d{flex:1 1 auto;min-width:0}
+    .rng{flex:1 1 100%}.rng input{flex:1;min-width:0}
     .tgt{flex:0 0 auto}
     .btn,.btn2{flex:1 1 40%}
     main{padding:12px 12px 32px}
@@ -5113,11 +5213,13 @@ READY_HTML = """<!doctype html>
 <header><div class="hd">
   <div class="ttl"><h1>รถ/คนพร้อมใช้งาน</h1><p id="stamp">สถานะจากชีตข้อมูลรถ+พขร. · งานจากชีตแผนงาน · อ่านอย่างเดียว</p></div>
   <span class="grow"></span>
-  <div class="seg" id="presets"><button data-p="-1">เมื่อวาน</button><button data-p="0">วันนี้</button><button data-p="1">พรุ่งนี้</button></div>
-  <input type="date" id="d" aria-label="วันที่">
+  <div class="ctl">
+  <div class="seg" id="presets"><button data-a="-1" data-b="-1">เมื่อวาน</button><button data-a="0" data-b="0">วันนี้</button><button data-a="1" data-b="1">พรุ่งนี้</button><button data-a="-6" data-b="0">7 วัน</button><button data-a="-29" data-b="0">30 วัน</button></div>
+  <div class="rng"><input type="date" id="dFrom" aria-label="ตั้งแต่วันที่"><span class="dash">–</span><input type="date" id="dTo" aria-label="ถึงวันที่"></div>
   <label class="tgt">เป้า <input type="number" id="tg" min="0" max="20" step="0.5" aria-label="เป้าเที่ยวต่อคันต่อวัน"> เที่ยว/คัน</label>
   <button class="btn" id="go">ดูรายงาน</button>
   <button class="btn2" id="snap" title="บันทึกหน้านี้เป็นรูป เพื่อส่งต่อทาง LINE / อีเมล">📷 แคปส่ง</button>
+  </div>
 </div></header>
 <main id="main">
   <div id="err" class="err" hidden></div>
@@ -5125,7 +5227,7 @@ READY_HTML = """<!doctype html>
   <div class="kpis" id="kpis"></div>
   <div class="panels">
     <section class="panel c7"><div class="ph"><h3>สถานะรถรายวัน</h3><span class="s2" id="trSub"></span><div class="legend" id="trLeg"></div></div>
-      <p class="desc">จำนวนรถแต่ละสถานะ ย้อนหลัง 14 วัน · ชี้ที่แท่งเพื่อดูตัวเลข · กดแท่งเพื่อดูวันนั้น</p>
+      <p class="desc" id="trDesc">จำนวนรถแต่ละสถานะรายวัน · ชี้ที่แท่งเพื่อดูตัวเลข · กดแท่งเพื่อดูวันนั้น</p>
       <div class="chart" id="cTrend"></div></section>
     <section class="panel c5"><div class="ph"><h3>เที่ยวต่อวัน เทียบเป้า</h3><div class="legend"><span><i class="key" style="background:var(--trip)"></i>เที่ยว</span><span><i class="key" style="background:var(--goal);height:2px;width:14px;border-radius:0"></i>เป้า</span></div></div>
       <p class="desc">นับเที่ยวจาก “เลข JOB” ในแผนงาน (หลาย drop ในเที่ยวเดียวกัน = 1 เที่ยว) · เป้า = เป้าเที่ยวต่อคัน × รถพร้อมใช้</p>
@@ -5172,7 +5274,10 @@ const MON = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', '
 let REP = null;
 function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function iso(d){ return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
-function n(v){ return v == null ? '–' : Number(v).toLocaleString('en-US'); }
+function n(v){ return v == null ? '–' : (Math.round(Number(v) * 10) / 10).toLocaleString('en-US'); }
+let MULTI = false;                                   // เลือกหลายวัน: รถ/คน = เฉลี่ยต่อวัน · เที่ยว = รวมทั้งช่วง
+function rangeText(){ return REP.from === REP.to ? thaiDate(REP.from) : thaiDate(REP.from) + ' – ' + thaiDate(REP.to); }
+function shift(k){ const t = new Date(); t.setDate(t.getDate() + k); return iso(t); }
 function pct(a, b){ return b ? Math.round(a * 100 / b) + '%' : '–'; }
 function dt(s){ return new Date(s + 'T00:00:00'); }
 function thaiDate(s){ const d = dt(s); return DOW[d.getDay()] + ' ' + d.getDate() + ' ' + MON[d.getMonth()]; }
@@ -5186,10 +5291,10 @@ function tipHtml(title, rows){
 function stack(segs, map, total, title, tall, fb){
   const live = segs.filter(s => s[1] > 0);
   if(!live.length) return '<div class="stk' + (tall ? ' tall' : '') + '" style="background:var(--track)"></div>';
-  const tip = esc(tipHtml(title, live.map(s => [map[s[0]].c, map[s[0]].t, s[1] + ' (' + pct(s[1], total) + ')']).concat(fb ? [['', 'กดเพื่อดูรายการ', '']] : [])));
+  const tip = esc(tipHtml(title, live.map(s => [map[s[0]].c, map[s[0]].t, n(s[1]) + ' (' + pct(s[1], total) + ')']).concat(fb ? [['', 'กดเพื่อดูรายการ', '']] : [])));
   return '<div class="stk' + (tall ? ' tall' : '') + '">' + live.map(s =>
     '<span class="sg" style="flex:' + s[1] + ' 1 0;background:' + map[s[0]].c + ';color:' + map[s[0]].ink + '" data-tip="' + tip + '"' +
-    fattr(fb && Object.assign({}, fb, {kind: s[0]})) + '><b>' + s[1] + '</b></span>').join('') + '</div>';
+    fattr(fb && Object.assign({}, fb, {kind: s[0]})) + '><b>' + n(s[1]) + '</b></span>').join('') + '</div>';
 }
 function legend(segs, map, total, fb){
   return '<div class="legend">' + segs.map(s => '<span' + fattr(fb && s[1] && Object.assign({}, fb, {kind: s[0]})) + '>' + key(map[s[0]].c) + map[s[0]].t +
@@ -5221,7 +5326,8 @@ function columns(el, days, stacks, opt){
          '<text class="ax" x="' + (L - 6) + '" y="' + (y(v) + 4) + '" text-anchor="end">' + n(v) + '</text>';
   }
   days.forEach((d, i) => {
-    const cx = L + slot * i + slot / 2, x0 = cx - bw / 2, sel = d.date === REP.date;
+    const cx = L + slot * i + slot / 2, x0 = cx - bw / 2, sel = d.date >= REP.from && d.date <= REP.to;
+    const lstep = Math.max(1, Math.ceil(24 / slot)), showx = i % lstep === 0 || i === days.length - 1;
     let base = T + ph, live = stacks.filter(s => (d[s[0]] || 0) > 0), tot = 0;
     live.forEach((s, j) => {
       const h = d[s[0]] / sc.top * ph, gap = j ? 2 : 0, top = base - h;
@@ -5232,11 +5338,11 @@ function columns(el, days, stacks, opt){
       base = top;
     });
     if(opt.goal && d.goal) g += '<line x1="' + (x0 - 4) + '" x2="' + (x0 + bw + 4) + '" y1="' + y(d.goal) + '" y2="' + y(d.goal) + '" stroke="var(--goal)" stroke-width="2" stroke-linecap="round"/>';
-    if(sel && opt.label) g += '<text class="vl" x="' + cx + '" y="' + (Math.min(base, opt.goal && d.goal ? y(d.goal) : base) - 6) + '" text-anchor="middle">' + n(tot) + '</text>';
+    if(sel && opt.label && !MULTI) g += '<text class="vl" x="' + cx + '" y="' + (Math.min(base, opt.goal && d.goal ? y(d.goal) : base) - 6) + '" text-anchor="middle">' + n(tot) + '</text>';
     const dd = dt(d.date);
-    g += '<text class="ax' + (sel ? ' sel' : '') + '" x="' + cx + '" y="' + (H - B + 16) + '" text-anchor="middle">' + dd.getDate() + '</text>' +
+    if(showx) g += '<text class="ax' + (sel ? ' sel' : '') + '" x="' + cx + '" y="' + (H - B + 16) + '" text-anchor="middle">' + dd.getDate() + '</text>' +
          '<text class="ax' + (sel ? ' sel' : '') + '" x="' + cx + '" y="' + (H - B + 30) + '" text-anchor="middle">' + DOW[dd.getDay()] + '</text>';
-    if(sel) g += '<rect x="' + (cx - 11) + '" y="' + (H - 3) + '" width="22" height="3" rx="1.5" fill="var(--acc)"/>';
+    if(sel){ const mw = Math.min(22, slot - 2); g += '<rect x="' + (cx - mw / 2) + '" y="' + (H - 3) + '" width="' + mw + '" height="3" rx="1.5" fill="var(--acc)"/>'; }
     g += '<rect class="hit" x="' + (L + slot * i) + '" y="' + T + '" width="' + slot + '" height="' + (ph + B - 4) + '" rx="6" data-date="' + d.date + '" data-tip="' + esc(opt.tip(d)) + '"/>';
   });
   el.innerHTML = '<svg width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + esc(opt.aria) + '">' + g + '</svg>';
@@ -5268,29 +5374,34 @@ function render(){
   const segs = ORDER.map(k => [k, c[k]]);
   const goalLine = t.goal ? Math.min(100, t.goal / Math.max(t.goal, t.total) * 100) : 0;
   const fill = t.goal ? t.total / Math.max(t.goal, t.total) * 100 : 100;
-  const top = c.down_by[0];
+  const top = c.down_by[0], avg = MULTI ? ' · เฉลี่ยต่อวัน' : '', cu = MULTI ? 'คัน·วัน' : 'คัน';
+  const ps = [['run', p.run], ['free', p.free], ['down', p.down]];
   document.getElementById('kpis').innerHTML =
-    '<div class="card w2"><div class="lab">รถพร้อมใช้งาน · ' + esc(thaiDate(r.date)) + '</div>' +
+    '<div class="card k4"><div class="lab">รถพร้อมใช้งาน · ' + esc(rangeText()) + avg + '</div>' +
       '<div class="big">' + n(c.ready) + '<small>จาก ' + n(c.total) + ' คัน · ' + pct(c.ready, c.total) + '</small></div>' +
       '<div style="margin-top:14px">' + stack(segs, K, c.total, 'รถทั้งหมด ' + c.total + ' คัน', true, {t: 'c'}) + '</div>' + legend(segs, K, c.total, {t: 'c'}) + '</div>' +
-    '<div class="card w2"><div class="lab">เที่ยววิ่งงาน</div>' +
+    '<div class="card k4"><div class="lab">พขร. พร้อมทำงาน' + avg + '</div>' +
+      '<div class="big">' + n(p.run + p.free) + '<small>จาก ' + n(p.total) + ' คน · ' + pct(p.run + p.free, p.total) + '</small></div>' +
+      '<div style="margin-top:14px">' + stack(ps, PK, p.total, 'พขร. ทั้งหมด ' + p.total + ' คน', true, {t: 'p'}) + '</div>' + legend(ps, PK, p.total, {t: 'p'}) + '</div>' +
+    '<div class="card k4"><div class="lab">เที่ยววิ่งงาน' + (MULTI ? ' · รวม ' + r.days + ' วัน' : '') + '</div>' +
       '<div class="big">' + n(t.total) + '<small>' + (t.goal ? 'จากเป้า ' + n(t.goal) + ' เที่ยว' : 'เที่ยว') + '</small></div>' +
       '<div class="meter"><i style="width:' + fill + '%"></i>' + (t.goal ? '<u style="left:calc(' + goalLine + '% - 1px)"></u>' : '') + '</div>' +
       '<div class="sub">' + (t.goal ? (t.gap ? 'ขาดอีก <b>' + n(t.gap) + '</b> เที่ยวถึงเป้า (' + r.target + ' เที่ยว/คัน)' : '<span class="ok">✓ ถึงเป้าแล้ว</span> เกินเป้า ' + n(t.total - t.goal) + ' เที่ยว') : 'ยังไม่ได้ตั้งเป้า') +
-        ' · <b>' + n(t.drops) + '</b> drop · เฉลี่ย <b>' + (t.per_ready == null ? '–' : t.per_ready) + '</b> เที่ยว/คันพร้อมใช้ · <b>' + (t.per_run == null ? '–' : t.per_run) + '</b> เที่ยว/คันที่วิ่ง' +
+        ' · <b>' + n(t.drops) + '</b> drop · เฉลี่ย <b>' + (t.per_ready == null ? '–' : t.per_ready) + '</b> เที่ยว/คันพร้อมใช้' + (MULTI ? '/วัน' : '') + ' · <b>' + (t.per_run == null ? '–' : t.per_run) + '</b> เที่ยว/คันที่วิ่ง' + (MULTI ? '/วัน' : '') +
         (t.cancelled ? ' · ยกเลิก ' + t.cancelled + ' งาน' : '') + '</div></div>' +
-    '<div class="card"' + fattr({t: 'c', kind: 'run'}) + '><div class="lab">' + key(K.run.c) + 'วิ่งงาน</div><div class="val">' + n(c.run) + '<small>คัน</small></div>' +
+    '<div class="card k3"' + fattr({t: 'c', kind: 'run'}) + '><div class="lab">' + key(K.run.c) + 'วิ่งงาน</div><div class="val">' + n(c.run) + '<small>คัน</small></div>' +
       '<div class="sub">ใช้รถ <b>' + pct(c.run, c.ready) + '</b> ของรถพร้อมใช้</div></div>' +
-    '<div class="card"' + fattr({t: 'c', kind: 'free'}) + '><div class="lab">' + key(K.free.c) + 'ว่างงาน</div><div class="val">' + n(c.free) + '<small>คัน</small></div>' +
+    '<div class="card k3"' + fattr({t: 'c', kind: 'free'}) + '><div class="lab">' + key(K.free.c) + 'ว่างงาน</div><div class="val">' + n(c.free) + '<small>คัน</small></div>' +
       '<div class="sub">พร้อมใช้ แต่ยังไม่มีงานในแผน</div></div>' +
-    '<div class="card"' + fattr({t: 'c', kind: 'nodriver'}) + '><div class="lab">' + key(K.nodriver.c) + 'ไม่มีคนขับ</div><div class="val">' + n(c.nodriver) + '<small>คัน</small></div>' +
+    '<div class="card k3"' + fattr({t: 'c', kind: 'nodriver'}) + '><div class="lab">' + key(K.nodriver.c) + 'ไม่มีคนขับ</div><div class="val">' + n(c.nodriver) + '<small>คัน</small></div>' +
       '<div class="sub">รถพร้อม · พขร. ว่าง <b>' + n(p.free) + '</b> คน</div></div>' +
-    '<div class="card"' + fattr({t: 'c', kind: 'down'}) + '><div class="lab">' + key(K.down.c) + 'ไม่พร้อมใช้</div><div class="val">' + n(c.down) + '<small>คัน</small></div>' +
-      '<div class="sub">' + (top ? 'มากสุด: <b>' + esc(top.name) + '</b> ' + top.n + ' คัน' : 'ไม่มีรถเสีย/ซ่อม') + '</div></div>';
+    '<div class="card k3"' + fattr({t: 'c', kind: 'down'}) + '><div class="lab">' + key(K.down.c) + 'ไม่พร้อมใช้</div><div class="val">' + n(c.down) + '<small>คัน</small></div>' +
+      '<div class="sub">' + (top ? 'มากสุด: <b>' + esc(top.name) + '</b> ' + top.n + ' ' + cu : 'ไม่มีรถเสีย/ซ่อม') + '</div></div>';
 
   const tr = r.trend || [];
   document.getElementById('trLeg').innerHTML = ORDER.map(k => '<span>' + key(K[k].c) + K[k].t + '</span>').join('');
   document.getElementById('trSub').textContent = tr.length ? thaiDate(tr[0].date) + ' – ' + thaiDate(tr[tr.length - 1].date) : '';
+  document.getElementById('trDesc').textContent = 'จำนวนรถแต่ละสถานะรายวัน ' + tr.length + ' วัน' + (MULTI ? ' (ช่วงที่เลือก)' : ' (ย้อนหลังถึงวันที่เลือก)') + ' · ชี้ที่แท่งเพื่อดูตัวเลข · กดแท่งเพื่อดูวันนั้น';
   columns(document.getElementById('cTrend'), tr, ORDER.map(k => [k, K[k].c]), {aria: 'สถานะรถรายวัน', label: false,
     tip: d => tipHtml(thaiDate(d.date), ORDER.map(k => [K[k].c, K[k].t, d[k] + ' คัน']).concat([['', 'พขร. ไม่พร้อม', d.p_down + ' คน']]))});
   columns(document.getElementById('cTrips'), tr, [['trips', 'var(--trip)']], {aria: 'เที่ยวต่อวันเทียบเป้า', goal: true, label: true,
@@ -5299,25 +5410,25 @@ function render(){
 
   document.getElementById('cArea').innerHTML = rowsChart(r.by_area, 'area');
   document.getElementById('cType').innerHTML = rowsChart(r.by_type, 'vtype');
-  document.getElementById('cDown').innerHTML = bars(c.down_by, c.total, 'คัน', {t: 'c'});
-  document.getElementById('downSub').textContent = c.down ? 'รวม ' + c.down + ' คัน จาก ' + c.total : '';
-  const ps = [['run', p.run], ['free', p.free], ['down', p.down]];
+  document.getElementById('cDown').innerHTML = bars(c.down_by, c.total * (r.days || 1), cu, {t: 'c'});
+  document.getElementById('downSub').textContent = c.down ? (MULTI ? 'เฉลี่ย ' + n(c.down) + ' คัน/วัน' : 'รวม ' + c.down + ' คัน') + ' จาก ' + c.total : '';
   document.getElementById('cPpl').innerHTML = (p.total ? stack(ps, PK, p.total, 'พขร. ทั้งหมด ' + p.total + ' คน', true, {t: 'p'}) + legend(ps, PK, p.total, {t: 'p'}) : '<div class="empty">ไม่มีข้อมูล พขร.</div>') +
-    (p.down_by.length ? '<div class="divider"></div>' + bars(p.down_by, p.total, 'คน', {t: 'p'}) : '');
-  document.getElementById('pplSub').textContent = p.total ? 'ทั้งหมด ' + p.total + ' คน · พร้อมทำงาน ' + (p.run + p.free) : '';
+    (p.down_by.length ? '<div class="divider"></div>' + bars(p.down_by, p.total * (r.days || 1), MULTI ? 'คน·วัน' : 'คน', {t: 'p'}) : '');
+  document.getElementById('pplSub').textContent = p.total ? 'ทั้งหมด ' + p.total + ' คน · พร้อมทำงาน ' + n(p.run + p.free) + (MULTI ? ' (เฉลี่ย/วัน)' : '') : '';
   drawRows();
   drawPeople();
   const nt = document.getElementById('notes');
-  nt.innerHTML = r.notes.length ? '<b>หมายเหตุจากการอ่านชีต</b><ul>' + r.notes.map(x => '<li>' + esc(x) + '</li>').join('') + '</ul>' : '';
+  nt.innerHTML = r.notes.length ? '<b>หมายเหตุจากการอ่านชีต' + (r.notes_date ? ' · วันที่ ' + esc(thaiDate(r.notes_date)) + ' (วันสุดท้ายในช่วง — เลือกทีละวันเพื่อดูวันอื่น)' : '') + '</b><ul>' + r.notes.map(x => '<li>' + esc(x) + '</li>').join('') + '</ul>' : '';
   nt.hidden = !r.notes.length;
   fitLabels();
 }
+function days(x){ return MULTI ? '<span class="code">วิ่ง ' + x.d_run + ' · ว่าง ' + x.d_free + ' · ไม่พร้อม ' + x.d_down + ' วัน</span>' : ''; }
 function drawPeople(){
   const list = REP.people_rows.filter(x => kindOk(FP, x.kind) && (!FP.why || x.why === FP.why));
   chips(FP, PK, 'pplChips');
   document.getElementById('pSub').textContent = list.length + ' คน' + (Object.keys(FP).length ? ' (จาก ' + REP.people_rows.length + ')' : '');
   document.getElementById('prows').innerHTML = list.map(x =>
-    '<tr><td>' + esc(x.name) + '</td><td><span class="st"><i style="background:' + PK[x.kind].c + '"></i>' + PK[x.kind].t + '</span></td><td>' + esc(x.why) + '</td><td class="n">' + (x.trips || '–') + '</td></tr>').join('')
+    '<tr><td>' + esc(x.name) + '</td><td><span class="st"><i style="background:' + PK[x.kind].c + '"></i>' + PK[x.kind].t + '</span>' + days(x) + '</td><td>' + esc(x.why) + '</td><td class="n">' + (x.trips || '–') + '</td></tr>').join('')
     || '<tr><td colspan="4" class="empty">ไม่มี พขร. ที่ตรงกับตัวกรอง</td></tr>';
 }
 function drawRows(){
@@ -5329,24 +5440,26 @@ function drawRows(){
   document.getElementById('rowSub').textContent = list.length + ' คัน' + (q || Object.keys(FC).length ? ' (จาก ' + REP.rows.length + ')' : '');
   document.getElementById('rows').innerHTML = list.map(x =>
     '<tr><td><b>' + esc(x.car) + '</b></td><td>' + esc(x.area) + '</td><td>' + esc(x.vtype) + '</td><td class="m-hide">' + esc(x.plate) + '</td>' +
-    '<td><span class="st"><i style="background:' + K[x.kind].c + '"></i>' + K[x.kind].t + '</span></td><td>' + esc(x.why) + (x.why && x.code ? '<span class="code">' + esc(x.code) + '</span>' : '') + '</td>' +
+    '<td><span class="st"><i style="background:' + K[x.kind].c + '"></i>' + K[x.kind].t + '</span>' + days(x) + '</td><td>' + esc(x.why) + (x.why && x.code ? '<span class="code">' + esc(x.code) + '</span>' : '') + '</td>' +
     '<td class="n">' + (x.trips || '–') + '</td><td class="n">' + (x.drops || '–') + '</td></tr>').join('') || '<tr><td colspan="8" class="empty">ไม่พบรถที่ตรงกับคำค้น</td></tr>';
 }
 function markPreset(){
-  const v = document.getElementById('d').value;
-  document.querySelectorAll('#presets button').forEach(b => { const t = new Date(); t.setDate(t.getDate() + Number(b.dataset.p)); b.classList.toggle('on', iso(t) === v); });
+  const f = document.getElementById('dFrom').value, t = document.getElementById('dTo').value;
+  document.querySelectorAll('#presets button').forEach(b => b.classList.toggle('on', shift(+b.dataset.a) === f && shift(+b.dataset.b) === t));
 }
+function setRange(f, t){ document.getElementById('dFrom').value = f; document.getElementById('dTo').value = t; markPreset(); }
 async function load(){
   const main = document.getElementById('main'), err = document.getElementById('err');
   err.hidden = true; main.classList.add('busy');
   const tg = document.getElementById('tg').value;
   try{ localStorage.setItem('readyTarget', tg); }catch(e){}
   try{
-    const res = await fetch('/api/report/ready?date=' + document.getElementById('d').value + '&target=' + encodeURIComponent(tg));
+    const res = await fetch('/api/report/ready?from=' + document.getElementById('dFrom').value + '&to=' + document.getElementById('dTo').value + '&target=' + encodeURIComponent(tg));
     if(res.status === 401){ location.href = '/login'; return; }
     if(!res.ok){ let m = 'HTTP ' + res.status; try{ m = (await res.json()).detail || m; }catch(e){} throw new Error(m); }
     REP = await res.json();
-    FC = {}; FP = {};
+    MULTI = (REP.days || 1) > 1;
+    FC = {}; FP = {}; markPreset();
     render();
     document.getElementById('stamp').textContent = 'สถานะจากชีตข้อมูลรถ+พขร. · งานจากชีตแผนงาน · อัปเดต ' + new Date().toLocaleTimeString('th-TH', {hour: '2-digit', minute: '2-digit'});
   }catch(e){ err.textContent = 'โหลดไม่สำเร็จ: ' + e.message; err.hidden = false; }
@@ -5365,7 +5478,7 @@ document.addEventListener('mousemove', e => {
 });
 document.addEventListener('click', e => {
   const el = e.target.closest && e.target.closest('.hit[data-date]');
-  if(el){ document.getElementById('d').value = el.dataset.date; markPreset(); load(); return; }
+  if(el){ setRange(el.dataset.date, el.dataset.date); load(); return; }
   const cl = e.target.closest && e.target.closest('[data-clr]');
   if(cl){                                                   // ปุ่ม ✕ บนชิปตัวกรอง
     const [id, k] = cl.dataset.clr.split('|'), f = id === 'carChips' ? FC : FP;
@@ -5404,7 +5517,7 @@ document.getElementById('snap').onclick = async () => {
   const b = document.getElementById('snap'), main = document.getElementById('main');
   b.disabled = true; b.textContent = '⏳ กำลังแคป…'; tip.hidden = true;
   const cap = document.createElement('div'); cap.className = 'snapcap';
-  const day = thaiDate(REP.date) + ' ' + (dt(REP.date).getFullYear() + 543);
+  const day = rangeText() + ' ' + (dt(REP.to).getFullYear() + 543);
   cap.innerHTML = '<b>รถ/คนพร้อมใช้งาน · ' + esc(day) + '</b><span>เป้า ' + esc(REP.target) + ' เที่ยว/คัน · แคปเมื่อ ' +
     new Date().toLocaleString('th-TH', {dateStyle: 'short', timeStyle: 'short'}) + '</span>';
   main.insertBefore(cap, main.firstChild);
@@ -5416,7 +5529,7 @@ document.getElementById('snap').onclick = async () => {
     try{ fontCss = await lib.getFontEmbedCSS(main); }catch(e){}                       // ฝังฟอนต์ไทย ตัวหนังสือในรูปจะได้กว้างเท่าบนจอ
     const blob = await lib.toBlob(main, {pixelRatio: 2, backgroundColor: getComputedStyle(document.body).backgroundColor,
       fontEmbedCSS: fontCss || undefined, skipFonts: !fontCss});
-    const name = 'ready_' + REP.date + '.png';
+    const name = 'ready_' + REP.from + (REP.to !== REP.from ? '_' + REP.to : '') + '.png';
     const file = new File([blob], name, {type: 'image/png'});
     if(navigator.canShare && navigator.canShare({files: [file]}) && matchMedia('(pointer:coarse)').matches){
       try{ await navigator.share({files: [file], title: 'รถ/คนพร้อมใช้งาน ' + day}); }catch(e){}
@@ -5432,17 +5545,14 @@ document.getElementById('snap').onclick = async () => {
 };
 let rz = 0;
 addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if(REP) render(); }, 150); });
-document.getElementById('d').value = iso(new Date());
+setRange(iso(new Date()), iso(new Date()));
 let saved = ''; try{ saved = localStorage.getItem('readyTarget') || ''; }catch(e){}
 document.getElementById('tg').value = saved || '2';
 document.getElementById('go').onclick = load;
 document.getElementById('q').oninput = () => { if(REP) drawRows(); };
-document.getElementById('d').onchange = () => { markPreset(); load(); };
+['dFrom', 'dTo'].forEach(id => { document.getElementById(id).onchange = () => { markPreset(); load(); }; });
 document.getElementById('tg').onchange = load;
-document.querySelectorAll('#presets button').forEach(b => b.onclick = () => {
-  const t = new Date(); t.setDate(t.getDate() + Number(b.dataset.p));
-  document.getElementById('d').value = iso(t); markPreset(); load();
-});
+document.querySelectorAll('#presets button').forEach(b => b.onclick = () => { setRange(shift(+b.dataset.a), shift(+b.dataset.b)); load(); });
 markPreset(); load();
 </script>
 </body>
