@@ -5111,7 +5111,7 @@ REPORT_HTML = """<!doctype html>
   <a class="menu out" href="/logout" title="ออกจากระบบ">🚪<span>ออกจากระบบ</span></a>
 </aside>
 <header><div class="hd">
-  <div class="ttl"><h1>รายงาน On Time</h1><p id="stamp">ข้อมูลจากชีตแผนงานจริง · อ่านอย่างเดียว</p></div>
+  <div class="ttl"><h1>รายงาน On Time PTGLG</h1><p id="stamp">ข้อมูลจากชีตแผนงานจริง · อ่านอย่างเดียว</p></div>
   <span class="grow"></span>
   <div class="seg" id="presets">
     <button data-p="0">วันนี้</button><button data-p="1">เมื่อวาน</button><button data-p="7">7 วัน</button><button data-p="30">30 วัน</button>
@@ -5491,7 +5491,7 @@ document.getElementById('snap').onclick = async () => {
   const keys = Object.keys(FNAME).filter(k => getF(k));
   const cap = document.createElement('div'); cap.className = 'snapcap';
   const rng = REP.from === REP.to ? dmy(REP.from) : dmy(REP.from) + ' – ' + dmy(REP.to);
-  cap.innerHTML = '<b>รายงาน On Time · ' + rng + '</b><span>' + (keys.length ? 'กรอง: ' + keys.map(k => FNAME[k] + ' ' + esc(getF(k))).join(' · ') + ' · ' : '') +
+  cap.innerHTML = '<b>รายงาน On Time PTGLG · ' + rng + '</b><span>' + (keys.length ? 'กรอง: ' + keys.map(k => FNAME[k] + ' ' + esc(getF(k))).join(' · ') + ' · ' : '') +
     'แคปเมื่อ ' + new Date().toLocaleString('th-TH', {dateStyle: 'short', timeStyle: 'short'}) + '</span>';
   main.insertBefore(cap, main.firstChild);
   const hide = [...main.querySelectorAll('[data-nosnap]')].filter(e => !e.hidden);   // ซ่อนจริงระหว่างแคป ไม่งั้นรูปมีที่ว่างเท่าความสูงตาราง
@@ -5502,10 +5502,10 @@ document.getElementById('snap').onclick = async () => {
     try{ fontCss = await lib.getFontEmbedCSS(main); }catch(e){}                       // ฝังฟอนต์ไทย ตัวหนังสือในรูปจะได้กว้างเท่าบนจอ
     const blob = await lib.toBlob(main, {pixelRatio: 2, backgroundColor: getComputedStyle(document.body).backgroundColor,
       fontEmbedCSS: fontCss || undefined, skipFonts: !fontCss, filter: n => !(n.dataset && n.dataset.nosnap)});
-    const name = 'ontime_' + REP.from + (REP.to !== REP.from ? '_' + REP.to : '') + '.png';
+    const name = 'PTGLG_ontime_' + REP.from + (REP.to !== REP.from ? '_' + REP.to : '') + '.png';
     const file = new File([blob], name, {type: 'image/png'});
     if(navigator.canShare && navigator.canShare({files: [file]}) && matchMedia('(pointer:coarse)').matches){
-      try{ await navigator.share({files: [file], title: 'รายงาน On Time ' + rng}); }catch(e){}
+      try{ await navigator.share({files: [file], title: 'รายงาน On Time PTGLG ' + rng}); }catch(e){}
     }else{
       const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
       document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
@@ -5643,7 +5643,7 @@ READY_HTML = """<!doctype html>
   .ph{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:2px}
   .ph h3{margin:0;font-size:15.5px;font-weight:700;white-space:nowrap}
   .ph .s2{font-size:13px;color:var(--mut)}
-  .ph .legend{margin:0 0 0 auto;flex:0 0 auto}
+  .ph .legend{margin:0 0 0 auto;flex:0 0 auto;flex-wrap:nowrap}
   .desc{font-size:13px;color:var(--mut);margin:2px 0 12px}
   .chart{position:relative;width:100%}
   .chart svg{display:block;overflow:visible}
@@ -5735,7 +5735,7 @@ READY_HTML = """<!doctype html>
   <a class="menu out" href="/logout" title="ออกจากระบบ">🚪<span>ออกจากระบบ</span></a>
 </aside>
 <header><div class="hd">
-  <div class="ttl"><h1>รถ/คนพร้อมใช้งาน</h1><p id="stamp">สถานะจากชีตข้อมูลรถ+พขร. · งานจากชีตแผนงาน · อ่านอย่างเดียว</p></div>
+  <div class="ttl"><h1>รถ/คนพร้อมใช้งาน PTGLG</h1><p id="stamp">สถานะจากชีตข้อมูลรถ+พขร. · งานจากชีตแผนงาน · อ่านอย่างเดียว</p></div>
   <span class="grow"></span>
   <div class="ctl">
   <div class="seg" id="presets"><button data-a="-1" data-b="-1">เมื่อวาน</button><button data-a="0" data-b="0">วันนี้</button><button data-a="1" data-b="1">พรุ่งนี้</button><button data-a="-6" data-b="0">7 วัน</button><button data-a="-29" data-b="0">30 วัน</button></div>
@@ -6044,7 +6044,7 @@ document.getElementById('snap').onclick = async () => {
   b.disabled = true; b.textContent = '⏳ กำลังแคป…'; tip.hidden = true;
   const cap = document.createElement('div'); cap.className = 'snapcap';
   const day = rangeText() + ' ' + (dt(REP.to).getFullYear() + 543);
-  cap.innerHTML = '<b>รถ/คนพร้อมใช้งาน · ' + esc(day) + '</b><span>เป้า ' + esc(REP.target) + ' เที่ยว/คัน · แคปเมื่อ ' +
+  cap.innerHTML = '<b>รถ/คนพร้อมใช้งาน PTGLG · ' + esc(day) + '</b><span>เป้า ' + esc(REP.target) + ' เที่ยว/คัน · แคปเมื่อ ' +
     new Date().toLocaleString('th-TH', {dateStyle: 'short', timeStyle: 'short'}) + '</span>';
   main.insertBefore(cap, main.firstChild);
   const hide = [...main.querySelectorAll('[data-nosnap]')].filter(e => !e.hidden);   // ซ่อนจริงระหว่างแคป ไม่งั้นรูปมีที่ว่างเท่าความสูงตาราง
@@ -6055,10 +6055,10 @@ document.getElementById('snap').onclick = async () => {
     try{ fontCss = await lib.getFontEmbedCSS(main); }catch(e){}                       // ฝังฟอนต์ไทย ตัวหนังสือในรูปจะได้กว้างเท่าบนจอ
     const blob = await lib.toBlob(main, {pixelRatio: 2, backgroundColor: getComputedStyle(document.body).backgroundColor,
       fontEmbedCSS: fontCss || undefined, skipFonts: !fontCss});
-    const name = 'ready_' + REP.from + (REP.to !== REP.from ? '_' + REP.to : '') + '.png';
+    const name = 'PTGLG_ready_' + REP.from + (REP.to !== REP.from ? '_' + REP.to : '') + '.png';
     const file = new File([blob], name, {type: 'image/png'});
     if(navigator.canShare && navigator.canShare({files: [file]}) && matchMedia('(pointer:coarse)').matches){
-      try{ await navigator.share({files: [file], title: 'รถ/คนพร้อมใช้งาน ' + day}); }catch(e){}
+      try{ await navigator.share({files: [file], title: 'รถ/คนพร้อมใช้งาน PTGLG ' + day}); }catch(e){}
     }else{
       const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
       document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
