@@ -5199,7 +5199,7 @@ async function load(keepFilters){
       fill('fCar', REP.filters.cars, 'เบอร์รถ'); fill('fDrop', REP.filters.drops, 'Drop');
     }
     render();
-    document.getElementById('stamp').textContent = 'ข้อมูลจากชีตแผนงานจริง · อ่านอย่างเดียว · อัปเดต ' + new Date().toLocaleTimeString('th-TH', {hour: '2-digit', minute: '2-digit'});
+    document.getElementById('stamp').textContent = 'ข้อมูลจากชีตแผนงานจริง · อ่านอย่างเดียว · อัปเดต ' + arT(new Date()) + arStamp();
   }catch(e){ err.textContent = 'โหลดรายงานไม่สำเร็จ: ' + e.message; err.hidden = false; }
   finally{ main.classList.remove('busy'); }
 }
@@ -5500,6 +5500,18 @@ document.getElementById('snap').onclick = async () => {
 ['dFrom', 'dTo'].forEach(id => { document.getElementById(id).onchange = () => { markPreset(); load(); }; });
 ['fOrigin', 'fVtype', 'fCar', 'fDrop', 'fStatus'].forEach(id => { document.getElementById(id).onchange = () => load(true); });
 document.getElementById('q').oninput = () => { if(REP) drawRows(); };
+// ── รีเฟรชอัตโนมัติทุก 30 นาที: เปิดทิ้งไว้ก็ได้ข้อมูลใหม่เอง (ตัวกรอง/ช่วงวันที่ที่เลือกยังอยู่) ──
+// แท็บที่ซ่อนอยู่ไม่โหลด (ประหยัดโควตาชีต) กลับมาที่แท็บแล้วถ้าเลยเวลา โหลดทันที
+const AR_MIN = 30;
+let AR_NEXT = Date.now() + AR_MIN * 60000;
+function arT(d){ return d.toLocaleTimeString('th-TH', {hour: '2-digit', minute: '2-digit'}); }
+function arStamp(){ AR_NEXT = Date.now() + AR_MIN * 60000; return ' · 🔄 รีเฟรชอัตโนมัติทุก ' + AR_MIN + ' นาที (ครั้งถัดไป ' + arT(new Date(AR_NEXT)) + ')'; }
+function arTick(){
+  const busy = document.getElementById('main').classList.contains('busy') || document.getElementById('snap').disabled;
+  if(Date.now() >= AR_NEXT && !document.hidden && !busy) load(true);
+}
+setInterval(arTick, 30000);
+document.addEventListener('visibilitychange', () => { if(!document.hidden) arTick(); });
 setRange(new Date(), new Date());
 load();
 </script>
@@ -5936,7 +5948,7 @@ function markPreset(){
   document.querySelectorAll('#presets button').forEach(b => b.classList.toggle('on', shift(+b.dataset.a) === f && shift(+b.dataset.b) === t));
 }
 function setRange(f, t){ document.getElementById('dFrom').value = f; document.getElementById('dTo').value = t; markPreset(); }
-async function load(){
+async function load(keep){
   const main = document.getElementById('main'), err = document.getElementById('err');
   err.hidden = true; main.classList.add('busy');
   const tg = document.getElementById('tg').value;
@@ -5947,9 +5959,10 @@ async function load(){
     if(!res.ok){ let m = 'HTTP ' + res.status; try{ m = (await res.json()).detail || m; }catch(e){} throw new Error(m); }
     REP = await res.json();
     MULTI = (REP.days || 1) > 1;
-    FC = {}; FP = {}; markPreset();
+    if(keep !== true){ FC = {}; FP = {}; }
+    markPreset();
     render();
-    document.getElementById('stamp').textContent = 'สถานะจากชีตข้อมูลรถ+พขร. · งานจากชีตแผนงาน · อัปเดต ' + new Date().toLocaleTimeString('th-TH', {hour: '2-digit', minute: '2-digit'});
+    document.getElementById('stamp').textContent = 'สถานะจากชีตข้อมูลรถ+พขร. · งานจากชีตแผนงาน · อัปเดต ' + arT(new Date()) + arStamp();
   }catch(e){ err.textContent = 'โหลดไม่สำเร็จ: ' + e.message; err.hidden = false; }
   finally{ main.classList.remove('busy'); }
 }
@@ -6041,6 +6054,18 @@ document.getElementById('q').oninput = () => { if(REP) drawRows(); };
 ['dFrom', 'dTo'].forEach(id => { document.getElementById(id).onchange = () => { markPreset(); load(); }; });
 document.getElementById('tg').onchange = load;
 document.querySelectorAll('#presets button').forEach(b => b.onclick = () => { setRange(shift(+b.dataset.a), shift(+b.dataset.b)); load(); });
+// ── รีเฟรชอัตโนมัติทุก 30 นาที: เปิดทิ้งไว้ก็ได้ข้อมูลใหม่เอง (ตัวกรอง/ช่วงวันที่ที่เลือกยังอยู่) ──
+// แท็บที่ซ่อนอยู่ไม่โหลด (ประหยัดโควตาชีต) กลับมาที่แท็บแล้วถ้าเลยเวลา โหลดทันที
+const AR_MIN = 30;
+let AR_NEXT = Date.now() + AR_MIN * 60000;
+function arT(d){ return d.toLocaleTimeString('th-TH', {hour: '2-digit', minute: '2-digit'}); }
+function arStamp(){ AR_NEXT = Date.now() + AR_MIN * 60000; return ' · 🔄 รีเฟรชอัตโนมัติทุก ' + AR_MIN + ' นาที (ครั้งถัดไป ' + arT(new Date(AR_NEXT)) + ')'; }
+function arTick(){
+  const busy = document.getElementById('main').classList.contains('busy') || document.getElementById('snap').disabled;
+  if(Date.now() >= AR_NEXT && !document.hidden && !busy) load(true);
+}
+setInterval(arTick, 30000);
+document.addEventListener('visibilitychange', () => { if(!document.hidden) arTick(); });
 markPreset(); load();
 </script>
 </body>
