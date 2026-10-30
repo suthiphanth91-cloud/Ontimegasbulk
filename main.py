@@ -202,13 +202,18 @@ def _app_password() -> str:
     return os.environ.get("APP_PASSWORD", "")
 
 
-# ผู้ใช้แต่ละคนอยู่ในแท็บ "User" ของไฟล์ ChaseLog (PLAN_ID) — อ่านอย่างเดียว ไม่เขียนกลับ
-# หัวตาราง: ชื่อผู้ใช้ | รหัสผ่าน | เช็กรถ | แผนงาน | รายงาน | ใช้งาน   (ติ๊ก = เปิดหน้านั้นได้)
+# ผู้ใช้แต่ละคนอยู่ในแท็บ "User" ของไฟล์ ChaseLog (PLAN_ID) — แก้ได้ทั้งในชีตและหน้า /users บนเว็บ (เฉพาะผู้ดูแล)
+# หัวตาราง: ชื่อผู้ใช้ | รหัสผ่าน | เช็กรถ | แผนงาน | รายงาน | รถ/คนพร้อมใช้ | ผู้ดูแล | ใช้งาน   (ติ๊ก = เปิดหน้านั้นได้)
+#   ชีตเก่าที่ยังไม่มีคอลัมน์ "รถ/คนพร้อมใช้" = ใช้สิทธิ์เดียวกับ "รายงาน" · ยังไม่มี "ผู้ดูแล" = ผู้ดูแลคือคนที่ติ๊กครบทุกหน้า
+#   รหัสผ่านที่ตั้งจากเว็บเก็บแบบ hash (pbkdf2_sha256$...) — รหัสตัวอักษรตรงๆ ที่พิมพ์ในชีตเองยังใช้ได้
 # รหัสกลาง APP_PASSWORD ยังเข้าได้ทุกหน้าเสมอ (กันล็อกตัวเองออกถ้าชีตมีปัญหา)
 USERS_TAB  = os.environ.get("USERS_TAB", "User")
 USERS_TTL  = 60                                      # อ่านชีตผู้ใช้ใหม่ทุก 1 นาที (ปิดบัญชีแล้วมีผลเร็ว)
-PERMS_ALL  = frozenset({"car", "plan", "report"})
-PERM_PAGES = [("car", "/"), ("plan", "/plan"), ("report", "/report")]
+PAGE_PERMS = ("car", "plan", "report", "ready")
+PERMS_ALL  = frozenset(PAGE_PERMS + ("admin",))
+PERM_PAGES = [("car", "/"), ("plan", "/plan"), ("report", "/report"), ("ready", "/ready")]
+# ชื่อหัวคอลัมน์ในชีต (ใช้ทั้งอ่านและตอนเว็บเพิ่มคอลัมน์ให้)
+PERM_HEAD  = {"car": "เช็กรถ", "plan": "แผนงาน", "report": "รายงาน", "ready": "รถ/คนพร้อมใช้", "admin": "ผู้ดูแล"}
 _TRUE_MARKS = {"✓", "✔", "☑", "true", "yes", "y", "1", "x", "ใช่", "/"}
 _users_cache: dict = {"ts": 0.0, "data": None}
 
@@ -222,26 +227,48 @@ def _load_users_rows() -> list:
     return gc.open_by_key(_users_sheet_id()).worksheet(USERS_TAB).get_all_values()
 
 
-def _parse_users(rows: list) -> dict:
-    """แถวจากชีต → {ชื่อผู้ใช้ (ตัวเล็ก): {"pw": รหัส, "perms": {...}}} — ข้ามคนที่ไม่ได้ติ๊ก "ใช้งาน" หรือไม่ได้ติ๊กหน้าไหนเลย"""
-    hdr = next((n for n, r in enumerate(rows[:10]) if any("ชื่อผู้ใช้" in c or c.strip().lower() in ("user", "username") for c in r)), None)
+def _users_layout(rows: list):
+    """หาแถวหัวตาราง + คอลัมน์ของแต่ละช่องในแท็บ User → (แถวหัว, {ช่อง: คอลัมน์}) · ไม่เจอ = (None, {})"""
+    # แถวหัว = มีทั้งช่องชื่อผู้ใช้และช่องรหัส (กันแถวหัวเรื่องอย่าง "รายชื่อผู้ใช้ระบบ" ที่มีคำว่า ชื่อผู้ใช้ เหมือนกัน)
+    is_user = lambda c: c.strip() == "ชื่อผู้ใช้" or c.strip().lower() in ("user", "username")
+    is_pw = lambda c: "รหัส" in c or "pass" in c.lower()
+    hdr = next((n for n, r in enumerate(rows[:10]) if any(is_user(c) for c in r) and any(is_pw(c) for c in r)), None)
     if hdr is None:
-        return {}
+        return None, {}
     h = [c.strip().lower() for c in rows[hdr]]
     find = lambda *keys: next((n for n, c in enumerate(h) if any(k in c for k in keys)), None)
-    cu, cp, ca = find("ชื่อผู้ใช้", "user"), find("รหัส", "pass"), find("ใช้งาน", "active")
-    cols = {"car": find("เช็กรถ", "เช็ครถ"), "plan": find("แผนงาน"), "report": find("รายงาน")}
-    if cu is None or cp is None:
+    return hdr, {"user": find("ชื่อผู้ใช้", "user"), "pw": find("รหัส", "pass"), "active": find("ใช้งาน", "active"),
+                 "car": find("เช็กรถ", "เช็ครถ"), "plan": find("แผนงาน"), "report": find("รายงาน"),
+                 "ready": find("พร้อมใช้"), "admin": find("ผู้ดูแล", "admin"), "last": find("เข้าใช้ล่าสุด", "last login")}
+
+
+def _row_perms(cell, on, cols: dict) -> frozenset:
+    """สิทธิ์ของแถวหนึ่ง — คอลัมน์ไหนยังไม่มีในชีต ใช้กติกาเดิม (ready ตาม report · ผู้ดูแล = ติ๊กครบทุกหน้า)"""
+    perms = {k for k in ("car", "plan", "report", "ready") if cols.get(k) is not None and on(cols[k])}
+    if cols.get("ready") is None and "report" in perms:
+        perms.add("ready")
+    if cols.get("admin") is None:
+        if all(k in perms for k in PAGE_PERMS):
+            perms.add("admin")
+    elif on(cols["admin"]):
+        perms.add("admin")
+    return frozenset(perms)
+
+
+def _parse_users(rows: list) -> dict:
+    """แถวจากชีต → {ชื่อผู้ใช้ (ตัวเล็ก): {"pw": รหัส, "perms": {...}}} — ข้ามคนที่ไม่ได้ติ๊ก "ใช้งาน" หรือไม่ได้ติ๊กหน้าไหนเลย"""
+    hdr, cols = _users_layout(rows)
+    if hdr is None or cols["user"] is None or cols["pw"] is None:
         return {}
     out = {}
     for r in rows[hdr + 1:]:
         cell = lambda n: r[n].strip() if n is not None and n < len(r) else ""
         on = lambda n: cell(n).lower() in _TRUE_MARKS
-        user, pw = cell(cu).lower(), cell(cp)
-        if not user or not pw or (ca is not None and not on(ca)):
+        user, pw = cell(cols["user"]).lower(), cell(cols["pw"])
+        if not user or not pw or (cols["active"] is not None and not on(cols["active"])):
             continue
-        perms = frozenset(k for k, n in cols.items() if on(n))
-        if perms:
+        perms = _row_perms(cell, on, cols)
+        if perms - {"admin"}:
             out[user] = {"pw": pw, "perms": perms}
     return out
 
@@ -260,14 +287,16 @@ def _users() -> dict:
 
 
 def _need_perm(path: str) -> str:
-    """หน้า/API นี้ต้องมีสิทธิ์อะไร: car / plan / report / "" (ทุกคน) / admin (ต้องมีครบทุกหน้า)"""
+    """หน้า/API นี้ต้องมีสิทธิ์อะไร: car / plan / report / ready / "" (ทุกคน) / admin (ผู้ดูแล: ตั้งค่า, จัดการผู้ใช้ ฯลฯ)"""
     if path in ("/logout", "/favicon.ico"):
         return ""
     if path == "/" or path in ("/api/trips", "/api/chase", "/api/timeline", "/api/match"):
         return "car"
     if path in ("/plan", "/api/plan") or path.startswith("/api/plan/"):
         return "plan"
-    if path in ("/report", "/ready") or path.startswith("/api/report/"):
+    if path in ("/ready", "/api/report/ready"):
+        return "ready"
+    if path == "/report" or path.startswith("/api/report/"):
         return "report"
     return "admin"                                   # ตั้งค่า / debug / docs ฯลฯ
 
@@ -339,8 +368,8 @@ def _perms_of(token: str):
 def _nav(html: str, request: Request) -> str:
     """ซ่อนเมนูหน้าที่ผู้ใช้ไม่มีสิทธิ์"""
     perms = getattr(request.state, "perms", PERMS_ALL)
-    for k, url in PERM_PAGES + [("report", "/ready"), ("admin", "/settings")]:   # /ready ใช้สิทธิ์เดียวกับหน้ารายงาน
-        if (k == "admin" and not perms >= PERMS_ALL) or (k != "admin" and k not in perms):
+    for k, url in PERM_PAGES + [("admin", "/settings"), ("admin", "/users")]:
+        if k not in perms:
             html = re.sub(r'<a\b[^>]*\bhref="' + re.escape(url) + r'"[^>]*>.*?</a>\s*', "", html)
     return html
 
@@ -392,7 +421,7 @@ async def require_login(request: Request, call_next):
     if perms is not None:
         request.state.perms = perms
         need = _need_perm(path)
-        if not need or need in perms or (need == "admin" and perms >= PERMS_ALL):
+        if not need or need in perms:
             return await call_next(request)
         if path.startswith("/api/"):
             return JSONResponse({"detail": "บัญชีนี้ไม่มีสิทธิ์ดูส่วนนี้"}, status_code=403)
@@ -4033,6 +4062,28 @@ def _pw_equal(a: str, b: str) -> bool:
     return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
 
+PW_HASH_ITER = 200_000
+
+
+def _pw_hash(pw: str) -> str:
+    """รหัสผ่าน → "pbkdf2_sha256$รอบ$salt$hash" (เก็บในชีตแทนตัวรหัส — เปิดชีตก็ไม่เห็นรหัสจริง)"""
+    salt = base64.b64encode(os.urandom(12)).decode()
+    dk = hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8"), salt.encode(), PW_HASH_ITER)
+    return f"pbkdf2_sha256${PW_HASH_ITER}${salt}${base64.b64encode(dk).decode()}"
+
+
+def _pw_check(pw: str, stored: str) -> bool:
+    """ตรวจรหัสกับค่าที่เก็บในชีต — รองรับทั้งแบบ hash (ตั้งจากเว็บ) และแบบตัวอักษรตรงๆ (พิมพ์ในชีตเอง)"""
+    if stored.startswith("pbkdf2_sha256$"):
+        try:
+            _, it, salt, h = stored.split("$", 3)
+            dk = hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8"), salt.encode(), int(it))
+            return hmac.compare_digest(base64.b64encode(dk), h.encode())
+        except (ValueError, TypeError):
+            return False
+    return _pw_equal(pw, stored)
+
+
 @app.post("/api/login", include_in_schema=False)
 def do_login(request: Request, password: str = Form(""), username: str = Form("")):
     pw = _app_password()
@@ -4042,8 +4093,9 @@ def do_login(request: Request, password: str = Form(""), username: str = Form(""
         return RedirectResponse("/login?error=2", status_code=303)
     uname = (username or "").strip().lower()
     u = _users().get(uname) if (pw and uname) else None
-    if u and _pw_equal(password, u["pw"]):
+    if u and _pw_check(password, u["pw"]):
         role, dest = uname, _home_for(u["perms"])    # ผู้ใช้จากชีต → หน้าแรกที่มีสิทธิ์
+        _users_touch(uname)                          # บันทึก "เข้าใช้ล่าสุด" ลงแท็บ User
     elif pw and _pw_equal(password, pw):
         role, dest = "", "/"                         # รหัสกลาง → ทุกหน้า
     else:
@@ -4061,6 +4113,201 @@ def do_login(request: Request, password: str = Form(""), username: str = Form(""
     return resp
 
 
+# ─── จัดการผู้ใช้ (หน้า /users — เฉพาะผู้ดูแล) · เขียนลงแท็บ User เดิม ─────────────────────────────
+USER_RE    = re.compile(r"^[A-Za-z0-9ก-๙._-]{2,32}$")
+USERS_HEAD = ["ชื่อผู้ใช้", "รหัสผ่าน", "เช็กรถ", "แผนงาน", "รายงาน", "รถ/คนพร้อมใช้", "ผู้ดูแล", "ใช้งาน", "เข้าใช้ล่าสุด"]
+PW_MIN     = 6
+_MARK      = "✓"
+
+
+def _users_ws():
+    """แท็บ User (ไม่มี = สร้างพร้อมหัวตาราง)"""
+    sh = gspread.authorize(_build_creds()).open_by_key(_users_sheet_id())
+    try:
+        return sh.worksheet(USERS_TAB)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(USERS_TAB, rows=200, cols=len(USERS_HEAD))
+        ws.update("A1", [USERS_HEAD], value_input_option="RAW")
+        return ws
+
+
+def _users_sheet(ws) -> tuple:
+    """อ่านแท็บ User → (แถว, แถวหัว, คอลัมน์) และเติมคอลัมน์ที่ยังไม่มีต่อท้ายหัวตาราง
+    เติม "รถ/คนพร้อมใช้" / "ผู้ดูแล" / "ใช้งาน" พร้อมค่าที่ทำให้ทุกคนได้สิทธิ์เท่าเดิม (ไม่มีใครเข้าไม่ได้เพราะเพิ่มคอลัมน์)"""
+    rows = _with_retry(ws.get_all_values)
+    hdr, cols = _users_layout(rows)
+    if hdr is None:
+        _with_retry(lambda: ws.update("A1", [USERS_HEAD], value_input_option="RAW"))
+        rows = [USERS_HEAD]
+        hdr, cols = _users_layout(rows)
+    keys = [k for k in ("ready", "admin", "active", "last") if cols[k] is None]
+    if not keys:
+        return rows, hdr, cols
+    head = list(rows[hdr])
+    old = dict(cols)
+    names = {"ready": PERM_HEAD["ready"], "admin": PERM_HEAD["admin"], "active": "ใช้งาน", "last": "เข้าใช้ล่าสุด"}
+    for k in keys:
+        cols[k] = len(head)
+        head.append(names[k])
+    if ws.col_count < len(head):
+        _with_retry(lambda: ws.add_cols(len(head) - ws.col_count))
+    body = []
+    for r in rows[hdr + 1:]:
+        cell = lambda n: r[n].strip() if n is not None and n < len(r) else ""
+        on = lambda n: cell(n).lower() in _TRUE_MARKS
+        perms = _row_perms(cell, on, old)
+        val = {"ready": _MARK if "ready" in perms else "", "admin": _MARK if "admin" in perms else "",
+               "active": _MARK if cell(old["user"]) else "", "last": ""}
+        body.append([val[k] for k in keys])
+    a = gspread.utils.rowcol_to_a1(hdr + 1, cols[keys[0]] + 1)
+    b = gspread.utils.rowcol_to_a1(hdr + 1 + len(body), cols[keys[-1]] + 1)
+    _with_retry(lambda: ws.update(f"{a}:{b}", [[names[k] for k in keys]] + body, value_input_option="RAW"))
+    rows = _with_retry(ws.get_all_values)
+    return rows, hdr, cols
+
+
+def _users_find(rows, hdr, cols, user: str):
+    """เลขแถวในชีต (เริ่ม 1) ของผู้ใช้ — ไม่เจอ = None"""
+    u = user.strip().lower()
+    for i in range(hdr + 1, len(rows)):
+        r = rows[i]
+        if cols["user"] < len(r) and r[cols["user"]].strip().lower() == u:
+            return i + 1
+    return None
+
+
+def _users_write(ws, row_no: int, cols: dict, values: dict) -> None:
+    """เขียนเฉพาะช่องที่ให้มา {ช่อง: ค่า} ลงแถวนั้น (คำสั่งเดียว)"""
+    data = [{"range": gspread.utils.rowcol_to_a1(row_no, cols[k] + 1), "values": [[v]]} for k, v in values.items()]
+    _with_retry(lambda: ws.batch_update(data, value_input_option="RAW"))
+
+
+def _users_forget() -> None:
+    _users_cache.update(ts=0.0, data=None)          # อ่านชีตผู้ใช้ใหม่ทันที สิทธิ์ที่เพิ่งแก้มีผลเลย
+
+
+def _users_touch(user: str) -> None:
+    """บันทึก "เข้าใช้ล่าสุด" ของผู้ใช้ที่ล็อกอินสำเร็จ — พลาดก็ไม่เป็นไร ไม่ให้ล็อกอินล้มเพราะเรื่องนี้"""
+    try:
+        ws = _users_ws()
+        rows, hdr, cols = _users_sheet(ws)
+        row_no = _users_find(rows, hdr, cols, user)
+        if row_no:
+            _users_write(ws, row_no, cols, {"last": _thai_now().strftime("%d/%m/%Y %H:%M")})
+    except Exception:
+        pass
+
+
+def _me(request: Request) -> str:
+    """ชื่อผู้ใช้ที่ล็อกอินอยู่ ("" = รหัสกลาง)"""
+    return _token_user(request.cookies.get(COOKIE_NAME, "")) or ""
+
+
+class UserIn(BaseModel):
+    user: str
+    password: str = ""
+    perms: Optional[list[str]] = None
+    active: Optional[bool] = None
+
+
+def _clean_perms(perms) -> set:
+    p = {x for x in (perms or []) if x in PERMS_ALL}
+    if not p & set(PAGE_PERMS):
+        raise HTTPException(400, "ต้องติ๊กอย่างน้อย 1 หน้าที่ให้เข้าได้")
+    return p
+
+
+@app.get("/api/users", include_in_schema=False)
+def users_list(request: Request):
+    """รายชื่อผู้ใช้ทั้งหมด (ไม่ส่งรหัสผ่านออกไป)"""
+    try:
+        rows, hdr, cols = _users_sheet(_users_ws())
+    except Exception as e:
+        raise HTTPException(502, f"เปิดแท็บ “{USERS_TAB}” ไม่ได้ — {type(e).__name__} (ต้องแชร์ไฟล์ให้บัญชีของเว็บเป็นผู้แก้ไข)")
+    out = []
+    for r in rows[hdr + 1:]:
+        cell = lambda n: r[n].strip() if n is not None and n < len(r) else ""
+        on = lambda n: cell(n).lower() in _TRUE_MARKS
+        user = cell(cols["user"])
+        if not user:
+            continue
+        out.append({"user": user, "perms": sorted(_row_perms(cell, on, cols)), "active": on(cols["active"]),
+                    "last": cell(cols["last"]), "has_pw": bool(cell(cols["pw"])),
+                    "hashed": cell(cols["pw"]).startswith("pbkdf2_sha256$")})
+    return {"users": out, "me": _me(request), "heads": PERM_HEAD, "sheet": USERS_TAB}
+
+
+@app.post("/api/users", include_in_schema=False)
+def users_add(p: UserIn):
+    user = p.user.strip()
+    if not USER_RE.match(user):
+        raise HTTPException(400, "ชื่อผู้ใช้ 2–32 ตัว ใช้ได้เฉพาะ ก-ฮ a-z 0-9 . _ - (ไม่มีช่องว่าง)")
+    if len(p.password) < PW_MIN:
+        raise HTTPException(400, f"รหัสผ่านอย่างน้อย {PW_MIN} ตัว")
+    perms = _clean_perms(p.perms)
+    ws = _users_ws()
+    rows, hdr, cols = _users_sheet(ws)
+    if _users_find(rows, hdr, cols, user):
+        raise HTTPException(409, f"มีผู้ใช้ “{user}” อยู่แล้ว")
+    row_no = len(rows) + 1
+    if ws.row_count < row_no:
+        _with_retry(lambda: ws.add_rows(20))
+    vals = {"user": user, "pw": _pw_hash(p.password), "active": _MARK if p.active is not False else "", "last": ""}
+    vals.update({k: (_MARK if k in perms else "") for k in PERMS_ALL if cols.get(k) is not None})
+    _users_write(ws, row_no, cols, vals)
+    _users_forget()
+    return {"ok": True}
+
+
+@app.post("/api/users/update", include_in_schema=False)
+def users_update(p: UserIn, request: Request):
+    me = _me(request).lower()
+    ws = _users_ws()
+    rows, hdr, cols = _users_sheet(ws)
+    row_no = _users_find(rows, hdr, cols, p.user)
+    if not row_no:
+        raise HTTPException(404, f"ไม่พบผู้ใช้ “{p.user}”")
+    vals: dict = {}
+    if p.perms is not None:
+        perms = _clean_perms(p.perms)
+        if me and p.user.strip().lower() == me and "admin" not in perms:
+            raise HTTPException(400, "เอาสิทธิ์ผู้ดูแลของตัวเองออกไม่ได้ (กันล็อกตัวเองออก) — ให้ผู้ดูแลคนอื่นทำ")
+        vals.update({k: (_MARK if k in perms else "") for k in PERMS_ALL if cols.get(k) is not None})
+    if p.active is not None:
+        if me and p.user.strip().lower() == me and not p.active:
+            raise HTTPException(400, "ปิดบัญชีของตัวเองไม่ได้")
+        vals["active"] = _MARK if p.active else ""
+    if p.password:
+        if len(p.password) < PW_MIN:
+            raise HTTPException(400, f"รหัสผ่านอย่างน้อย {PW_MIN} ตัว")
+        vals["pw"] = _pw_hash(p.password)
+    if not vals:
+        raise HTTPException(400, "ไม่มีอะไรให้แก้")
+    _users_write(ws, row_no, cols, vals)
+    _users_forget()
+    return {"ok": True}
+
+
+@app.post("/api/users/delete", include_in_schema=False)
+def users_delete(p: UserIn, request: Request):
+    me = _me(request).lower()
+    if me and p.user.strip().lower() == me:
+        raise HTTPException(400, "ลบบัญชีของตัวเองไม่ได้")
+    ws = _users_ws()
+    rows, hdr, cols = _users_sheet(ws)
+    row_no = _users_find(rows, hdr, cols, p.user)
+    if not row_no:
+        raise HTTPException(404, f"ไม่พบผู้ใช้ “{p.user}”")
+    _with_retry(lambda: ws.delete_rows(row_no))
+    _users_forget()
+    return {"ok": True}
+
+
+@app.get("/users", response_class=HTMLResponse, include_in_schema=False)
+def users_page(request: Request):
+    return _nav(USERS_HTML, request)
+
+
 @app.get("/logout", include_in_schema=False)
 def logout():
     resp = RedirectResponse("/login", status_code=303)
@@ -4074,6 +4321,203 @@ def settings_page():
             .replace("__PWSET__", "ตั้งแล้ว ✓" if _app_password() else "ยังไม่ได้ตั้ง")
             .replace("__POSSRC__", "eZView API (ดึงตรง)" if os.environ.get("EZ_POS_USER") and EZ_POS_URL else "ชีต PTGL")
             .replace("__TMSSRC__", "เปิด (แท็บ TripDetails)" if TMS_SHEET_ID else "ปิด — ยังไม่ได้ตั้ง TMS_SHEET_ID"))
+
+
+USERS_HTML = """<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>จัดการผู้ใช้ — Gasbulk Track</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet" crossorigin="anonymous">
+<style>
+  :root{color-scheme:light;
+    --plane:#f4f5f7;--card:#ffffff;--line:#e6e8ec;--hair:#eceae4;--track:#eef0f3;
+    --ink:#0b0b0b;--ink2:#3f3e3b;--mut:#6b6964;--hover:#f3f6fb;--acc:#2563eb;
+    --good:#0ca30c;--crit:#d03b3b;--crit-ink:#b42318;--crit-bg:#fdecec;--good-bg:#e9f7e9;--good-ink:#006300;
+    --shadow:0 1px 2px rgba(16,24,40,.05),0 1px 3px rgba(16,24,40,.07)}
+  @media (prefers-color-scheme:dark){
+    :root:where(:not([data-theme="light"])){color-scheme:dark;
+      --plane:#0d0d0d;--card:#161616;--line:#2a2a28;--hair:#2c2c2a;--track:#242422;
+      --ink:#f0efec;--ink2:#d6d5cc;--mut:#a9a7a0;--hover:#1f2733;--acc:#3b82f6;
+      --crit-ink:#ff8a80;--crit-bg:#2d1414;--good-bg:#10260f;--good-ink:#3fcf3f;--shadow:none}}
+  :root[data-theme="dark"]{color-scheme:dark;
+      --plane:#0d0d0d;--card:#161616;--line:#2a2a28;--hair:#2c2c2a;--track:#242422;
+      --ink:#f0efec;--ink2:#d6d5cc;--mut:#a9a7a0;--hover:#1f2733;--acc:#3b82f6;
+      --crit-ink:#ff8a80;--crit-bg:#2d1414;--good-bg:#10260f;--good-ink:#3fcf3f;--shadow:none}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--plane);color:var(--ink);font-family:'Noto Sans Thai',system-ui,-apple-system,"Segoe UI",sans-serif;font-size:15px;padding-left:148px}
+  .side{position:fixed;left:0;top:0;bottom:0;width:148px;background:var(--card);border-right:1px solid var(--line);padding:14px 10px;display:flex;flex-direction:column;gap:6px;z-index:20}
+  .side .menu{display:flex;align-items:center;gap:9px;text-decoration:none;font-weight:700;font-size:16px;color:var(--ink);padding:11px 12px;border-radius:10px}
+  .side .menu:hover{background:var(--hover)}
+  .side .menu.on{background:#2563eb;color:#fff}
+  .side .menu.out{margin-top:auto;color:var(--mut);font-size:14.5px;white-space:nowrap}
+  header{background:var(--card);border-bottom:1px solid var(--line);padding:14px 22px}
+  header h1{font-size:21px;margin:0;font-weight:700}
+  header p{margin:2px 0 0;font-size:13.5px;color:var(--mut)}
+  main{padding:18px 22px 40px;display:grid;gap:12px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;box-shadow:var(--shadow);min-width:0}
+  .card h3{margin:0 0 4px;font-size:15.5px}
+  .desc{font-size:13px;color:var(--mut);margin:0 0 12px;line-height:1.5}
+  .addf{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:flex-end}
+  .fld{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--ink2);font-weight:600}
+  input[type=text],input[type=password]{font:inherit;font-size:15px;padding:8px 11px;border-radius:9px;border:1px solid var(--line);background:var(--card);color:var(--ink);min-width:200px}
+  .pwrap{display:flex;gap:6px}
+  .perms{display:flex;flex-wrap:wrap;gap:6px 14px;padding:8px 0}
+  .perms label{display:inline-flex;align-items:center;gap:6px;font-size:14px;cursor:pointer;white-space:nowrap}
+  input[type=checkbox]{width:17px;height:17px;accent-color:var(--acc);cursor:pointer}
+  input[type=checkbox]:disabled{cursor:not-allowed;opacity:.5}
+  .btn{font:inherit;font-size:15px;font-weight:600;padding:8px 16px;border-radius:9px;border:1px solid var(--acc);background:var(--acc);color:#fff;cursor:pointer}
+  .btn2{font:inherit;font-size:13.5px;font-weight:600;padding:5px 10px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer;white-space:nowrap}
+  .btn2:hover{background:var(--hover)}
+  .btn2.del{color:var(--crit-ink)}
+  .btn:disabled,.btn2:disabled{opacity:.55;cursor:wait}
+  .tw{overflow:auto;border:1px solid var(--line);border-radius:10px}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{padding:9px 12px;border-bottom:1px solid var(--hair);white-space:nowrap;text-align:left}
+  th.c,td.c{text-align:center}
+  thead th{font-size:12.5px;color:var(--mut);font-weight:600;background:var(--card);position:sticky;top:0}
+  tbody tr:hover td{background:var(--hover)}
+  tr.off td{color:var(--mut)}
+  tr.off td.u b{text-decoration:line-through}
+  .tag{display:inline-block;font-size:11.5px;font-weight:700;border-radius:999px;padding:1px 8px;margin-left:6px;background:var(--track);color:var(--ink2)}
+  .last{color:var(--mut);font-size:13px}
+  .msg{border-radius:10px;padding:10px 14px;font-size:14px}
+  .msg.err{background:var(--crit-bg);color:var(--crit-ink)}
+  .msg.ok{background:var(--good-bg);color:var(--good-ink)}
+  .note{font-size:13px;color:var(--mut);line-height:1.6}
+  .note b{color:var(--ink2)}
+  #toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);background:var(--ink);color:var(--card);padding:9px 16px;border-radius:10px;font-size:14px;font-weight:600;box-shadow:0 6px 20px rgba(0,0,0,.2);z-index:60}
+  [hidden]{display:none !important}
+  @media (max-width:820px){body{padding-left:0}
+    .side{position:static;width:auto;flex-direction:row;flex-wrap:wrap;border-right:0;border-bottom:1px solid var(--line);padding:6px 8px;gap:4px}
+    .side .menu{flex:1;justify-content:center;padding:8px 4px;font-size:13px;gap:5px;text-align:center}
+    .side .menu.out{flex:0 0 auto;margin-top:0} .side .menu.out span{display:none}
+    main{padding:12px 12px 30px}
+    input[type=text],input[type=password]{min-width:0;width:100%}
+    .fld{flex:1 1 100%}}
+</style>
+</head>
+<body>
+<aside class="side">
+  <a class="menu" href="/">🚛 เช็กรถ</a>
+  <a class="menu" href="/plan">📋 แผนงาน</a>
+  <a class="menu" href="/report">📊 รายงาน On Time</a>
+  <a class="menu" href="/ready">🚦 รถ/คนพร้อมใช้</a>
+  <a class="menu on" href="/users">👥 ผู้ใช้</a>
+  <a class="menu out" href="/logout" title="ออกจากระบบ">🚪<span>ออกจากระบบ</span></a>
+</aside>
+<header><h1>จัดการผู้ใช้</h1><p id="sub">เพิ่มผู้ใช้และกำหนดว่าแต่ละคนเปิดหน้าไหนได้ · บันทึกลงแท็บ User ในชีต · เฉพาะผู้ดูแล</p></header>
+<main>
+  <div id="msg" class="msg" hidden></div>
+  <section class="card">
+    <h3>เพิ่มผู้ใช้</h3>
+    <p class="desc">ชื่อผู้ใช้ 2–32 ตัว (ก-ฮ a-z 0-9 . _ -) · รหัสผ่านอย่างน้อย 6 ตัว · ติ๊กหน้าที่ให้เข้าได้อย่างน้อย 1 หน้า</p>
+    <form class="addf" id="addf" autocomplete="off">
+      <label class="fld">ชื่อผู้ใช้<input type="text" id="nUser" maxlength="32" required></label>
+      <label class="fld">รหัสผ่าน<span class="pwrap"><input type="password" id="nPw" minlength="6" required autocomplete="new-password">
+        <button type="button" class="btn2" id="gen" title="สุ่มรหัส 10 ตัว">สุ่ม</button><button type="button" class="btn2" id="eye">แสดง</button></span></label>
+      <div class="fld">เข้าได้หน้า<div class="perms" id="nPerms"></div></div>
+      <button class="btn" id="addBtn">+ เพิ่มผู้ใช้</button>
+    </form>
+  </section>
+  <section class="card">
+    <h3>ผู้ใช้ทั้งหมด <span class="tag" id="cnt">–</span></h3>
+    <p class="desc">ติ๊กเปลี่ยนสิทธิ์แล้วบันทึกทันที · มีผลกับคนที่ล็อกอินอยู่ภายใน 1 นาที · คนที่ปิด “ใช้งาน” จะเข้าระบบไม่ได้</p>
+    <div class="tw"><table><thead><tr id="head"></tr></thead><tbody id="rows"><tr><td class="last">กำลังโหลด…</td></tr></tbody></table></div>
+  </section>
+  <p class="note">🔑 <b>รหัสกลาง</b> (APP_PASSWORD ใน Vercel) เข้าได้ทุกหน้าเสมอ ใช้กู้คืนถ้าตั้งสิทธิ์ผิดจนเข้าไม่ได้ ·
+    รหัสที่ตั้งจากหน้านี้เก็บแบบ <b>เข้ารหัส</b> เปิดชีตจะไม่เห็นรหัสจริง · “เข้าใช้ล่าสุด” บันทึกตอนล็อกอินด้วยชื่อผู้ใช้สำเร็จ</p>
+</main>
+<div id="toast" hidden></div>
+<script>
+const PAGES = [['car', 'เช็กรถ'], ['plan', 'แผนงาน'], ['report', 'รายงาน On Time'], ['ready', 'รถ/คนพร้อมใช้'], ['admin', 'ผู้ดูแล']];
+let DATA = null;
+function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function toast(t){ const el = document.getElementById('toast'); el.textContent = t; el.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => el.hidden = true, 2200); }
+function msg(t, ok){ const el = document.getElementById('msg'); el.textContent = t || ''; el.className = 'msg ' + (ok ? 'ok' : 'err'); el.hidden = !t; }
+async function api(url, body){
+  const r = await fetch(url, body ? {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)} : {});
+  if(r.status === 401){ location.href = '/login'; throw new Error('ต้องล็อกอินก่อน'); }
+  let j = {}; try{ j = await r.json(); }catch(e){}
+  if(!r.ok) throw new Error(j.detail || ('HTTP ' + r.status));
+  return j;
+}
+function permBoxes(id, on){
+  document.getElementById(id).innerHTML = PAGES.map(p => '<label><input type="checkbox" value="' + p[0] + '"' + (on.includes(p[0]) ? ' checked' : '') + '>' + p[1] + '</label>').join('');
+}
+async function load(){
+  try{
+    DATA = await api('/api/users');
+    draw();
+  }catch(e){ msg('โหลดรายชื่อไม่สำเร็จ: ' + e.message); document.getElementById('rows').innerHTML = ''; }
+}
+function draw(){
+  const me = (DATA.me || '').toLowerCase();
+  document.getElementById('cnt').textContent = DATA.users.length + ' คน';
+  document.getElementById('head').innerHTML = '<th>ชื่อผู้ใช้</th>' + PAGES.map(p => '<th class="c">' + p[1] + '</th>').join('') +
+    '<th class="c">ใช้งาน</th><th>เข้าใช้ล่าสุด</th><th></th>';
+  document.getElementById('rows').innerHTML = DATA.users.map(u => {
+    const self = me && u.user.toLowerCase() === me;
+    return '<tr class="' + (u.active ? '' : 'off') + '" data-u="' + esc(u.user) + '"><td class="u"><b>' + esc(u.user) + '</b>' +
+      (self ? '<span class="tag">คุณ</span>' : '') + (!u.has_pw ? '<span class="tag">ยังไม่มีรหัส</span>' : '') + '</td>' +
+      PAGES.map(p => '<td class="c"><input type="checkbox" data-p="' + p[0] + '"' + (u.perms.includes(p[0]) ? ' checked' : '') +
+        (self && p[0] === 'admin' ? ' disabled title="เอาสิทธิ์ผู้ดูแลของตัวเองออกไม่ได้"' : '') + '></td>').join('') +
+      '<td class="c"><input type="checkbox" data-a="1"' + (u.active ? ' checked' : '') + (self ? ' disabled title="ปิดบัญชีตัวเองไม่ได้"' : '') + '></td>' +
+      '<td class="last">' + (esc(u.last) || '–') + '</td>' +
+      '<td><button class="btn2" data-pw="1">ตั้งรหัสใหม่</button> ' + (self ? '' : '<button class="btn2 del" data-del="1">ลบ</button>') + '</td></tr>';
+  }).join('') || '<tr><td colspan="9" class="last">ยังไม่มีผู้ใช้ — เพิ่มได้จากกล่องด้านบน</td></tr>';
+}
+document.getElementById('rows').addEventListener('change', async e => {
+  const cb = e.target, tr = cb.closest('tr[data-u]');
+  if(!tr || cb.type !== 'checkbox') return;
+  const user = tr.dataset.u, body = {user};
+  if(cb.dataset.a){ body.active = cb.checked; }
+  else body.perms = [...tr.querySelectorAll('input[data-p]')].filter(x => x.checked).map(x => x.dataset.p);
+  cb.disabled = true;
+  try{ await api('/api/users/update', body); toast('บันทึกแล้ว · ' + user); msg(''); await load(); }
+  catch(err){ cb.checked = !cb.checked; msg('บันทึกไม่สำเร็จ: ' + err.message); cb.disabled = false; }
+});
+document.getElementById('rows').addEventListener('click', async e => {
+  const b = e.target.closest('button'), tr = b && b.closest('tr[data-u]');
+  if(!tr) return;
+  const user = tr.dataset.u;
+  if(b.dataset.pw){
+    const pw = prompt('รหัสผ่านใหม่ของ ' + user + ' (อย่างน้อย 6 ตัว)');
+    if(pw == null) return;
+    b.disabled = true;
+    try{ await api('/api/users/update', {user, password: pw}); toast('ตั้งรหัสใหม่แล้ว · ' + user); msg(''); await load(); }
+    catch(err){ msg('ตั้งรหัสไม่สำเร็จ: ' + err.message); b.disabled = false; }
+  }else if(b.dataset.del){
+    if(!confirm('ลบผู้ใช้ “' + user + '” ออกจากชีต?\\nถ้าแค่ไม่ให้เข้าชั่วคราว ให้เอาติ๊ก “ใช้งาน” ออกแทน')) return;
+    b.disabled = true;
+    try{ await api('/api/users/delete', {user}); toast('ลบแล้ว · ' + user); msg(''); await load(); }
+    catch(err){ msg('ลบไม่สำเร็จ: ' + err.message); b.disabled = false; }
+  }
+});
+document.getElementById('addf').addEventListener('submit', async e => {
+  e.preventDefault();
+  const b = document.getElementById('addBtn'), user = document.getElementById('nUser').value.trim(), pw = document.getElementById('nPw').value;
+  const perms = [...document.querySelectorAll('#nPerms input')].filter(x => x.checked).map(x => x.value);
+  b.disabled = true;
+  try{
+    await api('/api/users', {user, password: pw, perms, active: true});
+    msg('เพิ่มผู้ใช้ “' + user + '” แล้ว — แจ้งชื่อผู้ใช้และรหัสผ่านให้เจ้าของบัญชีได้เลย', true);
+    document.getElementById('addf').reset(); document.getElementById('nPw').type = 'password'; document.getElementById('eye').textContent = 'แสดง';
+    permBoxes('nPerms', ['car']); await load();
+  }catch(err){ msg('เพิ่มไม่สำเร็จ: ' + err.message); }
+  finally{ b.disabled = false; }
+});
+document.getElementById('eye').onclick = () => { const i = document.getElementById('nPw'), s = i.type === 'password'; i.type = s ? 'text' : 'password'; document.getElementById('eye').textContent = s ? 'ซ่อน' : 'แสดง'; };
+document.getElementById('gen').onclick = () => {
+  const cs = 'abcdefghjkmnpqrstuvwxyz23456789', a = new Uint32Array(10); crypto.getRandomValues(a);
+  const i = document.getElementById('nPw'); i.value = [...a].map(x => cs[x % cs.length]).join(''); i.type = 'text'; document.getElementById('eye').textContent = 'ซ่อน';
+};
+permBoxes('nPerms', ['car']);
+load();
+</script>
+</body>
+</html>"""
 
 
 LOGIN_HTML = """<!doctype html>
@@ -4205,6 +4649,7 @@ SETTINGS_HTML = """<!doctype html>
 
   <section>
     <h2>บัญชี</h2>
+    <p style="margin:0 0 10px"><a class="back" href="/users">👥 จัดการผู้ใช้และสิทธิ์การเข้าหน้า &rarr;</a></p>
     <p style="margin:0"><a class="out" href="/logout">ออกจากระบบ</a></p>
   </section>
 </div>
@@ -4604,6 +5049,7 @@ REPORT_HTML = """<!doctype html>
   <a class="menu" href="/plan">📋 แผนงาน</a>
   <a class="menu on" href="/report">📊 รายงาน On Time</a>
   <a class="menu" href="/ready">🚦 รถ/คนพร้อมใช้</a>
+  <a class="menu" href="/users">👥 ผู้ใช้</a>
   <a class="menu out" href="/logout" title="ออกจากระบบ">🚪<span>ออกจากระบบ</span></a>
 </aside>
 <header><div class="hd">
@@ -5208,6 +5654,7 @@ READY_HTML = """<!doctype html>
   <a class="menu" href="/plan">📋 แผนงาน</a>
   <a class="menu" href="/report">📊 รายงาน On Time</a>
   <a class="menu on" href="/ready">🚦 รถ/คนพร้อมใช้</a>
+  <a class="menu" href="/users">👥 ผู้ใช้</a>
   <a class="menu out" href="/logout" title="ออกจากระบบ">🚪<span>ออกจากระบบ</span></a>
 </aside>
 <header><div class="hd">
@@ -5760,6 +6207,7 @@ PLAN_HTML = """<!doctype html>
   <a class="menu on" href="/plan">📋 แผนงาน</a>
   <a class="menu" href="/report">📊 รายงาน On Time</a>
   <a class="menu" href="/ready">🚦 รถ/คนพร้อมใช้</a>
+  <a class="menu" href="/users">👥 ผู้ใช้</a>
   <a class="menu out" href="/logout" title="ออกจากระบบ">🚪<span>ออกจากระบบ</span></a>
 </aside>
 <header><div class="bar">
@@ -7598,6 +8046,7 @@ DASHBOARD_HTML = """<!doctype html>
   <a class="menu" href="/plan">📋 แผนงาน</a>
   <a class="menu" href="/report">📊 รายงาน On Time</a>
   <a class="menu" href="/ready">🚦 รถ/คนพร้อมใช้</a>
+  <a class="menu" href="/users">👥 ผู้ใช้</a>
   <a class="menu out" href="/logout" title="ออกจากระบบ">🚪<span>ออกจากระบบ</span></a>
 </aside>
 <header>
