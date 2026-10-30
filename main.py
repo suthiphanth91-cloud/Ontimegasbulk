@@ -4384,7 +4384,7 @@ USERS_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>จัดการผู้ใช้ — Gasbulk Track</title>
+<title>จัดการผู้ใช้ — Gasbulk Track PTGLG</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet" crossorigin="anonymous">
 <style>
   :root{color-scheme:light;
@@ -4581,7 +4581,7 @@ load();
 LOGIN_HTML = """<!doctype html>
 <html lang="th"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>เข้าสู่ระบบ — Gasbulk Track</title>
+<title>เข้าสู่ระบบ — Gasbulk Track PTGLG</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;600;700&display=swap" rel="stylesheet" crossorigin="anonymous">
 <style>
   :root{--bg:#f1f5f9;--card:#fff;--line:#e2e8f0;--ink:#0f172a;--mut:#64748b}
@@ -4605,7 +4605,7 @@ LOGIN_HTML = """<!doctype html>
 </style></head>
 <body>
   <form method="post" action="/api/login">
-    <h1>🚛 Gasbulk Track</h1>
+    <h1>🚛 Gasbulk Track PTGLG</h1>
     <p class="sub">ระบบติดตามรถขนส่ง — กรุณาเข้าสู่ระบบ</p>
     __ERR__
     <label for="un">ชื่อผู้ใช้</label>
@@ -4623,7 +4623,7 @@ LOGIN_HTML = """<!doctype html>
 SETTINGS_HTML = """<!doctype html>
 <html lang="th"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ตั้งค่า — Gasbulk Track</title>
+<title>ตั้งค่า — Gasbulk Track PTGLG</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet" crossorigin="anonymous">
 <style>
   :root{--bg:#f1f5f9;--card:#fff;--line:#e2e8f0;--ink:#0f172a;--mut:#64748b}
@@ -4748,7 +4748,7 @@ REPORT_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>รายงาน On Time — Gasbulk Track</title>
+<title>รายงาน On Time — Gasbulk Track PTGLG</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet" crossorigin="anonymous">
 <style>
   :root{color-scheme:light;
@@ -5548,7 +5548,7 @@ READY_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>รถ/คนพร้อมใช้งาน — Gasbulk Track</title>
+<title>รถ/คนพร้อมใช้งาน — Gasbulk Track PTGLG</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet" crossorigin="anonymous">
 <style>
   /* สีสถานะ: ตรวจตาบอดสีแล้ว (คู่ติดกัน ΔE ≥ 10) ทั้งโหมดสว่าง/มืด · เหลืองบนพื้นขาวคอนทราสต์ต่ำ → มีตัวเลข/ตารางกำกับเสมอ */
@@ -6107,7 +6107,7 @@ PLAN_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>แผนงาน — Gasbulk Track</title>
+<title>แผนงาน — Gasbulk Track PTGLG</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet" crossorigin="anonymous">
 <style>
   :root{--bg:#f1f5f9;--card:#fff;--line:#e2e8f0;--ink:#0f172a;--mut:#64748b;
@@ -7931,7 +7931,7 @@ DASHBOARD_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Gasbulk Track — ติดตามรถขนส่ง</title>
+<title>Gasbulk Track PTGLG — ติดตามรถขนส่ง</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet" crossorigin="anonymous">
@@ -8147,7 +8147,7 @@ DASHBOARD_HTML = """<!doctype html>
 </aside>
 <header>
   <div class="bar">
-    <h1>🚛 Gasbulk Track</h1>
+    <h1>🚛 Gasbulk Track PTGLG</h1>
     <span class="mut" id="stamp"></span>
     <span class="grow"></span>
     <input type="date" id="date">
