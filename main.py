@@ -625,6 +625,16 @@ def _fetch_sheet(sheet_id: str, tab: str) -> list[list]:
     return data
 
 
+def _fresh_read(pairs) -> None:
+    """ปุ่ม 🔄 รีเฟรช: ให้แท็บเหล่านี้อ่านจาก Google สดรอบนี้ — เก็บของเดิมไว้ ถ้าอ่านสดไม่ได้ (โควตาเต็ม) ยังมีของเดิมโชว์
+    ไม่ถี่กว่า PLAN_FRESH_MIN_SECS วินาทีต่อแท็บ กันหลายคนกดรัวจนชนโควตา Google Sheets"""
+    for sid, tab in pairs:
+        key = f"{sid}:{tab}"
+        old = _sheet_cache.get(key)
+        if old and time() - old[0] >= PLAN_FRESH_MIN_SECS:
+            _sheet_cache[key] = (0.0, old[1])
+
+
 def _refresh_sheet_cache(sheet_id: str, tab: str, ws) -> None:
     """อ่านค่าล่าสุดจริงจาก ws แล้วยัดใส่แคชในหน่วยความจำทับของเก่า — ใช้หลังเขียนชีตเอง
     กัน _fetch_sheet ตัวถัดไปในคำขอเดียวกันเจอแคชเก่า"""
@@ -3568,7 +3578,7 @@ def build_ontime_report(rows: list, d_from: str, d_to: str, f: dict) -> dict:
 
 
 @app.get("/api/report/ontime", include_in_schema=False)
-def report_ontime(date_from: str = Query(None, alias="from"), date_to: str = Query(None, alias="to"),
+def report_ontime(date_from: str = Query(None, alias="from"), date_to: str = Query(None, alias="to"), fresh: int = Query(0),
                   origin: str = "", vtype: str = "", car: str = "", drop: str = "", status: str = "",
                   dest: str = "", cls: str = "", jtype: str = "", why: str = "", fix: str = ""):
     """รายงาน On Time ของช่วงวันที่ (ค่าเริ่มต้น = วันนี้) — อ่านชีตแผนงานจริงอย่างเดียว แคช 5 นาทีตามปกติ"""
@@ -3578,6 +3588,10 @@ def report_ontime(date_from: str = Query(None, alias="from"), date_to: str = Que
         d_from, d_to = d_to, d_from
     if (datetime.strptime(d_to, "%Y-%m-%d") - datetime.strptime(d_from, "%Y-%m-%d")).days > 93:
         raise HTTPException(400, "เลือกช่วงวันที่ได้ไม่เกิน 3 เดือน")
+    if fresh:
+        global _rep_dist_cache
+        _fresh_read([(SOURCE_ID, PLAN_TAB), (DEST_ID, DEST_TAB)])
+        _rep_dist_cache = (0.0, _rep_dist_cache[1])
     try:
         rows = _fetch_sheet(SOURCE_ID, PLAN_TAB)
     except Exception as e:
@@ -3998,7 +4012,7 @@ def _ready_merge(reps: list) -> dict:
 
 @app.get("/api/report/ready", include_in_schema=False)
 def report_ready(date_from: str = Query(None, alias="from"), date_to: str = Query(None, alias="to"),
-                 date_str: str = Query(None, alias="date"), target: float = Query(None)):
+                 date_str: str = Query(None, alias="date"), target: float = Query(None), fresh: int = Query(0)):
     """สรุปรถ/คนพร้อมใช้งานของช่วงวันที่ (ค่าเริ่มต้น = วันนี้) — อ่านชีตอย่างเดียว
     วันเดียว = สถานะของวันนั้น · หลายวัน = รถ/คนเฉลี่ยต่อวัน + เที่ยวรวมทั้งช่วง"""
     d_from = _parse_date(date_from or date_str or "") or _today_thai()
@@ -4008,6 +4022,9 @@ def report_ready(date_from: str = Query(None, alias="from"), date_to: str = Quer
     f0, t0 = datetime.strptime(d_from, "%Y-%m-%d"), datetime.strptime(d_to, "%Y-%m-%d")
     if (t0 - f0).days > 61:
         raise HTTPException(400, "เลือกช่วงวันที่ได้ไม่เกิน 62 วัน")
+    if fresh:
+        cars_id = CARS_SHEET_ID or PLAN_PAGE_ID
+        _fresh_read([(SOURCE_ID, PLAN_TAB), (cars_id, READY_CAR_TAB), (cars_id, READY_DRIVER_TAB)])
     try:
         plan_rows = _fetch_sheet(SOURCE_ID, PLAN_TAB)
     except Exception as e:
@@ -5101,6 +5118,7 @@ REPORT_HTML = """<!doctype html>
   </div>
   <div class="rng"><input type="date" id="dFrom" aria-label="ตั้งแต่วันที่"><span style="color:var(--mut)">–</span><input type="date" id="dTo" aria-label="ถึงวันที่"></div>
   <button class="btn" id="go">ดูรายงาน</button>
+  <button class="btn2" id="refresh" title="อ่านข้อมูลจากชีตใหม่ทันที ไม่รอรอบ 30 นาที">🔄 รีเฟรช</button>
   <button class="btn2" id="snap" title="บันทึกหน้ารายงานเป็นรูป เพื่อส่งต่อทาง LINE / อีเมล">📷 แคปส่ง</button>
 </div></header>
 <main id="main">
@@ -5184,9 +5202,10 @@ function markPreset(){
     b.classList.toggle('on', iso(a) === f && iso(z) === t);
   });
 }
-async function load(keepFilters){
+async function load(keepFilters, fresh){
   const q = new URLSearchParams({from: document.getElementById('dFrom').value, to: document.getElementById('dTo').value,
     origin: getF('origin'), vtype: getF('vtype'), car: getF('car'), drop: getF('drop'), status: getF('status'), dest: XF.dest, cls: XF.cls, jtype: XF.jtype, why: XF.why, fix: XF.fix});
+  if(fresh === true) q.set('fresh', '1');
   const err = document.getElementById('err'); err.hidden = true;
   const main = document.getElementById('main'); main.classList.add('busy');
   try{
@@ -5512,6 +5531,11 @@ function arTick(){
 }
 setInterval(arTick, 30000);
 document.addEventListener('visibilitychange', () => { if(!document.hidden) arTick(); });
+document.getElementById('refresh').onclick = async () => {        // อยากได้เร็ว: อ่านชีตสดทันที
+  const b = document.getElementById('refresh');
+  b.disabled = true; b.textContent = '⏳ กำลังอ่านชีต…';
+  try{ await load(true, true); } finally{ b.disabled = false; b.textContent = '🔄 รีเฟรช'; }
+};
 setRange(new Date(), new Date());
 load();
 </script>
@@ -5718,6 +5742,7 @@ READY_HTML = """<!doctype html>
   <div class="rng"><input type="date" id="dFrom" aria-label="ตั้งแต่วันที่"><span class="dash">–</span><input type="date" id="dTo" aria-label="ถึงวันที่"></div>
   <label class="tgt">เป้า <input type="number" id="tg" min="0" max="20" step="0.5" aria-label="เป้าเที่ยวต่อคันต่อวัน"> เที่ยว/คัน</label>
   <button class="btn" id="go">ดูรายงาน</button>
+  <button class="btn2" id="refresh" title="อ่านข้อมูลจากชีตใหม่ทันที ไม่รอรอบ 30 นาที">🔄 รีเฟรช</button>
   <button class="btn2" id="snap" title="บันทึกหน้านี้เป็นรูป เพื่อส่งต่อทาง LINE / อีเมล">📷 แคปส่ง</button>
   </div>
 </div></header>
@@ -5948,13 +5973,13 @@ function markPreset(){
   document.querySelectorAll('#presets button').forEach(b => b.classList.toggle('on', shift(+b.dataset.a) === f && shift(+b.dataset.b) === t));
 }
 function setRange(f, t){ document.getElementById('dFrom').value = f; document.getElementById('dTo').value = t; markPreset(); }
-async function load(keep){
+async function load(keep, fresh){
   const main = document.getElementById('main'), err = document.getElementById('err');
   err.hidden = true; main.classList.add('busy');
   const tg = document.getElementById('tg').value;
   try{ localStorage.setItem('readyTarget', tg); }catch(e){}
   try{
-    const res = await fetch('/api/report/ready?from=' + document.getElementById('dFrom').value + '&to=' + document.getElementById('dTo').value + '&target=' + encodeURIComponent(tg));
+    const res = await fetch('/api/report/ready?from=' + document.getElementById('dFrom').value + '&to=' + document.getElementById('dTo').value + '&target=' + encodeURIComponent(tg) + (fresh === true ? '&fresh=1' : ''));
     if(res.status === 401){ location.href = '/login'; return; }
     if(!res.ok){ let m = 'HTTP ' + res.status; try{ m = (await res.json()).detail || m; }catch(e){} throw new Error(m); }
     REP = await res.json();
@@ -6066,6 +6091,11 @@ function arTick(){
 }
 setInterval(arTick, 30000);
 document.addEventListener('visibilitychange', () => { if(!document.hidden) arTick(); });
+document.getElementById('refresh').onclick = async () => {        // อยากได้เร็ว: อ่านชีตสดทันที
+  const b = document.getElementById('refresh');
+  b.disabled = true; b.textContent = '⏳ กำลังอ่านชีต…';
+  try{ await load(true, true); } finally{ b.disabled = false; b.textContent = '🔄 รีเฟรช'; }
+};
 markPreset(); load();
 </script>
 </body>
