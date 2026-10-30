@@ -209,11 +209,31 @@ def _app_password() -> str:
 # รหัสกลาง APP_PASSWORD ยังเข้าได้ทุกหน้าเสมอ (กันล็อกตัวเองออกถ้าชีตมีปัญหา)
 USERS_TAB  = os.environ.get("USERS_TAB", "User")
 USERS_TTL  = 60                                      # อ่านชีตผู้ใช้ใหม่ทุก 1 นาที (ปิดบัญชีแล้วมีผลเร็ว)
-PAGE_PERMS = ("car", "plan", "report", "ready")
+# ── หน้าเว็บทั้งหมด ── เพิ่มรายงานใหม่ = เพิ่มบรรทัดที่นี่บรรทัดเดียว แล้วได้ครบ:
+#    เมนูซ้ายทุกหน้า · สิทธิ์เข้าหน้า/API · ช่องติ๊กในหน้า 👥 ผู้ใช้ · คอลัมน์ในแท็บ User (เว็บเติมให้เอง)
+#    key     = ชื่อสิทธิ์ (ภาษาอังกฤษสั้นๆ ห้ามซ้ำ)        head  = หัวคอลัมน์ในแท็บ User (ห้ามซ้ำ)
+#    menu    = ชื่อในเมนู + ไอคอน                        path  = ที่อยู่หน้า · api = ที่อยู่ API ที่หน้านั้นเรียก (ขึ้นต้นด้วย)
+#    inherit = ตอนเพิ่มคอลัมน์ให้ครั้งแรก ใครมีสิทธิ์นี้อยู่แล้วได้ติ๊กหน้าใหม่ด้วย (None = ไม่มีใครได้ ผู้ดูแลไปติ๊กเอง)
+#    alias   = หัวคอลัมน์ชื่อเก่าที่ยังให้ใช้ได้
+PAGES = [
+    {"key": "car",    "head": "เช็กรถ",        "alias": ("เช็ครถ",),  "menu": "🚛 เช็กรถ",          "path": "/",
+     "api": ("/api/trips", "/api/chase", "/api/timeline", "/api/match"), "inherit": None},
+    {"key": "plan",   "head": "แผนงาน",        "alias": (),           "menu": "📋 แผนงาน",          "path": "/plan",
+     "api": ("/api/plan",), "inherit": None},
+    {"key": "report", "head": "รายงาน",        "alias": (),           "menu": "📊 รายงาน On Time",  "path": "/report",
+     "api": ("/api/report/ontime",), "inherit": None},
+    {"key": "ready",  "head": "รถ/คนพร้อมใช้",  "alias": ("พร้อมใช้",), "menu": "🚦 รถ/คนพร้อมใช้",   "path": "/ready",
+     "api": ("/api/report/ready",), "inherit": "report"},
+    # ตัวอย่างรายงานใหม่ (ลบ # ออก แล้วทำหน้า /fuel กับ API /api/report/fuel):
+    # {"key": "fuel", "head": "รายงานน้ำมัน", "alias": (), "menu": "⛽ รายงานน้ำมัน", "path": "/fuel",
+    #  "api": ("/api/report/fuel",), "inherit": "report"},
+]
+ADMIN_MENU = [("/users", "👥 ผู้ใช้")]                 # หน้าของผู้ดูแล (โชว์ในเมนูเฉพาะผู้ดูแล) — /settings เข้าจากลิงก์ในหน้าเดิม
+PAGE_PERMS = tuple(p["key"] for p in PAGES)
 PERMS_ALL  = frozenset(PAGE_PERMS + ("admin",))
-PERM_PAGES = [("car", "/"), ("plan", "/plan"), ("report", "/report"), ("ready", "/ready")]
-# ชื่อหัวคอลัมน์ในชีต (ใช้ทั้งอ่านและตอนเว็บเพิ่มคอลัมน์ให้)
-PERM_HEAD  = {"car": "เช็กรถ", "plan": "แผนงาน", "report": "รายงาน", "ready": "รถ/คนพร้อมใช้", "admin": "ผู้ดูแล"}
+PERM_PAGES = [(p["key"], p["path"]) for p in PAGES]
+PERM_HEAD  = dict({p["key"]: p["head"] for p in PAGES}, admin="ผู้ดูแล")
+_PERM_API  = sorted(((a, p["key"]) for p in PAGES for a in p["api"]), key=lambda x: -len(x[0]))
 _TRUE_MARKS = {"✓", "✔", "☑", "true", "yes", "y", "1", "x", "ใช่", "/"}
 _users_cache: dict = {"ts": 0.0, "data": None}
 
@@ -237,16 +257,31 @@ def _users_layout(rows: list):
         return None, {}
     h = [c.strip().lower() for c in rows[hdr]]
     find = lambda *keys: next((n for n, c in enumerate(h) if any(k in c for k in keys)), None)
-    return hdr, {"user": find("ชื่อผู้ใช้", "user"), "pw": find("รหัส", "pass"), "active": find("ใช้งาน", "active"),
-                 "car": find("เช็กรถ", "เช็ครถ"), "plan": find("แผนงาน"), "report": find("รายงาน"),
-                 "ready": find("พร้อมใช้"), "admin": find("ผู้ดูแล", "admin"), "last": find("เข้าใช้ล่าสุด", "last login")}
+    names = {n.lower() for p in PAGES for n in (p["head"],) + tuple(p["alias"])}
+
+    def page_col(p):
+        own = [p["head"].lower()] + [a.lower() for a in p["alias"]]
+        exact = next((n for n, c in enumerate(h) if c in own), None)
+        if exact is not None:
+            return exact
+        return next((n for n, c in enumerate(h) if c not in names and any(k in c for k in own)), None)
+
+    cols = {"user": find("ชื่อผู้ใช้", "user"), "pw": find("รหัส", "pass"), "active": find("ใช้งาน", "active"),
+            "admin": find("ผู้ดูแล", "admin"), "last": find("เข้าใช้ล่าสุด", "last login")}
+    cols.update({p["key"]: page_col(p) for p in PAGES})
+    return hdr, cols
 
 
 def _row_perms(cell, on, cols: dict) -> frozenset:
-    """สิทธิ์ของแถวหนึ่ง — คอลัมน์ไหนยังไม่มีในชีต ใช้กติกาเดิม (ready ตาม report · ผู้ดูแล = ติ๊กครบทุกหน้า)"""
-    perms = {k for k in ("car", "plan", "report", "ready") if cols.get(k) is not None and on(cols[k])}
-    if cols.get("ready") is None and "report" in perms:
-        perms.add("ready")
+    """สิทธิ์ของแถวหนึ่ง — หน้าที่ยังไม่มีคอลัมน์ในชีต ใช้สิทธิ์ตาม inherit ของหน้านั้น · ผู้ดูแล (ไม่มีคอลัมน์) = ติ๊กครบทุกหน้า"""
+    perms = set()
+    for p in PAGES:
+        col = cols.get(p["key"])
+        if col is not None:
+            if on(col):
+                perms.add(p["key"])
+        elif p["inherit"] and p["inherit"] in perms:
+            perms.add(p["key"])
     if cols.get("admin") is None:
         if all(k in perms for k in PAGE_PERMS):
             perms.add("admin")
@@ -287,18 +322,14 @@ def _users() -> dict:
 
 
 def _need_perm(path: str) -> str:
-    """หน้า/API นี้ต้องมีสิทธิ์อะไร: car / plan / report / ready / "" (ทุกคน) / admin (ผู้ดูแล: ตั้งค่า, จัดการผู้ใช้ ฯลฯ)"""
+    """หน้า/API นี้ต้องมีสิทธิ์อะไร: key ของหน้าใน PAGES / "" (ทุกคน) / admin (ผู้ดูแล: ตั้งค่า, จัดการผู้ใช้ ฯลฯ)"""
     if path in ("/logout", "/favicon.ico"):
         return ""
-    if path == "/" or path in ("/api/trips", "/api/chase", "/api/timeline", "/api/match"):
-        return "car"
-    if path in ("/plan", "/api/plan") or path.startswith("/api/plan/"):
-        return "plan"
-    if path in ("/ready", "/api/report/ready"):
-        return "ready"
-    if path == "/report" or path.startswith("/api/report/"):
-        return "report"
-    return "admin"                                   # ตั้งค่า / debug / docs ฯลฯ
+    page = next((p["key"] for p in PAGES if p["path"] == path), None)
+    if page:
+        return page
+    api = next((k for a, k in _PERM_API if path == a or path.startswith(a + "/")), None)
+    return api or "admin"                            # ตั้งค่า / ผู้ใช้ / debug / docs ฯลฯ
 
 
 def _home_for(perms) -> str:
@@ -366,11 +397,17 @@ def _perms_of(token: str):
 
 
 def _nav(html: str, request: Request) -> str:
-    """ซ่อนเมนูหน้าที่ผู้ใช้ไม่มีสิทธิ์"""
+    """เมนูซ้ายจากทะเบียน PAGES — โชว์เฉพาะหน้าที่คนนี้มีสิทธิ์ และไฮไลต์หน้าที่เปิดอยู่"""
     perms = getattr(request.state, "perms", PERMS_ALL)
-    for k, url in PERM_PAGES + [("admin", "/settings"), ("admin", "/users")]:
-        if k not in perms:
-            html = re.sub(r'<a\b[^>]*\bhref="' + re.escape(url) + r'"[^>]*>.*?</a>\s*', "", html)
+    here = request.url.path
+    items = [(p["path"], p["menu"]) for p in PAGES if p["key"] in perms]
+    items += [(u, t) for u, t in ADMIN_MENU if "admin" in perms]
+    menu = "".join(f'  <a class="menu{" on" if u == here else ""}" href="{u}">{t}</a>\n' for u, t in items)
+    side = ('<aside class="side">\n' + menu +
+            '  <a class="menu out" href="/logout" title="ออกจากระบบ">🚪<span>ออกจากระบบ</span></a>\n</aside>')
+    html = re.sub(r'<aside class="side">.*?</aside>', lambda _m: side, html, count=1, flags=re.S)
+    if "admin" not in perms:                          # ลิงก์อื่นในหน้าที่ชี้ไปหน้าผู้ดูแล
+        html = re.sub(r'<a\b[^>]*\bhref="/(?:settings|users)"[^>]*>.*?</a>\s*', "", html)
     return html
 
 # ─── APP ─────────────────────────────────────────────────────────────────────
@@ -4133,19 +4170,19 @@ def _users_ws():
 
 def _users_sheet(ws) -> tuple:
     """อ่านแท็บ User → (แถว, แถวหัว, คอลัมน์) และเติมคอลัมน์ที่ยังไม่มีต่อท้ายหัวตาราง
-    เติม "รถ/คนพร้อมใช้" / "ผู้ดูแล" / "ใช้งาน" พร้อมค่าที่ทำให้ทุกคนได้สิทธิ์เท่าเดิม (ไม่มีใครเข้าไม่ได้เพราะเพิ่มคอลัมน์)"""
+    (หน้าใหม่ในทะเบียน PAGES / ผู้ดูแล / ใช้งาน / เข้าใช้ล่าสุด) พร้อมค่าที่ทุกคนได้สิทธิ์เท่าเดิมตาม inherit"""
     rows = _with_retry(ws.get_all_values)
     hdr, cols = _users_layout(rows)
     if hdr is None:
         _with_retry(lambda: ws.update("A1", [USERS_HEAD], value_input_option="RAW"))
         rows = [USERS_HEAD]
         hdr, cols = _users_layout(rows)
-    keys = [k for k in ("ready", "admin", "active", "last") if cols[k] is None]
+    keys = [k for k in PAGE_PERMS + ("admin", "active", "last") if cols[k] is None]
     if not keys:
         return rows, hdr, cols
     head = list(rows[hdr])
     old = dict(cols)
-    names = {"ready": PERM_HEAD["ready"], "admin": PERM_HEAD["admin"], "active": "ใช้งาน", "last": "เข้าใช้ล่าสุด"}
+    names = dict(PERM_HEAD, active="ใช้งาน", last="เข้าใช้ล่าสุด")
     for k in keys:
         cols[k] = len(head)
         head.append(names[k])
@@ -4156,12 +4193,13 @@ def _users_sheet(ws) -> tuple:
         cell = lambda n: r[n].strip() if n is not None and n < len(r) else ""
         on = lambda n: cell(n).lower() in _TRUE_MARKS
         perms = _row_perms(cell, on, old)
-        val = {"ready": _MARK if "ready" in perms else "", "admin": _MARK if "admin" in perms else "",
-               "active": _MARK if cell(old["user"]) else "", "last": ""}
+        val = {k: (_MARK if k in perms else "") for k in PERMS_ALL}
+        val.update(active=_MARK if cell(old["user"]) else "", last="")
         body.append([val[k] for k in keys])
     a = gspread.utils.rowcol_to_a1(hdr + 1, cols[keys[0]] + 1)
     b = gspread.utils.rowcol_to_a1(hdr + 1 + len(body), cols[keys[-1]] + 1)
     _with_retry(lambda: ws.update(f"{a}:{b}", [[names[k] for k in keys]] + body, value_input_option="RAW"))
+    _users_forget()                                  # คอลัมน์ใหม่มีผลกับสิทธิ์ทันที ไม่ต้องรอแคช 1 นาที
     rows = _with_retry(ws.get_all_values)
     return rows, hdr, cols
 
@@ -4234,7 +4272,8 @@ def users_list(request: Request):
         out.append({"user": user, "perms": sorted(_row_perms(cell, on, cols)), "active": on(cols["active"]),
                     "last": cell(cols["last"]), "has_pw": bool(cell(cols["pw"])),
                     "hashed": cell(cols["pw"]).startswith("pbkdf2_sha256$")})
-    return {"users": out, "me": _me(request), "heads": PERM_HEAD, "sheet": USERS_TAB}
+    pages = [{"key": p["key"], "label": p["menu"].split(" ", 1)[-1]} for p in PAGES] + [{"key": "admin", "label": "ผู้ดูแล"}]
+    return {"users": out, "me": _me(request), "pages": pages, "sheet": USERS_TAB}
 
 
 @app.post("/api/users", include_in_schema=False)
@@ -4431,7 +4470,7 @@ USERS_HTML = """<!doctype html>
 </main>
 <div id="toast" hidden></div>
 <script>
-const PAGES = [['car', 'เช็กรถ'], ['plan', 'แผนงาน'], ['report', 'รายงาน On Time'], ['ready', 'รถ/คนพร้อมใช้'], ['admin', 'ผู้ดูแล']];
+let PAGES = [];                                    // [key, ชื่อ] — มาจากเซิร์ฟเวอร์ (เพิ่มรายงานใหม่แล้วช่องติ๊กโผล่เอง)
 let DATA = null;
 function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function toast(t){ const el = document.getElementById('toast'); el.textContent = t; el.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => el.hidden = true, 2200); }
@@ -4449,6 +4488,9 @@ function permBoxes(id, on){
 async function load(){
   try{
     DATA = await api('/api/users');
+    const first = !PAGES.length;
+    PAGES = DATA.pages.map(p => [p.key, p.label]);
+    if(first) permBoxes('nPerms', ['car']);
     draw();
   }catch(e){ msg('โหลดรายชื่อไม่สำเร็จ: ' + e.message); document.getElementById('rows').innerHTML = ''; }
 }
@@ -4513,7 +4555,6 @@ document.getElementById('gen').onclick = () => {
   const cs = 'abcdefghjkmnpqrstuvwxyz23456789', a = new Uint32Array(10); crypto.getRandomValues(a);
   const i = document.getElementById('nPw'); i.value = [...a].map(x => cs[x % cs.length]).join(''); i.type = 'text'; document.getElementById('eye').textContent = 'ซ่อน';
 };
-permBoxes('nPerms', ['car']);
 load();
 </script>
 </body>
