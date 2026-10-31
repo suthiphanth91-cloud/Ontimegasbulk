@@ -6235,6 +6235,11 @@ PLAN_HTML = """<!doctype html>
   .imp{background:var(--card);border:1px solid var(--line);border-radius:14px;width:100%;
        max-width:min(1900px, 98vw);padding:18px 20px}
   .imp-h{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+  .imp-wait{border-left:4px solid #2563eb}
+  .imp-wait .ibar{height:4px;border-radius:2px;background:rgba(37,99,235,.18);overflow:hidden;margin-top:8px}
+  .imp-wait .ibar i{display:block;height:100%;width:35%;background:#2563eb;border-radius:2px;animation:ibar 1.2s ease-in-out infinite}
+  @keyframes ibar{0%{transform:translateX(-100%)}100%{transform:translateX(300%)}}
+  .imp-done{border-left:4px solid #16a34a}
   .imp-h b{font-size:18px}
   .imp-h button{border:0;background:none;font-size:20px;padding:2px 8px}
   .imp .box{border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin:10px 0}
@@ -7065,16 +7070,21 @@ async function loadCars(){
     if(r.ok){ const j = await r.json(); CARS = j.cars || {}; PHONES = j.phones || {}; DRIVERS = j.drivers || []; applyDrivers(); }
   }catch(e){}
 }
+let OPTS_P = null;                      // กำลังโหลดอยู่ — เรียกซ้ำระหว่างรอ ใช้คำขอเดิม ไม่ยิงซ้ำ
 async function loadOpts(){              // รายการตัวเลือกของช่อง (อ่านจากไฟล์ต้นทางฝั่งเซิร์ฟเวอร์)
   if(OPTS) return;
-  loadCars();
-  try{
-    const r = await fetch('/api/plan/options');
-    if(!r.ok) return;
-    OPTS = await r.json();
-    buildDatalists();
-    applyDrivers();
-  }catch(e){}
+  if(OPTS_P) return OPTS_P;
+  OPTS_P = (async () => {
+    loadCars();
+    try{
+      const r = await fetch('/api/plan/options');
+      if(!r.ok) return;
+      OPTS = await r.json();
+      buildDatalists();
+      applyDrivers();
+    }catch(e){}
+  })();
+  try{ await OPTS_P; } finally{ OPTS_P = null; }
 }
 
 // ตัวแก้ค่าในช่อง (ใช้ทั้งตารางหลักและตารางในหน้าต่างนำเข้า): เลือกอย่างเดียว / พิมพ์ค้นหา / พิมพ์อิสระ
@@ -7219,7 +7229,7 @@ function impCarPane(){                               // แผงรถในห
 function impBody(html){ document.getElementById('impBody').innerHTML = html; }
 function dmy(iso){ return iso ? iso.slice(8,10) + '/' + iso.slice(5,7) + '/' + iso.slice(0,4) : '?'; }
 
-async function impSend(o){               // o = {rows?, commit?, replace?}  ไม่มี rows = ส่งไฟล์ที่เลือก
+async function impSend(o, ms){           // o = {rows?, commit?, replace?}  ไม่มี rows = ส่งไฟล์ที่เลือก · ms = รอนานสุด (มิลลิวินาที)
   const fd = new FormData();
   if(o.rows) fd.append('rows_json', JSON.stringify(o.rows)); else fd.append('file', IMPFILE);
   if(o.master) fd.append('master_json', JSON.stringify(o.master));
@@ -7227,11 +7237,21 @@ async function impSend(o){               // o = {rows?, commit?, replace?}  ไ�
   if(o.skip) fd.append('skip_dups', '1');
   fd.append('commit', o.commit ? '1' : '0');
   fd.append('replace', o.replace ? '1' : '0');
-  const r = await fetch('/api/plan/import', {method:'POST', body: fd});
+  const ac = ms ? new AbortController() : null, to = ms ? setTimeout(() => ac.abort(), ms) : 0;
+  let r;
+  try{ r = await fetch('/api/plan/import', {method:'POST', body: fd, signal: ac ? ac.signal : undefined}); }
+  catch(e){
+    if(e.name === 'AbortError') throw new Error('รอเกิน ' + Math.round(ms / 1000) + ' วินาทีแล้วเซิร์ฟเวอร์ยังไม่ตอบ — Google Sheets อาจช้าหรือโควตาเต็ม รอ 1 นาทีแล้วเลือกไฟล์ใหม่อีกครั้ง');
+    throw new Error('ส่งไฟล์ไม่สำเร็จ — ตรวจอินเทอร์เน็ตแล้วลองใหม่');
+  }finally{ clearTimeout(to); }
   if(r.status === 401){ location.href = '/login'; return null; }
   let j = null;
   try{ j = await r.json(); }catch(e){}
-  if(!r.ok) throw new Error((j && j.detail) || ('HTTP ' + r.status));
+  if(!r.ok){
+    const why = (j && j.detail) || (r.status === 413 ? 'ไฟล์ใหญ่เกินที่เว็บรับได้ (4 MB)'
+      : r.status === 504 || r.status === 502 ? 'เซิร์ฟเวอร์ตอบไม่ทันเวลา (Google Sheets อาจช้าหรือโควตาเต็ม) — รอ 1 นาทีแล้วลองใหม่' : 'HTTP ' + r.status);
+    throw new Error(why);
+  }
   return j;
 }
 
@@ -7246,16 +7266,33 @@ function impBadRows(){                   // แถวที่มีช่อง
   return set;
 }
 
+const IMP_WAIT_MS = 90000;               // รอเซิร์ฟเวอร์อ่านไฟล์ได้นานสุด 90 วินาที
 async function impPreview(){             // อ่านไฟล์ครั้งแรก
-  impBody('<p class="mut">กำลังอ่านไฟล์...</p>');
+  const f = IMPFILE, t0 = Date.now(), sec = () => Math.round((Date.now() - t0) / 1000);
+  const size = f.size < 1048576 ? Math.max(1, Math.round(f.size / 1024)) + ' KB' : (f.size / 1048576).toFixed(1) + ' MB';
+  if(f.size > 4 * 1048576){
+    impBody('<div class="box bad">ไฟล์ “' + esc(f.name) + '” ขนาด ' + size + ' ใหญ่เกิน 4 MB ที่เว็บรับได้ — ลบชีตที่ไม่ใช้ออกแล้วบันทึกใหม่ (ต้องมีชีต “ข้อมูลการจัดส่ง”)</div>');
+    return;
+  }
+  const draw = () => impBody('<div class="box imp-wait"><b>⏳ กำลังอ่านไฟล์ “' + esc(f.name) + '”</b> (' + size + ') · ' + sec() + ' วินาที' +
+    '<div class="mut" style="font-size:13px;margin-top:3px">ส่งไฟล์ให้เซิร์ฟเวอร์ → อ่านชีต “ข้อมูลการจัดส่ง” → ตรวจกับชีตแผนงาน' +
+    (sec() >= 20 ? ' · <b>ช้ากว่าปกติ</b> (Google Sheets อาจตอบช้า) รอได้ถึง ' + IMP_WAIT_MS / 1000 + ' วินาที' : '') + '</div><div class="ibar"><i></i></div></div>');
+  draw();
+  const tick = setInterval(draw, 1000);
+  loadOpts();                            // รายการเลือก (ต้นทาง/ปลายทาง/รถ ฯลฯ) โหลดคู่กันไป ไม่ต้องรอก่อนส่งไฟล์
   try{
-    await loadOpts();                    // รายการเลือก (ต้นทาง/ปลายทาง/รถ ฯลฯ) ไว้ใช้ตอนแก้ในตาราง
-    const j = await impSend({});
+    const j = await impSend({}, IMP_WAIT_MS);
+    clearInterval(tick);
     if(!j) return;
-    IMP = {rows: j.rows, headers: j.headers, edited: {}, errs: {}, warns: {}, info: j, replace: !j.existing, onlyBad: false, master: j.master || null};
+    IMP = {rows: j.rows, headers: j.headers, edited: {}, errs: {}, warns: {}, info: j, replace: !j.existing, onlyBad: false, master: j.master || null,
+           readMsg: '✅ อ่านไฟล์ “' + f.name + '” เสร็จใน ' + Math.max(1, sec()) + ' วินาที — พบ <b>' + j.total + ' งาน</b> ของวันที่ <b>' + dmy(j.date) + '</b>' +
+                    (j.master_n ? ' · ข้อมูลรถ/พขร. ' + j.master_n + ' คัน' : '') + ' · ตรวจในตารางด้านล่างก่อนกดยืนยัน'};
     impMarkErrors(j);
     impRender();
-  }catch(e){ impBody('<div class="box bad">อ่านไฟล์ไม่ได้: ' + esc(e.message) + '</div>'); }
+  }catch(e){
+    clearInterval(tick);
+    impBody('<div class="box bad">อ่านไฟล์ไม่ได้ (' + sec() + ' วินาที): ' + esc(e.message) + '</div>');
+  }
 }
 
 let IMP_CHECKING = false, IMP_AGAIN = false;
@@ -7301,7 +7338,7 @@ function impAutoD(){                      // D ลำดับเที่ยว
     IMP.autoD[r] = 1;
   });
 }
-function impPreview(row, ri, c){          // A/B ว่าง (สูตรในชีต) → แสดงตัวอย่างสีจาง
+function impGhost(row, ri, c){            // A/B ว่าง (สูตรในชีต) → แสดงตัวอย่างสีจาง (ชื่อห้ามซ้ำ impPreview — เคยทับกันจนเลือกไฟล์แล้วไม่อ่าน)
   if(c === 1){
     const car = String(row[15] || '').trim(), trip = String(row[4] || '').trim();
     return car && trip ? '<span class="pv" title="ตัวอย่าง — ชีตคำนวณเองตอนลง (วันที่+เบอร์รถ+เที่ยว)">' + esc(serialDay((IMP.info && IMP.info.date) || '') + car + trip) + '</span>' : '';
@@ -7331,7 +7368,7 @@ function impRender(){
       : IMP.warns[k] ? ' class="iwarn" title="' + esc(IMP.warns[k]) + '"'
       : IMP.edited[k] ? ' class="ied"' : '';
     const sel = IMP.sel && IMP.sel.r === ri && IMP.sel.c === c;
-    return '<td data-ir="' + ri + '" data-ic="' + c + '"' + cls + (sel ? ' data-sel="1"' : '') + '>' + (c === 14 ? '<div class="nt" title="' + esc(v) + '">' + impHl(v) + '</div>' : (c <= 1 && !String(v || '').trim() ? impPreview(r, ri, c) : impHl(v))) +
+    return '<td data-ir="' + ri + '" data-ic="' + c + '"' + cls + (sel ? ' data-sel="1"' : '') + '>' + (c === 14 ? '<div class="nt" title="' + esc(v) + '">' + impHl(v) + '</div>' : (c <= 1 && !String(v || '').trim() ? impGhost(r, ri, c) : impHl(v))) +
       (c === 15 && String(v || '').trim() ? '<b class="xcar" data-xr="' + ri + '" title="เอารถออกจากแถวนี้">✕</b>' : '') + (sel ? '<i class="fh" title="ลากลงเพื่อคัดลอกค่าไปแถวล่าง"></i>' : '') + '</td>';
   }).join('') + '</tr>').join('');
   const nedit = Object.keys(IMP.edited).length;
@@ -7347,6 +7384,7 @@ function impRender(){
   const ok = j.can_commit && nw > 0 && !nerr && !IMP.checking;
   const nmaster = IMP.master ? Object.keys(IMP.master).length : 0;
   impBody(
+    (IMP.readMsg ? '<div class="box imp-done">' + IMP.readMsg.replace(/“([^”]*)”/, (m0, n) => '“' + esc(n) + '”') + '</div>' : '') +
     '<div class="box"><b>วันที่ ' + dmy(j.date) + '</b> · ' + j.total + ' แถวงาน · ปลายทาง: <b>' + esc(j.target) + '</b>' +
     (nedit ? ' · <span class="ied" style="padding:1px 8px;border-radius:6px">แก้แล้ว ' + nedit + ' ช่อง</span>' : '') + '</div>' +
     er + w +
@@ -7816,6 +7854,8 @@ async function pasteGo(){
 }
 function openImp(paste){
   document.getElementById('impBack').hidden = false;
+  loadOpts();                            // โหลดรายการตัวเลือกไว้ก่อน ระหว่างที่คนกำลังเลือกไฟล์
+  fleetDates();                          // รายการแท็บวันที่ของชีตแผนรถ — เปิดจากปุ่มไหนก็โหลด (เดิมโหลดเฉพาะปุ่มวางข้อมูล เลยค้าง "กำลังโหลด...")
   if(paste){
     const d = document.getElementById('pasteDate'); if(!d.value) d.value = DATA ? DATA.date : '';
     document.getElementById('pasteTxt').focus();
@@ -7833,9 +7873,8 @@ async function fleetDates(){                                      // ราย�
     const r = await fetch('/api/plan/fleet?list=1'), j = await r.json();
     if(!r.ok) throw new Error(j.detail || r.status);
     sel.innerHTML = j.tabs.map(d => '<option value="' + d + '"' + (d === j.default ? ' selected' : '') + '>' + dmy(d) + '</option>').join('');
-  }catch(e){ sel.innerHTML = '<option value="">(แท็บล่าสุด)</option>'; }
+  }catch(e){ sel.innerHTML = '<option value="">(อ่านรายการแท็บไม่ได้ — ใช้แท็บล่าสุด)</option>'; }
 }
-document.getElementById('pasteOpen').addEventListener('click', fleetDates);
 // ── เทียบแผนรถกับชีตแผนงานของวันเดียวกัน: เติมเลขที่มาทีหลัง + หางานที่เพิ่มเข้ามาใหม่ ──
 function syncKey(origin, dest, time){ return [origin, dest, time].map(v => String(v || '').replace(/ /g, '').toLowerCase()).join('|'); }
 function hhmmOf(v){ const t = tp(String(v || '').trim()); return t ? pad2(t[0]) + ':' + pad2(t[1]) : String(v || '').trim(); }
