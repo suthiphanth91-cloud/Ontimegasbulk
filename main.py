@@ -2597,13 +2597,40 @@ def _write_near(ws, head: int, hit: list, sheet_rows: list) -> dict:
             + (f" · {sort_n} แถวรถคันใหม่แทรกตามลำดับเบอร์รถ" if sort_n else "")
             + (f" · {end_n} แถวต่อท้ายวัน (ยังไม่มีเบอร์รถ)" if end_n else ""))
     return {"first": min(firsts), "last": max(pl[2] + len(pl[1]) - 1 for pl in placed), "inserted": len(sheet_rows),
-            "kept": [_col_name(c) for c in sorted(protect)], "note": note}
+            "kept": [_col_name(c) for c in sorted(protect)], "note": note,
+            "spans": [(first, first + len(idx) - 1) for _a, idx, first in placed]}
+
+
+ADDED_NOTE = "งานเพิ่ม"           # หมายเหตุใน EditLog ของแถวที่เพิ่มเข้าวันเดิมทีหลัง → หน้าแผนงานติดป้าย ➕ เพิ่ม
+
+
+def _log_added(ws, sh, spans: list, date_iso: str, by: str) -> int:
+    """จดแถวที่เพิ่มเข้าวันเดิมลง EditLog (JOB|Drop ที่ชีตคำนวณแล้ว) ให้ทุกคนเห็นป้าย "➕ เพิ่ม" ที่แถวนั้น
+    อ่าน B–N ของแถวที่เพิ่งเขียน 1 ครั้ง + เขียนประวัติ 1 ครั้ง · ล้มเหลวไม่กระทบงานที่ลงชีตแล้ว"""
+    try:
+        got = ws.batch_get([f"B{a}:N{b}" for a, b in spans])
+        now = _thai_now().strftime("%Y-%m-%d %H:%M:%S")
+        out = []
+        for (a, _b), vals in zip(spans, got):
+            for k, r in enumerate(vals or []):
+                r = list(r) + [""] * 13
+                job, drop = str(r[0]).strip(), str(r[12]).strip()
+                if job:
+                    out.append([now, (by or "")[:60], a + k, "+แถว", "", date_iso, f"{job}|{drop}", ADDED_NOTE])
+        if out:
+            _editlog_ws(sh).append_rows(out, value_input_option="RAW")
+        global _recent_cache
+        _recent_cache = (0.0, None)
+        return len(out)
+    except Exception:
+        _gs_cache.pop("log", None)
+        return 0
 
 
 @app.post("/api/plan/import", include_in_schema=False)
-async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = Form(""),
+async def plan_import(request: Request, file: Optional[UploadFile] = File(None), rows_json: str = Form(""),
                       commit: int = Form(0), replace: int = Form(1), master_json: str = Form(""), near: int = Form(0),
-                      skip_dups: int = Form(0)):
+                      skip_dups: int = Form(0), by: str = Form("")):
     """ครั้งแรกส่ง file (อ่านใบจัดรถ) ครั้งต่อไปส่ง rows_json (แถวที่แก้ในหน้าต่างนำเข้า) เพื่อตรวจซ้ำ/เขียนจริง"""
     headers = None
     if rows_json:
@@ -2690,6 +2717,7 @@ async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = 
             sheet_rows = [r for _i, r in sorted(enumerate(sheet_rows), key=lambda t: (_car_sort(t[1][PLAN_CARNO]), t[0]))]
         if adding and hit:                                # วางข้อมูล/Excel แบบไม่แทนที่ เข้าวันที่มีอยู่แล้ว: เพิ่มโดยไม่ลบ แทรกติดรถคันเดิม
             res = _write_near(ws, head, hit, sheet_rows)
+            _log_added(ws, _sh, res["spans"], rv["date"], _me(request) or by)
             _drop_sheet_cache(PLAN_PAGE_ID, PLAN_PAGE_TAB)
             return {**info, "written": len(sheet_rows), "removed": 0, "inserted": res["inserted"], "first_row": res["first"],
                     "last_row": res["last"], "kept_formula_cols": res["kept"], "note": res["note"],
@@ -3377,8 +3405,9 @@ def plan_recent(n: int = Query(300)):
     global _recent_cache
     ts, hit = _recent_cache
     if hit is not None and time() - ts < 8:
-        return {"edits": hit[-n:]}
+        return {"edits": hit[0][-n:], "added": hit[1]}
     out: list = []
+    added: list = []
     try:
         _ws, sh = _plan_ws()
         try:
@@ -3386,16 +3415,21 @@ def plan_recent(n: int = Query(300)):
         except gspread.WorksheetNotFound:
             lg = None
         if lg is not None:
-            for r in (lg.get(f"A2:H{max(lg.row_count, 2)}") or [])[-400:]:
+            allr = lg.get(f"A2:H{max(lg.row_count, 2)}") or []
+            for r in allr:                       # งานเพิ่ม: ทั้งแท็บ ป้ายติดตลอด ไม่หายเมื่อมีการแก้อื่นตามมาเยอะ
                 r = list(r) + [""] * 8
-                if not r[0]:
+                if r[7] == ADDED_NOTE and r[6]:
+                    added.append({"key": r[6], "by": r[1], "t": r[0]})
+            for r in allr[-400:]:
+                r = list(r) + [""] * 8
+                if not r[0] or r[7] == ADDED_NOTE:
                     continue
                 out.append({"t": r[0], "by": r[1], "row": int(r[2]) if str(r[2]).isdigit() else 0,
                             "col": r[3], "old": r[4], "new": r[5], "note": r[7]})
     except Exception:
-        out = []
-    _recent_cache = (time(), out)
-    return {"edits": out[-n:]}
+        out, added = [], []
+    _recent_cache = (time(), (out, added))
+    return {"edits": out[-n:], "added": added}
 
 
 # ─── รายงาน On Time (อ่านอย่างเดียวจากชีตแผนงานจริง ไม่มีการเขียนใดๆ) ───────────────────────────────
@@ -6211,6 +6245,7 @@ PLAN_HTML = """<!doctype html>
   .chgbar button{border-color:var(--chg-line);color:var(--chg-ink);padding:6px 12px}
   .tag{display:inline-block;background:#f59e0b;color:#fff;border-radius:6px;padding:1px 8px;
        font-size:12px;font-weight:700;margin-right:6px}
+  .tag.add{background:#16a34a;white-space:nowrap}
   .job.chg{background:var(--chg-bg);box-shadow:inset 4px 0 0 #f59e0b}
   tbody tr.chg td{background:var(--chg-bg)}
   td[data-cc]{background:var(--cc-bg) !important;font-weight:700}
@@ -6383,7 +6418,9 @@ PLAN_HTML = """<!doctype html>
       <tbody id="rows"></tbody>
     </table></div>
   </div>
-  <p class="mut" style="font-size:13px">ข้อมูลจากชีต "แผนงาน Gasbulk" คอลัมน์ A–Z (อ่านอย่างเดียว) &middot; สีแดง = ยกเลิก/โหลดเก็บ</p>
+  <p class="mut" style="font-size:13px">ข้อมูลจากชีต "แผนงาน Gasbulk" คอลัมน์ A–Z (อ่านอย่างเดียว) &middot; สีแดง = ยกเลิก/โหลดเก็บ &middot;
+    สัญลักษณ์ที่ช่องแถว: <span class="tag add">➕ เพิ่ม</span>งานที่เพิ่มเข้าวันนี้ทีหลัง (ทุกคนเห็น) &middot;
+    <span class="tag">ใหม่</span>ขึ้นมาหลังจากครั้งก่อนที่คุณเปิดดู &middot; <span class="tag">แก้</span>มีช่องที่เปลี่ยน (เฉพาะเครื่องนี้)</p>
 </main>
 
 <div class="savebadge" id="savebadge" hidden></div>
@@ -6615,7 +6652,7 @@ function render(){
       '</small>' + esc(DATA.headers[i].name) + '</th>').join('') + '</tr>';
   document.getElementById('rows').innerHTML = rows.length
     ? rows.map(x => '<tr class="' + (x.cancelled ? 'cx ' : '') + (x.chg ? 'chg' : '') + '"><td class="sk sk1 rn">' +
-        x.row + (x.chg ? '<br><span class="tag">' + (x.chg.type === 'new' ? 'ใหม่' : 'แก้') + '</span>' : '') + '</td>' +
+        x.row + addedTag(x) + (x.chg ? '<br><span class="tag" title="' + (x.chg.type === 'new' ? 'ใหม่ = เพิ่งขึ้นมาหลังจากครั้งก่อนที่คุณเปิดดู (ในเครื่องนี้)' : 'แก้ = มีช่องที่เปลี่ยนหลังจากครั้งก่อนที่คุณเปิดดู') + '">' + (x.chg.type === 'new' ? 'ใหม่' : 'แก้') + '</span>' : '') + '</td>' +
         shown.map(i => tdHtml(x, i)).join('') + '</tr>').join('')
     : '<tr><td colspan="30" class="empty">ไม่มีแผนงานของวันที่เลือก</td></tr>';
 }
@@ -6674,6 +6711,11 @@ function chgTag(x){                     // ป้ายบอกว่าแถ�
   return '<span class="tag">แก้</span><span>' + shown.join(' · ') + more + '</span>';
 }
 let WHO = {};                            // "แถว,คอลัมน์" → การแก้ล่าสุดจาก EditLog {by, t, old, new}
+let ADDED = {};                          // JOB|Drop → {by, t} งานเพิ่ม (ป้าย ➕ เพิ่ม ที่ช่องเลขแถว ทุกคนเห็น)
+function addedTag(x){
+  const a = x.cells[1] && ADDED[x.cells[1] + '|' + x.cells[13]];
+  return a ? '<br><span class="tag add" title="' + esc('งานเพิ่ม — เพิ่มเข้าวันนี้ทีหลัง' + (a.by ? ' โดย ' + a.by : '') + (a.t ? ' เมื่อ ' + a.t : '')) + '">➕ เพิ่ม</span>' : '';
+}
 function whoChanged(){                   // ชื่อคนที่แก้ช่องที่ไฮไลต์เหลืองอยู่ (ไม่ซ้ำ)
   const set = {};
   DATA.rows.forEach(x => { if(x.chg && x.chg.cols) x.chg.cols.forEach(c => { const w = WHO[x.row + ',' + c]; if(w) set[w.by || 'ไม่ระบุชื่อ'] = 1; }); });
@@ -6688,8 +6730,10 @@ async function loadWho(){
   try{
     const r = await fetch('/api/plan/recent');
     if(!r.ok) return;
-    WHO = {};
-    ((await r.json()).edits || []).forEach(e => { WHO[e.row + ',' + COLS.indexOf(e.col)] = e; });   // เรียงเก่า→ใหม่ ตัวล่าสุดทับ
+    const j = await r.json();
+    WHO = {}; ADDED = {};
+    (j.edits || []).forEach(e => { WHO[e.row + ',' + COLS.indexOf(e.col)] = e; });   // เรียงเก่า→ใหม่ ตัวล่าสุดทับ
+    (j.added || []).forEach(a => { ADDED[a.key] = a; });                               // JOB|Drop → {by, t} งานที่เพิ่มเข้าวันเดิมทีหลัง
   }catch(e){}
 }
 
@@ -7274,6 +7318,7 @@ async function impSend(o, ms){           // o = {rows?, commit?, replace?}  ไ�
   if(o.rows) fd.append('rows_json', JSON.stringify(o.rows)); else fd.append('file', IMPFILE);
   if(o.master) fd.append('master_json', JSON.stringify(o.master));
   if(o.near) fd.append('near', '1');
+  if(o.commit){ try{ fd.append('by', localStorage.getItem('gb_plan_editor') || ''); }catch(e){} }   // ชื่อผู้เพิ่ม (ไม่ถามซ้ำ · ล็อกอินด้วยชื่อผู้ใช้ ใช้ชื่อนั้นก่อน)
   if(o.skip) fd.append('skip_dups', '1');
   fd.append('commit', o.commit ? '1' : '0');
   fd.append('replace', o.replace ? '1' : '0');
@@ -7726,7 +7771,7 @@ async function impCommit(){
       IMPDAY = {date: '', rows: []}; IMP.near = true;
       fetch('/api/plan?date=' + r.date + '&fresh=1').then(x => x.json()).then(pj => { IMPDAY = {date: r.date, rows: (pj.rows || []).map(x => x.cells)}; }).catch(() => {}).finally(impRecheck);
     };
-    document.getElementById('date').value = r.date; load(true);
+    document.getElementById('date').value = r.date; loadWho().then(() => load(true));   // โหลดรายการงานเพิ่มใหม่ ป้าย ➕ เพิ่ม ขึ้นทันที
     if(!document.getElementById('addBox').hidden) addReset();      // มาจาก ➕ เพิ่มงาน: ล้างฟอร์ม กันกดเพิ่มงานเดิมซ้ำ
     if(r.master_saved){ CARS = null; loadCars(); }
   }catch(e){ impBody('<div class="box bad">เขียนไม่สำเร็จ: ' + esc(e.message) + '</div>'); }
