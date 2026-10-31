@@ -6283,6 +6283,14 @@ PLAN_HTML = """<!doctype html>
   .imp td.rn{color:var(--mut);font-size:11.5px}
   .imp button.go{background:#16a34a;border-color:#16a34a;color:#fff}
   .imp button.go:disabled{background:var(--pd-bg);border-color:var(--line);color:var(--mut);cursor:not-allowed}
+  #addBox{margin:4px 0 10px}
+  .addwrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .addt{border-collapse:collapse}
+  .addt th{font-size:12.5px;font-weight:600;color:var(--mut);text-align:left;padding:2px 4px;white-space:nowrap}
+  .addt th i{color:#dc2626;font-style:normal}
+  .addt td{padding:2px}
+  .addt input,.addt select{font:inherit;font-size:14px;padding:6px 7px;border:1px solid var(--line);border-radius:7px;background:var(--card);color:inherit;box-sizing:border-box}
+  .addt .addx{padding:4px 9px}
   td.tm .mut{font-weight:500;font-size:12.5px}
   td.tm .xday{font-weight:700;font-size:12.5px;color:#d97706}
   a.tel{color:#16a34a;text-decoration:none;font-weight:600}
@@ -6322,6 +6330,7 @@ PLAN_HTML = """<!doctype html>
   <select id="depot"><option value="">ทุกคลัง</option></select>
   <input type="search" id="q" placeholder="ค้นหา รถ / ลูกค้า / ทะเบียน / ออเดอร์">
   <button id="editBtn" hidden title="แก้ไขข้อมูลทีละช่อง (คลิกที่ช่อง)">✏️ โหมดแก้ไข</button>
+  <button id="addOpen" title="กรอกงานที่เพิ่มเข้ามาเองบนเว็บ ทีละแถว — เพิ่มเข้าวันเดิม ไม่ลบงานเก่า">➕ เพิ่มงาน</button>
   <button id="impOpen" title="อัปโหลดใบจัดรถ Excel เพื่อตรวจและนำเข้า">📥 นำเข้า Excel</button>
   <button id="pasteOpen" title="คัดลอกตารางที่ลูกค้าให้มา (Excel/อีเมล) แล้ววางเป็นชุด">📋 วางข้อมูลลูกค้า</button>
   <button class="primary" id="go">รีเฟรช</button>
@@ -6357,8 +6366,8 @@ PLAN_HTML = """<!doctype html>
 
 <div class="savebadge" id="savebadge" hidden></div>
 <div class="imp-back" id="impBack" hidden><div class="imp">
-  <div class="imp-h"><b>📥 นำเข้า Excel / 📋 วางข้อมูลลูกค้า</b><button id="impClose" title="ปิด">✕</button></div>
-  <p class="mut" style="margin:0 0 8px;font-size:14px">
+  <div class="imp-h"><b id="impTitle">📥 นำเข้า Excel / 📋 วางข้อมูลลูกค้า</b><button id="impClose" title="ปิด">✕</button></div>
+  <p class="mut" id="impIntro" style="margin:0 0 8px;font-size:14px">
     เลือกไฟล์ใบจัดรถ (.xlsx) ระบบอ่านชีต "ข้อมูลการจัดส่ง" คอลัมน์ E–AD แล้วแสดงเป็นตาราง
     <b>แก้ข้อมูลในตารางนี้ได้เลยก่อนนำเข้า</b> ยังไม่เขียนอะไรลงชีตจนกว่าคุณจะกดยืนยัน</p>
   <input type="file" id="impFile" accept=".xlsx">
@@ -6380,6 +6389,15 @@ PLAN_HTML = """<!doctype html>
     <textarea id="pasteTxt" rows="5" style="width:100%;box-sizing:border-box;font:inherit" placeholder="วางข้อมูลที่นี่ (Ctrl+V)"></textarea>
     <div style="margin-top:6px">วันที่ของงาน: <input type="date" id="pasteDate"> <button id="pasteGo" class="go">ตรวจข้อมูลที่วาง</button></div>
     </div>
+  </div>
+  <div id="addBox" hidden>
+    <p class="mut" style="margin:0 0 8px;font-size:14px">กรอกงานที่เพิ่มเข้ามา <b>1 แถว = 1 งาน (1 Drop)</b> · ต้องมีอย่างน้อย <b>ปลายทาง</b> ·
+      ระบบเติมเที่ยววิ่ง ทะเบียน พขร. เบอร์โทร และเวลาออกจากฟรีต/โทรตาม พขร (จากเวลาเข้าโหลด) ให้เอง แล้วให้ตรวจ/แก้ในตารางก่อนเขียนลงชีต ·
+      <b>เพิ่มเข้าวันเดิม ไม่ลบงานเก่า</b> (แทรกติดรถคันเดียวกัน · งานที่มีในชีตแล้วจะเตือนว่าซ้ำ)</p>
+    <div style="margin-bottom:8px">วันที่ของงาน: <input type="date" id="addDate"></div>
+    <div class="addwrap"><table class="addt"><thead><tr id="addHead"></tr></thead><tbody id="addRows"></tbody></table></div>
+    <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <button id="addMore">＋ เพิ่มอีกแถว</button> <button id="addGo" class="go">ตรวจข้อมูล →</button> <span id="addMsg" style="color:#dc2626;font-size:14px"></span></div>
   </div>
   <div id="impBody"></div>
 </div></div>
@@ -7687,6 +7705,7 @@ async function impCommit(){
       fetch('/api/plan?date=' + r.date + '&fresh=1').then(x => x.json()).then(pj => { IMPDAY = {date: r.date, rows: (pj.rows || []).map(x => x.cells)}; }).catch(() => {}).finally(impRecheck);
     };
     document.getElementById('date').value = r.date; load(true);
+    if(!document.getElementById('addBox').hidden) addReset();      // มาจาก ➕ เพิ่มงาน: ล้างฟอร์ม กันกดเพิ่มงานเดิมซ้ำ
     if(r.master_saved){ CARS = null; loadCars(); }
   }catch(e){ impBody('<div class="box bad">เขียนไม่สำเร็จ: ' + esc(e.message) + '</div>'); }
 }
@@ -7852,9 +7871,13 @@ async function pasteGo(){
     impRender();
   }catch(e){ impBody('<div class="box bad">ตรวจข้อมูลไม่ได้: ' + esc(e.message) + '</div>'); }
 }
-function openImp(paste){
+function openImp(paste, add){
   document.getElementById('impBack').hidden = false;
+  ['impIntro', 'impFile', 'pasteBox'].forEach(id => { document.getElementById(id).hidden = !!add; });
+  document.getElementById('addBox').hidden = !add;
+  document.getElementById('impTitle').textContent = add ? '➕ เพิ่มงาน (กรอกเอง)' : '📥 นำเข้า Excel / 📋 วางข้อมูลลูกค้า';
   loadOpts();                            // โหลดรายการตัวเลือกไว้ก่อน ระหว่างที่คนกำลังเลือกไฟล์
+  if(add) return;
   fleetDates();                          // รายการแท็บวันที่ของชีตแผนรถ — เปิดจากปุ่มไหนก็โหลด (เดิมโหลดเฉพาะปุ่มวางข้อมูล เลยค้าง "กำลังโหลด...")
   if(paste){
     const d = document.getElementById('pasteDate'); if(!d.value) d.value = DATA ? DATA.date : '';
@@ -7950,6 +7973,66 @@ document.getElementById('fleetGo').onclick = async () => {        // ดึง�
     msg.textContent = 'ดึงจากแท็บ ' + j.tab + ' ได้ ' + j.rows.length + ' งาน' + (j.skipped ? ' (ข้ามงานขนส่งอื่น ' + j.skipped + ')' : '') + ' — ตรวจ/แก้ด้านล่างได้เลย';
     pasteGo();
   }catch(e){ msg.textContent = 'ดึงไม่สำเร็จ: ' + e.message; }
+};
+// ── ➕ เพิ่มงาน: กรอกเองทีละแถวบนเว็บ → แปลงเป็นชุด "วางข้อมูล" พร้อมหัวตาราง → ใช้ตัวตรวจเดียวกัน (เติมเที่ยว/รถ/พขร., กันซ้ำ, แทรกติดรถคันเดิม) ──
+const ADD_F = [['เวลาส่งมอบ', 'time', 96], ['ต้นทาง', 'o', 110], ['ปลายทาง', 'd', 200], ['Drop', 'drop', 64], ['น้ำหนักบรรทุก', 'num', 96],
+               ['เลขออเดอร์', 't', 110], ['เลขโหลด', 't', 110], ['เบอร์รถ', 'car', 96], ['เวลาเข้าโหลด', 'time', 96], ['หมายเหตุ', 't', 170]];
+function addCell(f, v){
+  const at = ' data-k="' + f[0] + '" style="width:' + f[2] + 'px"';
+  if(f[1] === 'time') return '<input type="time"' + at + ' value="' + esc(v) + '">';
+  const st = OPTS && OPTS.strict || {};
+  const lst = f[1] === 'o' ? st['11'] : f[1] === 'drop' ? (st['13'] || ['1', '2', '3', '4', '5']) : null;
+  if(lst && lst.length) return '<select' + at + '>' + (f[1] === 'o' ? '<option value="">—</option>' : '') +
+    lst.map(x => '<option' + (String(x) === String(v) ? ' selected' : '') + '>' + esc(x) + '</option>').join('') + '</select>';
+  return '<input' + at + (f[1] === 'd' ? ' list="dl12"' : f[1] === 'car' ? ' list="dl15"' : '') + (f[1] === 'num' ? ' inputmode="decimal"' : '') + ' value="' + esc(v) + '">';
+}
+function addRead(){                      // ค่าในฟอร์ม → [{ชื่อคอลัมน์: ค่า}] (ข้ามแถวที่ว่างทั้งแถว · Drop อย่างเดียวไม่นับ)
+  return [...document.querySelectorAll('#addRows tr')].map(tr => {
+    const o = {}; tr.querySelectorAll('[data-k]').forEach(el => { o[el.dataset.k] = el.value.trim(); }); return o;
+  }).filter(o => ADD_F.some(f => f[0] !== 'Drop' && o[f[0]]));
+}
+function addRow(v){
+  v = v || {};
+  document.getElementById('addRows').insertAdjacentHTML('beforeend', '<tr>' + ADD_F.map(f => '<td>' + addCell(f, v[f[0]] || '') + '</td>').join('') +
+    '<td><button class="addx" title="ลบแถวนี้">✕</button></td></tr>');
+}
+function addReset(){
+  document.getElementById('addRows').innerHTML = ''; addRow(); document.getElementById('addMsg').textContent = '';
+}
+async function openAdd(){
+  openImp(false, true);
+  IMP = null; impBody('');
+  const d = document.getElementById('addDate'); d.value = DATA ? DATA.date : (document.getElementById('date').value || '');
+  document.getElementById('addHead').innerHTML = ADD_F.map(f => '<th>' + f[0] + (f[1] === 'd' ? ' <i>*</i>' : '') + '</th>').join('') + '<th></th>';
+  document.getElementById('addRows').innerHTML = '<tr><td class="mut" colspan="' + (ADD_F.length + 1) + '">กำลังโหลดรายการตัวเลือก...</td></tr>';
+  await loadOpts();                      // รายการต้นทาง/Drop/ปลายทาง/เบอร์รถ ให้เลือก
+  addReset();
+  const f = document.querySelector('#addRows input'); if(f) f.focus();
+}
+document.getElementById('addOpen').onclick = openAdd;
+document.getElementById('addMore').onclick = () => {     // แถวใหม่: ต้นทางตามแถวบน (งานเพิ่มมักออกคลังเดียวกัน)
+  const last = [...document.querySelectorAll('#addRows tr')].pop(), v = {};
+  if(last) last.querySelectorAll('[data-k="ต้นทาง"]').forEach(el => { v[el.dataset.k] = el.value; });
+  addRow(v);
+  const inp = [...document.querySelectorAll('#addRows tr')].pop().querySelector('input'); if(inp) inp.focus();
+};
+document.getElementById('addRows').addEventListener('click', e => {
+  const b = e.target.closest('.addx'); if(!b) return;
+  b.closest('tr').remove();
+  if(!document.querySelector('#addRows tr')) addRow();
+});
+document.getElementById('addGo').onclick = () => {
+  const msg = document.getElementById('addMsg'), iso = document.getElementById('addDate').value, rows = addRead();
+  msg.textContent = '';
+  if(!iso){ msg.textContent = 'เลือกวันที่ของงานก่อน'; return; }
+  if(!rows.length){ msg.textContent = 'ยังไม่ได้กรอกงาน'; return; }
+  const miss = rows.findIndex(o => !o['ปลายทาง']);
+  if(miss >= 0){ msg.textContent = 'แถวที่ ' + (miss + 1) + ' ยังไม่ได้ใส่ปลายทาง'; return; }
+  const TAB = String.fromCharCode(9), NL = String.fromCharCode(10), Q = String.fromCharCode(34);
+  const q = v => Q + String(v || '').split(Q).join(Q + Q) + Q;              // ครอบทุกช่องด้วย "..." กันข้อความที่มี Tab/เครื่องหมายคำพูด
+  document.getElementById('pasteTxt').value = [ADD_F.map(f => f[0]).join(TAB)].concat(rows.map(o => ADD_F.map(f => q(o[f[0]])).join(TAB))).join(NL);
+  document.getElementById('pasteDate').value = iso;
+  pasteGo();                             // ผลตรวจแสดงใต้ฟอร์ม · แก้ในฟอร์มแล้วกดตรวจใหม่ได้
 };
 document.getElementById('pasteOpen').onclick = () => openImp(true);
 document.getElementById('impOpen').onclick = () => openImp(false);
