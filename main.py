@@ -2508,7 +2508,7 @@ def _triple_conflicts(rows: list, date_iso: str) -> list:
     return out
 
 
-def _car_key(car: str) -> tuple:
+def _car_sort(car: str) -> tuple:
     """ลำดับเบอร์รถแบบตัวเลขจริง (9 มาก่อน 10, 105 มาก่อน 1012) · ไม่มีเบอร์รถ = ท้ายสุด"""
     car = str(car or "").strip()
     if not car:
@@ -2541,14 +2541,14 @@ def _write_near(ws, head: int, hit: list, sheet_rows: list) -> dict:
         if car and car in last_of:
             groups.setdefault(last_of[car], []).append(i); near_n += 1
         elif car and known:                              # รถคันใหม่ของวันนี้: ต่อจากรถคันที่เบอร์น้อยกว่าที่ใกล้สุด ไม่มีก็แทรกก่อนรถคันถัดไป
-            k = _car_key(car)
-            prev = [c for c in known if _car_key(c) < k]
+            k = _car_sort(car)
+            prev = [c for c in known if _car_sort(c) < k]
             after = last_of[prev[-1]] if prev else first_of[known[0]] - 1
             groups.setdefault(after, []).append(i); sort_n += 1
         else:
             groups.setdefault(l, []).append(i)
     for a in groups:                                     # ในกลุ่มเดียวกัน เรียงตามเบอร์รถ (รถคันเดิมมาก่อนรถคันใหม่) คงลำดับที่วางเมื่อเบอร์เดียวกัน
-        groups[a].sort(key=lambda i: (_car_key(sheet_rows[i][PLAN_CARNO]), i))
+        groups[a].sort(key=lambda i: (_car_sort(sheet_rows[i][PLAN_CARNO]), i))
     order = sorted(groups)
     try:
         top = ws.get(f"A{l}:Z{l}", value_render_option=gspread.utils.ValueRenderOption.formula) or [[]]
@@ -2687,7 +2687,7 @@ async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = 
         removed = inserted = 0
         hit = [i + 1 for i, v in enumerate(col_c) if i > head and _parse_date(v) == rv["date"]]   # แถวของวันนี้ (อ้างอิงคอลัมน์ C)
         if near and not hit:                              # วันใหม่จากปุ่มเพิ่มงาน/วางข้อมูล: ลงเรียงตามเบอร์รถ (นำเข้า Excel คงลำดับตามไฟล์)
-            sheet_rows = [r for _i, r in sorted(enumerate(sheet_rows), key=lambda t: (_car_key(t[1][PLAN_CARNO]), t[0]))]
+            sheet_rows = [r for _i, r in sorted(enumerate(sheet_rows), key=lambda t: (_car_sort(t[1][PLAN_CARNO]), t[0]))]
         if adding and hit:                                # วางข้อมูล/Excel แบบไม่แทนที่ เข้าวันที่มีอยู่แล้ว: เพิ่มโดยไม่ลบ แทรกติดรถคันเดิม
             res = _write_near(ws, head, hit, sheet_rows)
             _drop_sheet_cache(PLAN_PAGE_ID, PLAN_PAGE_TAB)
