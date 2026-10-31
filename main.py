@@ -2508,9 +2508,18 @@ def _triple_conflicts(rows: list, date_iso: str) -> list:
     return out
 
 
+def _car_key(car: str) -> tuple:
+    """ลำดับเบอร์รถแบบตัวเลขจริง (9 มาก่อน 10, 105 มาก่อน 1012) · ไม่มีเบอร์รถ = ท้ายสุด"""
+    car = str(car or "").strip()
+    if not car:
+        return ((2, 0, ""),)
+    return tuple((0, int(p), "") if p.isdigit() else (1, 0, p.lower()) for p in re.findall(r"\d+|\D+", car))
+
+
 def _write_near(ws, head: int, hit: list, sheet_rows: list) -> dict:
     """เพิ่มงานเข้าวันที่มีอยู่แล้ว โดยไม่ลบงานเดิม: งานของรถคันที่มีแถวอยู่ในวันนั้น แทรกต่อท้ายกลุ่มแถวของรถคันนั้น
-    ส่วนงานที่ยังไม่มีเบอร์รถ/เป็นรถคันใหม่ ต่อท้ายวัน (ก่อนแถวสีดำคั่นวัน) — แทรกแถว+คัดลอกสูตร+เขียนค่า รวมเป็น 3 คำสั่งเรียก Google
+    รถคันใหม่ของวันนั้น แทรกตามลำดับเบอร์รถ (ต่อจากรถคันก่อนหน้า หรือก่อนรถคันถัดไป) · ยังไม่มีเบอร์รถ ต่อท้ายวัน (ก่อนแถวสีดำคั่นวัน)
+    — แทรกแถว+คัดลอกสูตร+เขียนค่า รวมเป็น 3 คำสั่งเรียก Google
     ช่องที่เป็นสูตร (หรือคอลัมน์ ARRAYFORMULA) ไม่เขียนทับ ส่ง None ให้ชีตข้ามช่องนั้น"""
     f, l = hit[0], hit[-1]
     if len(hit) != l - f + 1:
@@ -2518,18 +2527,28 @@ def _write_near(ws, head: int, hit: list, sheet_rows: list) -> dict:
                             "ระบบไม่แทรกให้เพราะอาจทับข้อมูลวันอื่น — แก้ในชีตให้เป็นช่วงเดียวก่อน")
     colp = ws.col_values(PLAN_CARNO + 1)
     last_of: dict = {}                                   # เบอร์รถ → แถวสุดท้ายของรถคันนั้นในวันนี้
+    first_of: dict = {}                                  # เบอร์รถ → แถวแรกของรถคันนั้นในวันนี้
     for r in range(f, l + 1):
         car = str(colp[r - 1]).strip() if r - 1 < len(colp) else ""
         if car:
             last_of[car] = r
-    groups: dict = {}                                    # แทรกหลังแถวที่ … → ลำดับแถวใหม่ (คงลำดับที่วาง)
-    near_n = 0
+            first_of.setdefault(car, r)
+    known = sorted(last_of, key=_car_key)
+    groups: dict = {}                                    # แทรกหลังแถวที่ … → ลำดับแถวใหม่
+    near_n = sort_n = 0
     for i, row in enumerate(sheet_rows):
         car = str(row[PLAN_CARNO]).strip()
         if car and car in last_of:
             groups.setdefault(last_of[car], []).append(i); near_n += 1
+        elif car and known:                              # รถคันใหม่ของวันนี้: ต่อจากรถคันที่เบอร์น้อยกว่าที่ใกล้สุด ไม่มีก็แทรกก่อนรถคันถัดไป
+            k = _car_key(car)
+            prev = [c for c in known if _car_key(c) < k]
+            after = last_of[prev[-1]] if prev else first_of[known[0]] - 1
+            groups.setdefault(after, []).append(i); sort_n += 1
         else:
             groups.setdefault(l, []).append(i)
+    for a in groups:                                     # ในกลุ่มเดียวกัน เรียงตามเบอร์รถ (รถคันเดิมมาก่อนรถคันใหม่) คงลำดับที่วางเมื่อเบอร์เดียวกัน
+        groups[a].sort(key=lambda i: (_car_key(sheet_rows[i][PLAN_CARNO]), i))
     order = sorted(groups)
     try:
         top = ws.get(f"A{l}:Z{l}", value_render_option=gspread.utils.ValueRenderOption.formula) or [[]]
@@ -2542,7 +2561,7 @@ def _write_near(ws, head: int, hit: list, sheet_rows: list) -> dict:
         placed.append((after, groups[after], after + 1 + off)); off += len(groups[after])
     src_final = l + sum(len(groups[a]) for a in order if a < l)   # แถวต้นแบบสูตรเลื่อนลงตามแถวที่แทรกไว้เหนือมัน
     reqs = [{"insertDimension": {"range": {"sheetId": ws.id, "dimension": "ROWS", "startIndex": a, "endIndex": a + len(groups[a])},
-                                 "inheritFromBefore": True}} for a in sorted(order, reverse=True)]   # แทรกจากล่างขึ้นบน เลขแถวบนจะได้ไม่เลื่อน
+                                 "inheritFromBefore": a >= f}} for a in sorted(order, reverse=True)]   # แทรกจากล่างขึ้นบน เลขแถวบนจะได้ไม่เลื่อน
 
     def rng(r0: int, r1: int, c0: int, c1: int) -> dict:
         return {"sheetId": ws.id, "startRowIndex": r0 - 1, "endRowIndex": r1, "startColumnIndex": c0, "endColumnIndex": c1}
@@ -2573,9 +2592,10 @@ def _write_near(ws, head: int, hit: list, sheet_rows: list) -> dict:
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"แทรกแถวในชีตแล้วแต่เขียนค่าไม่สำเร็จ ({type(e).__name__}) — ตรวจแถวว่างในวันนั้นแล้วลองใหม่")
     firsts = [pl[2] for pl in placed]
-    end_n = len(sheet_rows) - near_n
+    end_n = len(sheet_rows) - near_n - sort_n
     note = (f"แทรก {len(sheet_rows)} แถวเข้าวัน (ไม่ลบงานเดิม): {near_n} แถวติดกับแถวรถคันเดิม"
-            + (f" และ {end_n} แถวต่อท้ายวัน (รถคันใหม่/ยังไม่มีเบอร์รถ)" if end_n else ""))
+            + (f" · {sort_n} แถวรถคันใหม่แทรกตามลำดับเบอร์รถ" if sort_n else "")
+            + (f" · {end_n} แถวต่อท้ายวัน (ยังไม่มีเบอร์รถ)" if end_n else ""))
     return {"first": min(firsts), "last": max(pl[2] + len(pl[1]) - 1 for pl in placed), "inserted": len(sheet_rows),
             "kept": [_col_name(c) for c in sorted(protect)], "note": note}
 
@@ -2666,6 +2686,8 @@ async def plan_import(file: Optional[UploadFile] = File(None), rows_json: str = 
         n_new = len(sheet_rows)
         removed = inserted = 0
         hit = [i + 1 for i, v in enumerate(col_c) if i > head and _parse_date(v) == rv["date"]]   # แถวของวันนี้ (อ้างอิงคอลัมน์ C)
+        if near and not hit:                              # วันใหม่จากปุ่มเพิ่มงาน/วางข้อมูล: ลงเรียงตามเบอร์รถ (นำเข้า Excel คงลำดับตามไฟล์)
+            sheet_rows = [r for _i, r in sorted(enumerate(sheet_rows), key=lambda t: (_car_key(t[1][PLAN_CARNO]), t[0]))]
         if adding and hit:                                # วางข้อมูล/Excel แบบไม่แทนที่ เข้าวันที่มีอยู่แล้ว: เพิ่มโดยไม่ลบ แทรกติดรถคันเดิม
             res = _write_near(ws, head, hit, sheet_rows)
             _drop_sheet_cache(PLAN_PAGE_ID, PLAN_PAGE_TAB)
@@ -6393,7 +6415,7 @@ PLAN_HTML = """<!doctype html>
   <div id="addBox" hidden>
     <p class="mut" style="margin:0 0 8px;font-size:14px">กรอกงานที่เพิ่มเข้ามา <b>1 แถว = 1 งาน (1 Drop)</b> · ต้องมีอย่างน้อย <b>ปลายทาง</b> ·
       ระบบเติมเที่ยววิ่ง ทะเบียน พขร. เบอร์โทร และเวลาออกจากฟรีต/โทรตาม พขร (จากเวลาเข้าโหลด) ให้เอง แล้วให้ตรวจ/แก้ในตารางก่อนเขียนลงชีต ·
-      <b>เพิ่มเข้าวันเดิม ไม่ลบงานเก่า</b> (แทรกติดรถคันเดียวกัน · งานที่มีในชีตแล้วจะเตือนว่าซ้ำ)</p>
+      <b>เพิ่มเข้าวันเดิม ไม่ลบงานเก่า</b> (แทรกติดรถคันเดียวกัน · รถคันใหม่แทรกตามลำดับเบอร์รถ · งานที่มีในชีตแล้วจะเตือนว่าซ้ำ)</p>
     <div style="margin-bottom:8px">วันที่ของงาน: <input type="date" id="addDate"></div>
     <div class="addwrap"><table class="addt"><thead><tr id="addHead"></tr></thead><tbody id="addRows"></tbody></table></div>
     <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
@@ -7391,7 +7413,7 @@ function impRender(){
   }).join('') + '</tr>').join('');
   const nedit = Object.keys(IMP.edited).length;
   const ex = IMP.near ? (j.existing
-    ? 'งานที่วางจะ<b>เพิ่มเข้าวันที่ ' + dmy(j.date) + '</b> (ชีตมีอยู่แล้ว ' + j.existing + ' แถว) โดยไม่ลบงานเดิม — แทรกติดกับแถวของรถคันเดียวกัน คันใหม่/ยังไม่มีเบอร์รถต่อท้ายวัน'
+    ? 'งานที่วางจะ<b>เพิ่มเข้าวันที่ ' + dmy(j.date) + '</b> (ชีตมีอยู่แล้ว ' + j.existing + ' แถว) โดยไม่ลบงานเดิม — แทรกติดกับแถวของรถคันเดียวกัน · รถคันใหม่แทรกตามลำดับเบอร์รถ · ยังไม่มีเบอร์รถต่อท้ายวัน'
     : 'วันที่ ' + dmy(j.date) + ' ยังไม่มีในชีต จะลงต่อท้ายวันสุดท้าย ข้ามแถวสีดำ')
     : '<label><input type="checkbox" id="impReplace"' + (IMP.replace ? ' checked' : '') + '> ' + (j.existing
     ? 'แทนที่งานเดิมของวันที่ ' + dmy(j.date) + ' (ชีตมีอยู่แล้ว ' + j.existing + ' แถว) ที่ตำแหน่งเดิม ไม่แตะแถวสีดำคั่นวัน'
