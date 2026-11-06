@@ -8972,5 +8972,104 @@ if(IV > 0) setInterval(load, IV * 60 * 1000);
 </html>
 """
 
+# ─── ธีมสี (ทุกหน้า) ─────────────────────────────────────────────────────────
+# ผู้ใช้แต่ละคนเลือกชุดสี + สว่าง/มืด เก็บในเบราว์เซอร์ของตัวเอง — ไม่แตะชีต ไม่มีผลกับคนอื่น
+# ใส่ครั้งเดียวตอนเริ่มเซิร์ฟเวอร์: สีหลักที่เขียนตายตัวในแต่ละหน้าเปลี่ยนเป็นตัวแปร (ค่าเดิม = น้ำเงิน หน้าตาเหมือนเดิม)
+THEME_HEAD = """<style id="thcss">
+  .th-btn{display:flex;align-items:center;gap:9px;width:100%;font:inherit;font-size:13px;font-weight:700;text-align:left;color:var(--mut);background:none;border:0;border-radius:10px;padding:9px 12px;cursor:pointer}
+  .th-btn:hover{background:var(--hover,rgba(127,127,127,.12))}
+  .side .menu.out{margin-top:0}
+  .side .th-btn{margin-top:auto}
+  .th-float{position:fixed;right:14px;bottom:14px;z-index:90;width:auto;background:var(--card,#fff);border:1px solid var(--line,#e2e8f0);box-shadow:0 4px 14px rgba(0,0,0,.14)}
+  .th-logo{height:36px;width:auto;border-radius:7px;vertical-align:middle;margin-right:10px}
+  .th-logo.big{display:block;height:72px;margin:0 auto 14px}
+  #thpop{position:fixed;z-index:95;width:236px;padding:12px;border-radius:14px;background:var(--card,#fff);color:var(--ink,#0f172a);border:1px solid var(--line,#e2e8f0);box-shadow:0 10px 30px rgba(0,0,0,.22);font-size:14px}
+  #thpop h4{margin:0 0 8px;font-size:13px;color:var(--mut,#64748b)}
+  #thpop .sw{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px}
+  #thpop .sw button{height:44px;border-radius:10px;border:2px solid transparent;cursor:pointer;color:#fff;font:inherit;font-size:11.5px;font-weight:700;padding:0}
+  #thpop .sw button.on{outline:3px solid var(--ink,#0f172a);outline-offset:1px}
+  #thpop .md{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+  #thpop .md button{font:inherit;font-size:13px;font-weight:600;padding:7px 0;border-radius:9px;border:1px solid var(--line,#e2e8f0);background:none;color:inherit;cursor:pointer}
+  #thpop .md button.on{background:var(--acc,#2563eb);border-color:var(--acc,#2563eb);color:#fff}
+  @media (max-width:820px){ .side .th-btn{flex:0 0 auto;width:auto;margin-top:0;padding:9px 8px} .side .th-btn span{display:none} }
+</style>
+<script id="thjs">
+(function(){
+  var LOGO = 'data:image/png;base64,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';
+  var C = {blue: ['น้ำเงิน', '#2563eb', '#1d4ed8'], green: ['เขียว', '#059669', '#047857'], teal: ['ฟ้าเขียว', '#0891b2', '#0e7490'], purple: ['ม่วง', '#7c3aed', '#6d28d9'],
+           orange: ['ส้ม', '#ea580c', '#c2410c'], rose: ['ชมพู', '#e11d48', '#be123c'], slate: ['เทา', '#475569', '#334155'], navy: ['กรม', '#1e3a8a', '#172554']};
+  var M = [['auto', 'ตามเครื่อง'], ['light', 'สว่าง'], ['dark', 'มืด']], root = document.documentElement, rules = [];
+  function load(){ try{ return JSON.parse(localStorage.getItem('gb_theme') || '{}') || {}; }catch(e){ return {}; } }
+  function save(t){ try{ localStorage.setItem('gb_theme', JSON.stringify(t)); }catch(e){} }
+  function scan(){                                 // กฎโหมดมืดของทุกหน้า เปิด/ปิดเองได้โดยไม่ต้องแก้ CSS แต่ละหน้า
+    for(var i = 0; i < document.styleSheets.length; i++){
+      var list; try{ list = document.styleSheets[i].cssRules; }catch(e){ continue; }   // ฟอนต์จาก Google อ่านไม่ได้ ข้ามไป
+      for(var k = 0; list && k < list.length; k++){
+        var r = list[k];
+        if(r.media && r.media.mediaText.indexOf('prefers-color-scheme') >= 0 && r.media.mediaText.indexOf('dark') >= 0 && !r.thOrig){ r.thOrig = r.media.mediaText; rules.push(r); }
+      }
+    }
+  }
+  function apply(t){
+    var c = C[t.c], s = root.style, m = t.m || 'auto';
+    if(c && t.c !== 'blue'){
+      s.setProperty('--acc', c[1]); s.setProperty('--acc2', c[2]); s.setProperty('--acc-soft', 'color-mix(in srgb,' + c[1] + ' 13%,transparent)');
+    }else{ s.removeProperty('--acc'); s.removeProperty('--acc2'); s.removeProperty('--acc-soft'); }
+    rules.forEach(function(r){ r.media.mediaText = m === 'dark' ? 'all' : m === 'light' ? 'not all' : r.thOrig; });
+    if(m === 'auto'){ root.removeAttribute('data-theme'); s.removeProperty('color-scheme'); }
+    else{ root.setAttribute('data-theme', m); s.setProperty('color-scheme', m); }
+  }
+  scan(); apply(load());
+  function closePop(){ var p = document.getElementById('thpop'); if(p) p.remove(); }
+  function openPop(btn){
+    closePop();
+    var t = load(), cur = C[t.c] ? t.c : 'blue', mode = t.m || 'auto', p = document.createElement('div'); p.id = 'thpop';
+    p.innerHTML = '<h4>🎨 สีธีม</h4><div class="sw">' + Object.keys(C).map(function(k){
+        return '<button data-c="' + k + '" title="' + C[k][0] + '" style="background:' + C[k][1] + '" class="' + (k === cur ? 'on' : '') + '">' + C[k][0] + '</button>'; }).join('') +
+      '</div><h4>ความสว่าง</h4><div class="md">' + M.map(function(x){ return '<button data-m="' + x[0] + '" class="' + (x[0] === mode ? 'on' : '') + '">' + x[1] + '</button>'; }).join('') + '</div>';
+    document.body.appendChild(p);
+    var r = btn.getBoundingClientRect(), w = p.offsetWidth, h = p.offsetHeight;
+    p.style.left = Math.max(8, Math.min(r.left, innerWidth - w - 8)) + 'px';
+    p.style.top = Math.max(8, Math.min(r.top - h - 8 > 8 ? r.top - h - 8 : r.bottom + 8, innerHeight - h - 8)) + 'px';
+    p.addEventListener('click', function(e){
+      e.stopPropagation(); var b = e.target.closest('button'); if(!b) return;
+      var n = load();
+      if(b.dataset.c) n.c = b.dataset.c;
+      if(b.dataset.m) n.m = b.dataset.m;
+      save(n); apply(n); openPop(btn);
+    });
+  }
+  function mount(){
+    var side = document.querySelector('.side'), b = document.createElement('button');
+    var h1 = document.querySelector('header h1') || document.querySelector('h1');
+    if(h1 && !document.getElementById('thlogo')){                 // โลโก้บริษัทหน้าชื่อหน้า (ทุกหน้า) — หน้าที่ไม่มีเมนูข้าง (ล็อกอิน/ตั้งค่า) แสดงใหญ่เหนือชื่อ
+      var im = document.createElement('img');
+      im.id = 'thlogo'; im.alt = 'PTG Logistics'; im.src = LOGO; im.className = 'th-logo' + (side ? '' : ' big');
+      if(side){ h1.insertBefore(im, h1.firstChild); h1.style.display = 'flex'; h1.style.alignItems = 'center'; }
+      else h1.parentNode.insertBefore(im, h1);
+    }
+    b.type = 'button'; b.id = 'thbtn'; b.className = 'th-btn' + (side ? '' : ' th-float'); b.title = 'เปลี่ยนสีธีม'; b.innerHTML = '🎨<span>สีธีม</span>';
+    b.addEventListener('click', function(e){ e.stopPropagation(); if(document.getElementById('thpop')) closePop(); else openPop(b); });
+    if(side){ var out = side.querySelector('.menu.out'); side.insertBefore(b, out || null); } else { document.body.appendChild(b); }
+    document.addEventListener('click', function(e){ var p = document.getElementById('thpop'); if(p && !p.contains(e.target)) closePop(); });
+    document.addEventListener('keydown', function(e){ if(e.key === 'Escape') closePop(); });
+  }
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mount); else mount();
+})();
+</script>
+"""
+
+
+def _themed(html: str) -> str:
+    """สีหลักตายตัว → ตัวแปรธีม (ค่าสำรอง = สีเดิม) แล้วใส่ตัวเลือกธีมก่อน </head> · --acc/--tr คือค่ากำหนดสีของหน้าเอง ไม่แตะ"""
+    html = re.sub(r"(?<!--acc:)(?<!--tr:)#2563eb", "var(--acc,#2563eb)", html, flags=re.I)
+    html = re.sub(r"#1d4ed8", "var(--acc2,#1d4ed8)", html, flags=re.I)
+    html = re.sub(r"(?<!--tr-bg:)#(eff6ff|eaf1fe|dbeafe)", lambda m: f"var(--acc-soft,{m.group(0)})", html, flags=re.I)
+    return html.replace("</head>", THEME_HEAD + "</head>", 1)
+
+
+for _name in ("USERS_HTML", "LOGIN_HTML", "SETTINGS_HTML", "REPORT_HTML", "READY_HTML", "PLAN_HTML", "DASHBOARD_HTML"):
+    globals()[_name] = _themed(globals()[_name])
+
 # Vercel entry point
 handler = app
