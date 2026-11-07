@@ -178,6 +178,7 @@ DONE_KEYWORDS = [
 # เช็กทั้งคอลัมน์สถานะ (AA/AH) และช่องลูกค้าปลายทาง (M) — เคยเจอของจริง: เขียน "โหลดเก็บ"
 # ไว้ในช่องลูกค้า แต่ระบบเช็กแค่ช่องสถานะ เลยยังขึ้น "รอออกรถ + ถึงเวลาโทร"
 CANCEL_KEYWORDS = ["ยกเลิก", "โหลดเก็บ", "cancel"]
+STORED_WORD = "โหลดเก็บ"     # รถมีงานแล้วในวันนั้น: นับรถ/เที่ยวเป็นงาน (ต่างจากยกเลิก) แต่ไม่ต้องตามเวลาส่งในหน้าเช็กรถ
 
 TZ_OFFSET     = 7    # UTC+7
 CACHE_TTL     = 300  # cache Sheet 5 นาที
@@ -2128,7 +2129,8 @@ def plan_rows(date_str: str = Query(None, alias="date"), fresh: int = Query(0)):
         # สถานะ AA อยู่นอกช่วง A–Z จึงอ่านจากแถวเต็ม ไม่ใช่จาก cells
         flag = (_cell(row, PLAN_STATUS) + " " + _cell(row, PLAN_DEST)).lower()
         cancelled = any(k in flag for k in CANCEL_KEYWORDS)
-        out.append({"row": i + 1, "cells": cells, "cancelled": cancelled})
+        out.append({"row": i + 1, "cells": cells, "cancelled": cancelled, "stored": STORED_WORD in flag,
+                    "status": _cell(row, PLAN_STATUS)})
     edit_block = _write_block_reason("PLAN_EDIT_ENABLED")
     return {"date": target, "fetched_at": _thai_now().strftime("%H:%M:%S"),
             "sheet_read_at": read_at, "throttled": throttled,
@@ -3576,7 +3578,8 @@ def build_ontime_report(rows: list, d_from: str, d_to: str, f: dict) -> dict:
 
     def col(key: str, rowset=None) -> list:
         return [x[key] for x in (rowset if rowset is not None else items) if x[key] is not None]
-    trips = {x["job"] or f'{x["car"]}|{x["date"]}|{x["row"]}' for x in items if x["car"] and not x["status"].strip()}
+    is_trip = lambda x: x["car"] and (not x["status"].strip() or STORED_WORD in x["status"] + x["dest"])    # ไม่มีสถานะ หรือโหลดเก็บ = รถมีงาน · ยกเลิกไม่นับ
+    trips = {x["job"] or f'{x["car"]}|{x["date"]}|{x["row"]}' for x in items if is_trip(x)}
     judged = [x for x in items if x["ontime"]]
     by_origin: dict = {}
     for x in items:
@@ -3602,7 +3605,7 @@ def build_ontime_report(rows: list, d_from: str, d_to: str, f: dict) -> dict:
         ps = sum(1 for x in jd if x["ontime"] == "PASS")
         by_day.append({"date": ds, "drops": len(jd), "pass": ps, "delay": len(jd) - ps,
                        "pct": round(ps / len(jd) * 100, 1) if jd else None,
-                       "trips": len({x["job"] or f'{x["car"]}|{x["date"]}|{x["row"]}' for x in v if x["car"] and not x["status"].strip()}),
+                       "trips": len({x["job"] or f'{x["car"]}|{x["date"]}|{x["row"]}' for x in v if is_trip(x)}),
                        "wait": avg(col("wait", v)), "load": avg(col("load", v))})
     return {
         "from": d_from, "to": d_to, "n_rows": len(items), "by_day": by_day,
@@ -3619,7 +3622,8 @@ def build_ontime_report(rows: list, d_from: str, d_to: str, f: dict) -> dict:
                            "pass": sum(1 for y in v if y["ontime"] == "PASS")}
                           for k, v in _group(items, "why").items() if k], key=lambda d: (-d["n"], d["why"])),
         "by_fix": sorted([{"why": k, "n": len(v), "delay": sum(1 for y in v if y["ontime"] == "Delay"),
-                           "pass": sum(1 for y in v if y["ontime"] == "PASS"), "cancel": sum(1 for y in v if y["status"].strip())}
+                           "pass": sum(1 for y in v if y["ontime"] == "PASS"),
+                           "cancel": sum(1 for y in v if y["status"].strip() and STORED_WORD not in y["status"] + y["dest"])}
                           for k, v in _group(items, "fix").items() if k], key=lambda d: (-d["n"], d["why"])),
         "by_jtype": sorted([{"jtype": jt, "drops": len(v), "n": len(col("unload", v)), "unload": avg(col("unload", v))}
                             for jt, v in _group(items, "jtype").items()], key=lambda d: -d["drops"]),
@@ -3679,7 +3683,6 @@ READY_CAR_FIRST_ROW    = int(os.environ.get("READY_CAR_FIRST_ROW", "20") or 0)
 READY_DRIVER_FIRST_ROW = int(os.environ.get("READY_DRIVER_FIRST_ROW", "0") or 0)
 READY_DRIVER_STATUS    = os.environ.get("READY_DRIVER_STATUS", "พนักงาน")   # นับเฉพาะ พขร. ที่คอลัมน์ "สถานะ" เป็นค่านี้
 READY_TARGET     = float(os.environ.get("READY_TARGET", "2") or 2)   # เป้าเที่ยวต่อรถพร้อมใช้ 1 คันต่อวัน (หน้าเว็บแก้ได้)
-READY_STORED_WORD = "โหลดเก็บ"     # รถมีงานแล้ว แต่ของยังไม่ได้ส่ง → นับเป็นงานของวันนั้น (ต่างจากยกเลิก)
 READY_TREND_DAYS = 14                                                 # กราฟแนวโน้มย้อนหลังกี่วัน (นับวันที่เลือกด้วย)
 _ready_parse_memo: dict = {}                                          # แท็บ → (ตารางที่อ่านมา, ผลแยกหัว/รหัส) ไม่ต้องแยกซ้ำทุกวันของกราฟ
 _TH_MONTHS = {m: i for i, m in enumerate(
@@ -3823,7 +3826,7 @@ def _ready_plan(rows: list, date_iso: str) -> tuple:
         if _parse_date(_cell(r, PLAN_DATE)) != date_iso:
             continue
         flag = (_cell(r, PLAN_STATUS) + " " + _cell(r, PLAN_DEST)).lower()
-        if READY_STORED_WORD in flag:
+        if STORED_WORD in flag:
             stored += 1
         elif any(k in flag for k in CANCEL_KEYWORDS):
             cancelled += 1
@@ -6615,7 +6618,7 @@ ROWS_EL.addEventListener('drop', e => {
   if(!EDITING){ toast('กด "โหมดแก้ไข" ก่อน แล้วค่อยลากรถมาวาง', true); return; }
   const x = DATA.rows.find(r => r.row === Number(td.dataset.r));
   if(!x) return;
-  if(x.cancelled){ toast('แถวนี้ยกเลิก/โหลดเก็บ — ไม่ใส่รถให้', true); return; }
+  if(x.cancelled && !x.stored){ toast('แถวนี้ยกเลิก — ไม่ใส่รถให้', true); return; }
   const old = x.cells[15] || '';
   if(old === car) return;
   if(old && !confirm('แถว ' + x.row + ' มีรถ ' + old + ' อยู่แล้ว — เปลี่ยนเป็น ' + car + ' ?')) return;
@@ -6632,11 +6635,12 @@ function render(){
   const rows = DATA.rows.filter(x =>
     (!depot || x.cells[SRC_COL] === depot) && (!ONLYCHG || x.chg) &&
     (!q || x.cells.join(' ').toLowerCase().includes(q)));
-  const cx = rows.filter(x => x.cancelled).length;
+  const st = rows.filter(x => x.stored).length, cx = rows.filter(x => x.cancelled && !x.stored).length;     // โหลดเก็บ = รถมีงาน นับในใช้งานจริง
   document.getElementById('cards').innerHTML =
     '<div class="c"><b>' + rows.length + '</b><span>แถวแผนงาน</span></div>' +
     '<div class="c"><b>' + (rows.length - cx) + '</b><span>ใช้งานจริง</span></div>' +
-    '<div class="c"><b style="color:var(--late)">' + cx + '</b><span>ยกเลิก/โหลดเก็บ</span></div>';
+    '<div class="c"><b>' + st + '</b><span>โหลดเก็บ (นับเป็นงาน)</span></div>' +
+    '<div class="c"><b style="color:var(--late)">' + cx + '</b><span>ยกเลิก</span></div>';
   // เลือกเฉพาะคอลัมน์ในกลุ่มที่เปิดอยู่ (B = เลข JOB ตรึงไว้เสมอ)
   const compact = COLMODE === 'compact';
   document.getElementById('chips').hidden = compact;                       // ปุ่มกลุ่มคอลัมน์ใช้เฉพาะมุมมอง "ทั้งหมด"
@@ -6909,7 +6913,9 @@ function ownEdit(x, i, val, cells){    // แก้เองสำเร็จ �
   const oldKey = x.key;
   if(cells && cells.length) x.cells = cells.slice(0, 26);      // ช่องสูตรที่พึ่งช่องนี้ถูกคำนวณใหม่ในชีตแล้ว
   else x.cells[i] = val;
-  x.cancelled = /ยกเลิก|โหลดเก็บ|cancel/i.test(x.cells[12]);
+  const flag = (x.status || '') + ' ' + x.cells[12];
+  x.cancelled = /ยกเลิก|โหลดเก็บ|cancel/i.test(flag);
+  x.stored = /โหลดเก็บ/.test(flag);
   const newKey = x.cells[1] ? x.cells[1] + '|' + x.cells[13] : ('r' + x.row);
   if(base){
     if(oldKey !== newKey && base[oldKey]){ base[newKey] = base[oldKey]; delete base[oldKey]; }
@@ -7982,7 +7988,7 @@ async function fleetSync(){
     const pr = await fetch('/api/plan?date=' + fj.date + '&fresh=1'), pj = await pr.json();      // อ่านชีตสด (ไม่ใช้แคช) จะได้เห็นเลขล่าสุด
     if(!pr.ok) throw new Error(pj.detail || pr.status);
     const pool = {};                                                    // งานในชีต จัดกลุ่มตาม ต้นทาง+ปลายทาง+เวลาส่งมอบ
-    pj.rows.forEach(x => { if(x.cancelled) return; const k = syncKey(x.cells[11], x.cells[12], hhmmOf(x.cells[6])); (pool[k] = pool[k] || []).push(x); });
+    pj.rows.forEach(x => { if(x.cancelled && !x.stored) return; const k = syncKey(x.cells[11], x.cells[12], hhmmOf(x.cells[6])); (pool[k] = pool[k] || []).push(x); });
     const fill = [], fresh = [];
     fj.rows.forEach(f => {                                              // f = [เวลา, เลขออเดอร์, เลขโหลด, ปริมาณ, ต้นทาง, ปลายทาง, เงื่อนไข]
       const list = pool[syncKey(f[4], f[5], f[0])];
