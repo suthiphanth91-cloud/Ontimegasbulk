@@ -3679,6 +3679,7 @@ READY_CAR_FIRST_ROW    = int(os.environ.get("READY_CAR_FIRST_ROW", "20") or 0)
 READY_DRIVER_FIRST_ROW = int(os.environ.get("READY_DRIVER_FIRST_ROW", "0") or 0)
 READY_DRIVER_STATUS    = os.environ.get("READY_DRIVER_STATUS", "พนักงาน")   # นับเฉพาะ พขร. ที่คอลัมน์ "สถานะ" เป็นค่านี้
 READY_TARGET     = float(os.environ.get("READY_TARGET", "2") or 2)   # เป้าเที่ยวต่อรถพร้อมใช้ 1 คันต่อวัน (หน้าเว็บแก้ได้)
+READY_STORED_WORD = "โหลดเก็บ"     # รถมีงานแล้ว แต่ของยังไม่ได้ส่ง → นับเป็นงานของวันนั้น (ต่างจากยกเลิก)
 READY_TREND_DAYS = 14                                                 # กราฟแนวโน้มย้อนหลังกี่วัน (นับวันที่เลือกด้วย)
 _ready_parse_memo: dict = {}                                          # แท็บ → (ตารางที่อ่านมา, ผลแยกหัว/รหัส) ไม่ต้องแยกซ้ำทุกวันของกราฟ
 _TH_MONTHS = {m: i for i, m in enumerate(
@@ -3810,18 +3811,21 @@ def _ready_sheet(tab: str, need: list, date_iso: str, first_row: int = 0) -> dic
 
 
 def _ready_plan(rows: list, date_iso: str) -> tuple:
-    """แผนงานของวันนั้น → ({คีย์รถ: {jobs: เซ็ตเลขเที่ยว, drops: จำนวนแถว}}, {ชื่อ พขร.: เซ็ตเลขเที่ยว}, จำนวนงานที่ยกเลิก)
+    """แผนงานของวันนั้น → ({คีย์รถ: {jobs: เซ็ตเลขเที่ยว, drops: จำนวนแถว}}, {ชื่อ พขร.: เซ็ตเลขเที่ยว}, จำนวนงานที่ยกเลิก, จำนวนงานโหลดเก็บ)
 
     1 แถว = 1 drop · 1 เที่ยว = เลข JOB เดียวกัน (คอลัมน์ B = วันที่+รถ+เที่ยว เช่น 46266PTL.451เที่ยว 1)
-    นับแบบเดียวกับหน้ารายงาน On Time · งานที่ยกเลิก/โหลดเก็บไม่นับ
+    งานที่ยกเลิกไม่นับ · โหลดเก็บถือว่ารถมีงานในวันนั้น นับทั้งรถ พขร. เที่ยว และ drop
     แถวที่ไม่มีเลข JOB ใช้ลำดับเที่ยว (D) → รถ+เที่ยววิ่ง (E) → ถ้าไม่มีเลยนับ 1 เที่ยวต่อแถว"""
     cars: dict = {}
     people: dict = {}
-    cancelled = 0
+    cancelled = stored = 0
     for i, r in enumerate(rows):
         if _parse_date(_cell(r, PLAN_DATE)) != date_iso:
             continue
-        if any(k in (_cell(r, PLAN_STATUS) + " " + _cell(r, PLAN_DEST)).lower() for k in CANCEL_KEYWORDS):
+        flag = (_cell(r, PLAN_STATUS) + " " + _cell(r, PLAN_DEST)).lower()
+        if READY_STORED_WORD in flag:
+            stored += 1
+        elif any(k in flag for k in CANCEL_KEYWORDS):
             cancelled += 1
             continue
         key = _car_key(_cell(r, PLAN_CARNO))
@@ -3834,7 +3838,7 @@ def _ready_plan(rows: list, date_iso: str) -> tuple:
         for c in (PLAN_DRIVER, PLAN_DRIVER2):
             if (nm := _cell(r, c)) and nm not in _NO_PERSON:
                 people.setdefault(nm, set()).add(job)
-    return cars, people, cancelled
+    return cars, people, cancelled, stored
 
 
 def _ready_col(head: list, *names: str):
@@ -3855,7 +3859,7 @@ def _ready_count(items: list, key: str) -> list:
 
 def build_ready_report(date_iso: str, plan_rows: list, target: float) -> dict:
     """สรุปรถ/คนพร้อมใช้งานของวันที่ระบุ — รวมชีตสถานะรายวันเข้ากับงานจริงในชีตแผนงาน"""
-    plan, driver_jobs, cancelled = _ready_plan(plan_rows, date_iso)
+    plan, driver_jobs, cancelled, stored = _ready_plan(plan_rows, date_iso)
     trips = {k: len(v["jobs"]) for k, v in plan.items()}          # เบอร์รถ → จำนวนเที่ยว (เลข JOB ไม่ซ้ำ)
     drops = {k: v["drops"] for k, v in plan.items()}              # เบอร์รถ → จำนวน drop (แถว)
     notes: list = []
@@ -3963,7 +3967,7 @@ def build_ready_report(date_iso: str, plan_rows: list, target: float) -> dict:
                  "pct_ready": round(len(ready) * 100 / len(cars), 1) if cars else None,
                  "pct_used": round(len(run) * 100 / len(ready), 1) if ready else None,
                  "down_by": _ready_count(down, "why"), "free_by": _ready_count(free + nodrv, "area")},
-        "trips": {"total": total_trips, "drops": total_drops, "cancelled": cancelled,
+        "trips": {"total": total_trips, "drops": total_drops, "cancelled": cancelled, "stored": stored,
                   "per_ready": round(total_trips / len(ready), 2) if ready else None,
                   "per_run": round(total_trips / len(run), 2) if run else None,
                   "goal": goal, "gap": max(0, goal - total_trips) if goal else 0},
@@ -4014,7 +4018,7 @@ def _ready_merge(reps: list) -> dict:
     t_total = sum(r["trips"]["total"] for r in reps)
     goal = sum(r["trips"]["goal"] for r in reps)
     trips = {"total": t_total, "drops": sum(r["trips"]["drops"] for r in reps),
-             "cancelled": sum(r["trips"]["cancelled"] for r in reps),
+             "cancelled": sum(r["trips"]["cancelled"] for r in reps), "stored": sum(r["trips"]["stored"] for r in reps),
              "per_ready": round(t_total / s_ready, 2) if s_ready else None,
              "per_run": round(t_total / s_run, 2) if s_run else None,
              "goal": goal, "gap": max(0, goal - t_total) if goal else 0}
@@ -5811,7 +5815,7 @@ READY_HTML = """<!doctype html>
       <p class="desc" id="trDesc">จำนวนรถแต่ละสถานะรายวัน · ชี้ที่แท่งเพื่อดูตัวเลข · กดแท่งเพื่อดูวันนั้น</p>
       <div class="chart" id="cTrend"></div></section>
     <section class="panel c5"><div class="ph"><h3>เที่ยวต่อวัน เทียบเป้า</h3><div class="legend"><span><i class="key" style="background:var(--trip)"></i>เที่ยว</span><span><i class="key" style="background:var(--goal);height:2px;width:14px;border-radius:0"></i>เป้า</span></div></div>
-      <p class="desc">นับเที่ยวจาก “เลข JOB” ในแผนงาน (หลาย drop ในเที่ยวเดียวกัน = 1 เที่ยว) · เป้า = เป้าเที่ยวต่อคัน × รถพร้อมใช้</p>
+      <p class="desc">นับเที่ยวจาก “เลข JOB” ในแผนงาน (หลาย drop ในเที่ยวเดียวกัน = 1 เที่ยว · โหลดเก็บนับเป็นงาน ยกเลิกไม่นับ) · เป้า = เป้าเที่ยวต่อคัน × รถพร้อมใช้</p>
       <div class="chart" id="cTrips"></div></section>
     <section class="panel c6"><div class="ph"><h3>แยกตามพื้นที่ประจำรถ</h3></div>
       <p class="desc">ความยาวแท่ง = จำนวนรถของพื้นที่ · ตัวเลขขวา = เที่ยวที่วิ่ง</p><div id="cArea"></div></section>
@@ -5969,7 +5973,7 @@ function render(){
       '<div class="meter"><i style="width:' + fill + '%"></i>' + (t.goal ? '<u style="left:calc(' + goalLine + '% - 1px)"></u>' : '') + '</div>' +
       '<div class="sub">' + (t.goal ? (t.gap ? 'ขาดอีก <b>' + n(t.gap) + '</b> เที่ยวถึงเป้า (' + r.target + ' เที่ยว/คัน)' : '<span class="ok">✓ ถึงเป้าแล้ว</span> เกินเป้า ' + n(t.total - t.goal) + ' เที่ยว') : 'ยังไม่ได้ตั้งเป้า') +
         ' · <b>' + n(t.drops) + '</b> drop · เฉลี่ย <b>' + (t.per_ready == null ? '–' : t.per_ready) + '</b> เที่ยว/คันพร้อมใช้' + (MULTI ? '/วัน' : '') + ' · <b>' + (t.per_run == null ? '–' : t.per_run) + '</b> เที่ยว/คันที่วิ่ง' + (MULTI ? '/วัน' : '') +
-        (t.cancelled ? ' · ยกเลิก ' + t.cancelled + ' งาน' : '') + '</div></div>' +
+        (t.stored ? ' · รวมโหลดเก็บ ' + t.stored + ' งาน' : '') + (t.cancelled ? ' · ยกเลิก ' + t.cancelled + ' งาน' : '') + '</div></div>' +
     '<div class="card k3"' + fattr({t: 'c', kind: 'run'}) + '><div class="lab">' + key(K.run.c) + 'วิ่งงาน</div><div class="val">' + n(c.run) + '<small>คัน</small></div>' +
       '<div class="sub">ใช้รถ <b>' + pct(c.run, c.ready) + '</b> ของรถพร้อมใช้</div></div>' +
     '<div class="card k3"' + fattr({t: 'c', kind: 'free'}) + '><div class="lab">' + key(K.free.c) + 'ว่างงาน</div><div class="val">' + n(c.free) + '<small>คัน</small></div>' +
