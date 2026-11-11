@@ -6001,7 +6001,7 @@ function render(){
   document.getElementById('cDown').innerHTML = bars(c.down_by, c.total * (r.days || 1), cu, {t: 'c'});
   document.getElementById('downSub').textContent = c.down ? (MULTI ? 'เฉลี่ย ' + n(c.down) + ' คัน/วัน' : 'รวม ' + c.down + ' คัน') + ' จาก ' + c.total : '';
   document.getElementById('cPpl').innerHTML = (p.total ? stack(ps, PK, p.total, 'พขร. ทั้งหมด ' + p.total + ' คน', true, {t: 'p'}) + legend(ps, PK, p.total, {t: 'p'}) : '<div class="empty">ไม่มีข้อมูล พขร.</div>') +
-    (p.down_by.length ? '<div class="divider"></div>' + bars(p.down_by, p.total * (r.days || 1), MULTI ? 'คน·วัน' : 'คน', {t: 'p'}) : '');
+    (p.down_by.length ? '<div class="divider"></div>' + bars(MULTI ? p.down_by.map(i => ({name: i.name, n: Math.round(i.n / (r.days || 1) * 10) / 10})) : p.down_by, p.total, MULTI ? 'คน/วัน' : 'คน', {t: 'p'}) : '');
   document.getElementById('pplSub').textContent = p.total ? 'ทั้งหมด ' + p.total + ' คน · พร้อมทำงาน ' + n(p.run + p.free) + (MULTI ? ' (เฉลี่ย/วัน)' : '') : '';
   drawRows();
   drawPeople();
