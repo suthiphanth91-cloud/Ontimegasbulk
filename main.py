@@ -5738,6 +5738,11 @@ READY_HTML = """<!doctype html>
   th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--hair);white-space:nowrap}
   th.n,td.n{text-align:right;font-variant-numeric:tabular-nums}
   thead th{font-size:12.5px;color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card);text-transform:none}
+  thead th.sortable{cursor:pointer;user-select:none;white-space:nowrap}
+  thead th.sortable:hover{color:var(--ink)}
+  thead th.sortable::after{content:attr(data-arrow);opacity:.45;font-size:11px}
+  thead th.sortable.on{color:var(--acc,#2563eb)}
+  thead th.sortable.on::after{opacity:1}
   tbody tr:hover td{background:var(--hover)}
   .st{display:inline-flex;align-items:center;gap:7px;font-weight:600}
   .st i{width:9px;height:9px;border-radius:50%;display:inline-block}
@@ -5833,11 +5838,11 @@ READY_HTML = """<!doctype html>
     <section class="panel c12" id="carsP" data-nosnap="1"><div class="tools"><div class="ph" style="margin:0"><h3>รายคัน</h3><span class="s2" id="rowSub"></span></div>
       <div class="chips" id="carChips"></div>
       <span class="grow"></span><input type="search" id="q" placeholder="ค้นหา เบอร์รถ / ทะเบียน / สถานะ" style="min-width:240px"></div>
-      <div class="tw"><table><thead><tr><th>เบอร์รถ</th><th>พื้นที่</th><th>ประเภท</th><th class="m-hide">ทะเบียน</th><th>สถานะ</th><th>เหตุผล</th><th class="n">เที่ยว</th><th class="n">Drop</th></tr></thead>
+      <div class="tw"><table><thead id="carsH"><tr><th data-k="car">เบอร์รถ</th><th data-k="area">พื้นที่</th><th data-k="vtype">ประเภท</th><th class="m-hide" data-k="plate">ทะเบียน</th><th data-k="kind">สถานะ</th><th data-k="why">เหตุผล</th><th class="n" data-k="trips">เที่ยว</th><th class="n" data-k="drops">Drop</th></tr></thead>
         <tbody id="rows"></tbody></table></div></section>
     <section class="panel c12" id="pplP" data-nosnap="1"><div class="tools"><div class="ph" style="margin:0"><h3>รายชื่อ พขร.</h3><span class="s2" id="pSub"></span></div>
       <div class="chips" id="pplChips"></div></div>
-      <div class="tw" style="max-height:360px"><table><thead><tr><th>ชื่อ-สกุล</th><th>สถานะ</th><th>เหตุผล</th><th class="n">เที่ยว</th></tr></thead>
+      <div class="tw" style="max-height:360px"><table><thead id="pplH"><tr><th data-k="name">ชื่อ-สกุล</th><th data-k="kind">สถานะ</th><th data-k="why">เหตุผล</th><th class="n" data-k="trips">เที่ยว</th></tr></thead>
         <tbody id="prows"></tbody></table></div></section>
   </div>
 </main>
@@ -6012,9 +6017,39 @@ function render(){
   nt.hidden = !r.notes.length;
   fitLabels();
 }
+// ── กดหัวคอลัมน์เพื่อเรียง: กดครั้งแรก น้อย→มาก (ตัวเลข = มาก→น้อย) · กดซ้ำ = กลับด้าน · ช่องว่างอยู่ท้ายเสมอ ──
+const SORT = {carsH: {k: '', d: 1}, pplH: {k: '', d: 1}};
+const NUMK = {trips: 1, drops: 1};
+function sortList(list, id, order){
+  const st = SORT[id]; if(!st.k) return list;
+  const val = x => st.k === 'kind' ? order.indexOf(x.kind) : (x[st.k] == null ? '' : x[st.k]);
+  return list.slice().sort((a, b) => {
+    const va = val(a), vb = val(b), ea = va === '' || va === 0 && NUMK[st.k], eb = vb === '' || vb === 0 && NUMK[st.k];
+    if(ea !== eb) return ea ? 1 : -1;
+    const c = typeof va === 'number' && typeof vb === 'number' ? va - vb : String(va).localeCompare(String(vb), 'th', {numeric: true});
+    return c * st.d;
+  });
+}
+function sortHead(id, redraw){
+  const h = document.getElementById(id), st = SORT[id];
+  h.querySelectorAll('th[data-k]').forEach(th => {
+    th.classList.add('sortable');
+    th.onclick = () => { if(st.k === th.dataset.k) st.d = -st.d; else { st.k = th.dataset.k; st.d = NUMK[st.k] ? -1 : 1; } redraw(); };
+  });
+}
+function sortMark(id){
+  const st = SORT[id];
+  document.getElementById(id).querySelectorAll('th[data-k]').forEach(th => {
+    const on = th.dataset.k === st.k;
+    th.classList.toggle('on', on);
+    th.dataset.arrow = on ? (st.d > 0 ? ' ▲' : ' ▼') : ' ⇅';
+    th.title = 'กดเพื่อเรียง' + (on ? (st.d > 0 ? ' (น้อย→มาก)' : ' (มาก→น้อย)') : '');
+  });
+}
 function days(x){ return MULTI ? '<span class="code">วิ่ง ' + x.d_run + ' · ว่าง ' + x.d_free + ' · ไม่พร้อม ' + x.d_down + ' วัน</span>' : ''; }
 function drawPeople(){
-  const list = REP.people_rows.filter(x => kindOk(FP, x.kind) && (!FP.why || x.why === FP.why));
+  const list = sortList(REP.people_rows.filter(x => kindOk(FP, x.kind) && (!FP.why || x.why === FP.why)), 'pplH', ['run', 'free', 'down']);
+  sortMark('pplH');
   chips(FP, PK, 'pplChips');
   document.getElementById('pSub').textContent = list.length + ' คน' + (Object.keys(FP).length ? ' (จาก ' + REP.people_rows.length + ')' : '');
   document.getElementById('prows').innerHTML = list.map(x =>
@@ -6023,9 +6058,10 @@ function drawPeople(){
 }
 function drawRows(){
   const q = document.getElementById('q').value.trim().toLowerCase();
-  const list = REP.rows.filter(x => kindOk(FC, x.kind) && (!FC.area || (x.area || 'ไม่ระบุ') === FC.area) &&
+  const list = sortList(REP.rows.filter(x => kindOk(FC, x.kind) && (!FC.area || (x.area || 'ไม่ระบุ') === FC.area) &&
     (!FC.vtype || (x.vtype || 'ไม่ระบุ') === FC.vtype) && (!FC.why || x.why === FC.why) &&
-    (!q || (x.car + ' ' + x.plate + ' ' + x.why + ' ' + K[x.kind].t + ' ' + x.area + ' ' + x.vtype).toLowerCase().includes(q)));
+    (!q || (x.car + ' ' + x.plate + ' ' + x.why + ' ' + K[x.kind].t + ' ' + x.area + ' ' + x.vtype).toLowerCase().includes(q))), 'carsH', ORDER);
+  sortMark('carsH');
   chips(FC, K, 'carChips');
   document.getElementById('rowSub').textContent = list.length + ' คัน' + (q || Object.keys(FC).length ? ' (จาก ' + REP.rows.length + ')' : '');
   document.getElementById('rows').innerHTML = list.map(x =>
@@ -6141,6 +6177,8 @@ let saved = ''; try{ saved = localStorage.getItem('readyTarget') || ''; }catch(e
 document.getElementById('tg').value = saved || '2';
 document.getElementById('go').onclick = load;
 document.getElementById('q').oninput = () => { if(REP) drawRows(); };
+sortHead('carsH', () => { if(REP) drawRows(); });
+sortHead('pplH', () => { if(REP) drawPeople(); });
 ['dFrom', 'dTo'].forEach(id => { document.getElementById(id).onchange = () => { markPreset(); load(); }; });
 document.getElementById('tg').onchange = load;
 document.querySelectorAll('#presets button').forEach(b => b.onclick = () => { setRange(shift(+b.dataset.a), shift(+b.dataset.b)); load(); });
