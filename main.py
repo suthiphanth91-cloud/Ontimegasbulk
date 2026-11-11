@@ -3693,6 +3693,8 @@ _TH_MONTHS_ABBR = {"ม.ค.": 1, "ก.พ.": 2, "มี.ค.": 3, "เม.ย."
 _THAI_RE = re.compile(r"[ก-๙]")
 # คำอธิบายรหัสที่แปลว่า "ทำงานได้" — คำอื่นทั้งหมด (ซ่อม เครม ลา ขาดงาน อบรม หยุด เบรกงาน ...) = ไม่พร้อม
 _READY_OK_WORDS = ("พร้อม", "วิ่งงาน", "ทำงาน", "ทำโอ", "โอที", "รองาน")
+# รหัสในแท็บข้อมูลพขร. ที่ชีตไม่มีคำอธิบายในตารางหัว → ไม่งั้นจะขึ้นเป็น "ไม่ระบุ"
+_DRIVER_CODE_EXTRA = {"C": "ตรวจสุขภาพ"}
 
 
 def _ready_month(text: str):
@@ -3924,7 +3926,7 @@ def build_ready_report(date_iso: str, plan_rows: list, target: float) -> dict:
     ds = _ready_sheet(READY_DRIVER_TAB, ["ชื่อ-สกุล"], date_iso, READY_DRIVER_FIRST_ROW)
     if ds["note"]:
         notes.append(ds["note"])
-    d_legend = ds["legend"]
+    d_legend = dict(_DRIVER_CODE_EXTRA, **ds["legend"])     # รหัสที่ชีตใช้แต่ไม่ได้เขียนคำอธิบายไว้เหนือตาราง (คำอธิบายในชีตมาก่อน)
     d_left = _ready_col(ds["head"], "วันที่พ้นสภาพ", "พ้นสภาพ")
     d_stat = next((i for i, c in enumerate(ds["head"]) if c == "สถานะ"), None)   # คอลัมน์สถานะการจ้าง (พนักงาน / ลาออก ฯลฯ)
     if ds["head"] and d_stat is None:
