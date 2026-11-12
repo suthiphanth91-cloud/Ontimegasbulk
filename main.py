@@ -3824,6 +3824,21 @@ _m_status = re.search(r"/d/([A-Za-z0-9_-]{20,})", os.environ.get("STATUS_SHEET_I
 STATUS_SHEET_ID = (_m_status.group(1) if _m_status else os.environ.get("STATUS_SHEET_ID", "").strip().strip("\"'").strip()) \
     or "1xsVtlB8ge6TbdlvJPfqPcLOpOCrQbsTxJHg217SToiA"
 STATUS_LOG_TAB = "StatusLog"
+_status_sh = None                                                 # ไฟล์ DEMO ที่เปิดไว้แล้ว (เปิดซ้ำ = เสียโควตาอ่านทุกครั้ง)
+
+
+def _status_file():
+    global _status_sh
+    if _status_sh is None:
+        _status_sh = _gc().open_by_key(STATUS_SHEET_ID)
+    return _status_sh
+
+
+def _quota_msg(e) -> tuple:
+    code = getattr(getattr(e, "response", None), "status_code", 0)
+    if code == 429:
+        return 429, "Google จำกัดจำนวนครั้งต่อนาที — ระบบจะลองบันทึกใหม่เองในไม่กี่วินาที"
+    return 502, f"เขียนไม่ได้ — ต้องแชร์ไฟล์ DEMO ข้อมูลรถ+พขร ให้บัญชีของเว็บเป็นผู้แก้ไข ({code})"
 
 
 def _status_block() -> str:
@@ -3922,9 +3937,15 @@ def plan_status_edit(p: StatusEdit):
         raise HTTPException(400, "ลงได้ครั้งละไม่เกิน 62 วัน")
     span_days = [(d0 + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(span)]
     tab = READY_CAR_TAB if p.kind == "car" else READY_DRIVER_TAB
-    _drop_sheet_cache(STATUS_SHEET_ID, tab)                       # อ่านสดก่อนตัดสิน
-    try:
+    qt = "'" + tab.replace("'", "''") + "'"
+    try:                                                          # อ่านสดเฉพาะแท็บนี้ 1 ครั้ง แล้วใส่แคชให้ตัวแยกตารางใช้
+        sh = _status_file()
+        grid = gspread.utils.fill_gaps(sh.values_get(qt).get("values", []))
+        _sheet_cache[f"{STATUS_SHEET_ID}:{tab}"] = (time(), grid)
         cs, ds = _status_tabs(day)
+    except gspread.exceptions.APIError as e:
+        st, msg = _quota_msg(e)
+        raise HTTPException(st, msg.replace("เขียนไม่ได้", "อ่านไฟล์สถานะไม่ได้"))
     except Exception as e:
         raise HTTPException(502, f"อ่านไฟล์สถานะไม่ได้ — {type(e).__name__}")
     sh_info = cs if p.kind == "car" else ds
@@ -3951,21 +3972,20 @@ def plan_status_edit(p: StatusEdit):
     cells = [gspread.utils.rowcol_to_a1(hit["row"], c + 1) for c in cols]
     a1 = cells[0] if len(cells) == 1 else f"{cells[0]}..{cells[-1]} ({len(cells)} วัน)"
     try:
-        sh = _gc().open_by_key(STATUS_SHEET_ID)
-        sh.worksheet(tab).batch_update([{"range": c, "values": [[code]]} for c in cells], value_input_option="RAW")
+        sh.values_batch_update({"valueInputOption": "RAW", "data": [{"range": qt + "!" + c, "values": [[code]]} for c in cells]})
     except gspread.exceptions.APIError as e:
-        raise HTTPException(502, f"เขียนไม่ได้ — ต้องแชร์ไฟล์ DEMO ข้อมูลรถ+พขร ให้บัญชีของเว็บเป็นผู้แก้ไข ({e.response.status_code})")
+        raise HTTPException(*_quota_msg(e))
     except Exception as e:
         raise HTTPException(502, f"เขียนไม่ได้ — {type(e).__name__}")
     _drop_sheet_cache(STATUS_SHEET_ID, tab)
+    log_row = [_thai_now().strftime("%Y-%m-%d %H:%M:%S"), p.by.strip()[:40], tab, p.key.strip(),
+               day if last == day else f"{day} ถึง {last}", a1, hit["code"], code]
     try:                                                          # ประวัติ: เขียนไม่ได้ไม่ถือว่าการแก้ล้มเหลว
         try:
-            lg = sh.worksheet(STATUS_LOG_TAB)
-        except gspread.WorksheetNotFound:
+            sh.values_append(f"'{STATUS_LOG_TAB}'!A1", {"valueInputOption": "RAW"}, {"values": [log_row]})
+        except gspread.exceptions.APIError:                       # ยังไม่มีแท็บ StatusLog → สร้างพร้อมหัว
             lg = sh.add_worksheet(STATUS_LOG_TAB, rows=1000, cols=8)
-            lg.append_row(["เวลา", "ผู้แก้", "แท็บ", "รถ/ชื่อ", "วันที่", "ช่อง", "เดิม", "ใหม่"], value_input_option="RAW")
-        lg.append_row([_thai_now().strftime("%Y-%m-%d %H:%M:%S"), p.by.strip()[:40], tab, p.key.strip(),
-                       day if last == day else f"{day} ถึง {last}", a1, hit["code"], code], value_input_option="RAW")
+            lg.append_rows([["เวลา", "ผู้แก้", "แท็บ", "รถ/ชื่อ", "วันที่", "ช่อง", "เดิม", "ใหม่"], log_row], value_input_option="RAW")
     except Exception:
         pass
     return {"ok": True, "code": code, "cell": a1, "days": len(cells)}
@@ -6520,14 +6540,17 @@ PLAN_HTML = """<!doctype html>
   #ahPop .br button.k-nd{border-color:#fcd34d}
   #ahPop .br button.k-dn{border-color:#fca5a5}
   #ahPop .br button.on{background:var(--acc,#2563eb);border-color:var(--acc,#2563eb);color:#fff}
-  #ahPop.paint table{user-select:none}
-  #ahPop.paint td.c{cursor:crosshair;touch-action:none}
+  #ahPop table{user-select:none}
+  #ahPop td.c{touch-action:none}
+  #ahPop.paint td.c{cursor:crosshair}
   #ahPop td.c.pt{outline:3px solid #2563eb;outline-offset:-3px;background:#dbeafe}
   #ahPop td.c.busy{opacity:.45}
   #ahPop .tabs{display:flex;gap:6px;margin:0 0 8px}
   #ahPop .tabs button{font:inherit;font-size:14px;font-weight:700;padding:6px 16px;border-radius:10px;border:1px solid var(--line);background:none;color:inherit;cursor:pointer}
   #ahPop .tabs button.on{background:var(--acc,#2563eb);border-color:var(--acc,#2563eb);color:#fff}
   #ahPop #ahBy{font:inherit;font-size:13px;padding:5px 8px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:inherit;width:170px}
+  #ahPop .sv{font-size:12.5px;color:#15803d}
+  #ahPop .sv.on{color:#b45309;font-weight:700}
   #ahPop .tl{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin:0 0 8px}
   #ahPop .tl input[type=search]{font:inherit;font-size:13px;padding:5px 8px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:inherit;min-width:220px}
   #ahPop .tl label{display:flex;align-items:center;gap:5px;cursor:pointer}
@@ -6846,7 +6869,7 @@ function retryStatus(){ STATUS_ERR = null; STATUS = null; loadStatus(DATA && DAT
 function stKind(lg, code){ const x = (lg || []).find(c => c.code.toUpperCase() === String(code || '').toUpperCase()); return x ? x.kind : (code ? 'down' : ''); }
 function stDesc(lg, code){ const x = (lg || []).find(c => c.code.toUpperCase() === String(code || '').toUpperCase()); return x ? x.desc : ''; }
 function carCode(k){ return STATUS && STATUS.date === (DATA && DATA.date) ? (STATUS.cars[k] || '') : ''; }
-function closeStatus(){ const p = document.getElementById('stPop'); if(p) p.remove(); }
+function closeStatus(){ const p = document.getElementById('stPop'); if(p) p.remove(); document.querySelectorAll('#ahPop td.pt').forEach(t => t.classList.remove('pt')); }
 function stCodes(kind, key, cur, lg){
   const cls = k => k === 'down' ? 'k-dn' : k === 'nodriver' ? 'k-nd' : 'k-ok';
   return '<div class="codes">' + lg.map(c => '<button data-kind="' + kind + '" data-key="' + esc(key) + '" data-code="' + esc(c.code) + '" data-old="' + esc(cur) +
@@ -6911,7 +6934,7 @@ function openStatus(car, anchor, drv){
     const np = document.getElementById('stPop'); if(np){ np.style.left = keep[0]; np.style.top = keep[1]; }
   });
 }
-document.addEventListener('click', e => { const p = document.getElementById('stPop'); if(p && !p.contains(e.target) && !(e.target.closest && e.target.closest('.stb, .drvq, #ahPop td.c'))) closeStatus(); });
+document.addEventListener('click', e => { const p = document.getElementById('stPop'); if(p && !p.contains(e.target) && !(e.target.closest && e.target.closest('.stb, .drvq, #ahPop .tw'))) closeStatus(); });
 document.addEventListener('change', e => {                // ค้นชื่อ พขร. → เปิดหน้าต่างลงสถานะของคนนั้น
   if(e.target.id !== 'drvQ' || !STATUS) return;
   const nm = e.target.value.trim(); if(!nm) return;
@@ -6936,13 +6959,14 @@ function drawAhead(){
       '<button type="button" data-tab="driver" class="' + (AH_TAB === 'driver' ? 'on' : '') + '">👤 พขร.</button></div>' +
       '<div class="tl"><input id="ahQ" type="search" placeholder="🔍 ค้น' + (AH_TAB === 'car' ? 'เบอร์รถ' : 'ชื่อ / เบอร์รถ') + '" autocomplete="off" value="' + esc(AH_Q) + '">' +
       '<input id="ahBy" placeholder="👤 ชื่อผู้แก้ (ต้องใส่)" autocomplete="off" value="' + esc(ahByName()) + '">' +
+      '<span id="ahSave" class="sv"></span>' +
       '<label><input type="checkbox" id="ahAll"' + (AH_ALL ? ' checked' : '') + '> แสดงทุกคัน / ทุกคน</label></div>' +
       '<div class="br"><b>🖌 ระบายสี:</b> ' + brushBtns(j) + '</div>' +
       '<div class="tw" id="ahT"></div>' +
       '<div class="lg"><span><i style="background:#fee2e2;border:1px solid #fca5a5"></i>ไม่พร้อม (ซ่อม/ลา/หยุด)</span><span><i style="background:#fef3c7;border:1px solid #fcd34d"></i>ไม่มีคนขับ (👤✕ = พขร. ประจำรถไม่มาทุกคน)</span>' +
-      '<span>ช่องว่าง = ยังไม่ได้ลง · <b>เลือกรหัสที่แถบระบายสี แล้วกด/ลากผ่านช่องวัน = บันทึกทันที</b></span></div>';
+      '<span>ช่องว่าง = ยังไม่ได้ลง · <b>ลากผ่านช่องวัน = เลือกหลายวัน</b> (เลือกรหัสที่แถบระบายสีไว้ก่อน = บันทึกทันทีตอนปล่อย)</span></div>';
   }
-  p.classList.toggle('paint', !!AH_BRUSH);
+  p.classList.toggle('paint', !!AH_BRUSH); ahSaving();
   const kd = (lg, c) => { const k = c ? stKind(lg, c) : ''; return k === 'down' ? 'dn' : k === 'nodriver' ? 'nd' : 'ok'; };
   const offDay = {};                                  // ชื่อ พขร. → [วันที่ไม่มา true/false]
   j.drivers.forEach(x => { offDay[x.key] = x.codes.map(c => !!c && stKind(j.driver_legend, c) === 'down'); });
@@ -6973,7 +6997,7 @@ function drawAhead(){
   bx.querySelector('#ahT').innerHTML = '<table><thead>' + head + '</thead><tbody>' + body + '</tbody></table>';
 }
 // กดช่องในตารางล่วงหน้า → ป๊อปอัปเลือกรหัส ลงชีต DEMO ทันที (ลงหลายวันได้) แล้ววาดตารางใหม่
-function editAhead(td){
+function editAhead(td, toPre){
   closeStatus();
   const kind = td.dataset.kind, key = td.dataset.key, d = td.dataset.d, cur = td.dataset.code || '';
   const lg = kind === 'car' ? AH.car_legend : AH.driver_legend;
@@ -6981,7 +7005,8 @@ function editAhead(td){
   p.innerHTML = '<div class="hd"><span>' + (kind === 'car' ? '🚛 ' : '👤 ') + esc(key) + ' · ' + dmy(d) + '</span><button type="button" data-x="1" title="ปิด">✕</button></div>' +
     (STATUS && STATUS.block ? '<p class="mut">⚠ ' + esc(STATUS.block) + '</p>' : '') +
     (kind === 'driver' && carsOf(key).length ? '<p class="mut">ประจำรถ: ' + carsOf(key).map(esc).join(', ') + '</p>' : '') +
-    '<div class="rng">📅 ลงตั้งแต่ <b>' + dmy(d) + '</b> ถึง <input type="date" id="stTo" value="' + d + '" min="' + d + '"></div>' +
+    '<div class="rng">📅 ลงตั้งแต่ <b>' + dmy(d) + '</b> ถึง <input type="date" id="stTo" value="' + (toPre || d) + '" min="' + d + '"></div>' +
+    (toPre && toPre > d ? '<p style="margin:2px 0;font-weight:700;color:#1d4ed8">ลากเลือกไว้ ' + (Math.round((new Date(toPre) - new Date(d)) / 86400000) + 1) + ' วัน — กดรหัสได้เลย</p>' : '') +
     '<p class="mut" style="margin:0">ลาหลายวัน / ซ่อมหลายวัน เลือกวันสุดท้ายก่อน แล้วค่อยกดรหัส</p>' +
     '<h5>' + (cur ? 'ตอนนี้ <b>' + esc(cur) + '</b> ' + esc(stDesc(lg, cur)) : 'ยังไม่ได้ลง') + '</h5>' + stCodes(kind, key, cur, lg) +
     '<p class="mut" style="margin-top:10px"><a href="#" data-go="1">📋 ไปวันนี้ในแผนงาน</a> · บันทึกลงไฟล์ DEMO ข้อมูลรถ+พขร ทันที</p>';
@@ -6997,29 +7022,13 @@ function editAhead(td){
     const b = e.target.closest('button[data-kind]'); if(!b) return;
     const to = toEl.value && toEl.value > d ? toEl.value : '';
     if(!to && b.dataset.code.toUpperCase() === cur.toUpperCase()) return;
-    if(to){
+    if(to && to !== toPre){                                  // ลากเลือกช่วงมาแล้ว ไม่ต้องถามซ้ำ
       const n = Math.round((new Date(to) - new Date(d)) / 86400000) + 1;
       if(!confirm('ลง ' + (b.dataset.code || '(ล้าง)') + ' ให้ ' + key + ' ตั้งแต่ ' + dmy(d) + ' ถึง ' + dmy(to) + ' (' + n + ' วัน) — ถ้าวันไหนลงไว้แล้วจะถูกเขียนทับ ?')) return;
     }
     const by = editorName(); if(!by) return;
-    p.querySelectorAll('button[data-kind]').forEach(x => { x.disabled = true; });
-    const list = kind === 'car' ? AH.cars : AH.drivers;
-    let row = list.find(x => x.key === key);
-    if(!row){ row = {key: key, codes: AH.days.map(() => '')}; list.push(row); }
-    try{
-      const res = await fetch('/api/plan/status', {method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({date: d, kind: kind, key: key, code: b.dataset.code, old: cur, by: by, to: to})});
-      const j = await res.json().catch(() => ({}));
-      if(!res.ok){
-        toast('บันทึกสถานะไม่สำเร็จ: ' + (j.detail || res.status), true);
-        if(res.status === 409 && 'current' in j){ const i = AH.days.indexOf(d); if(i >= 0) row.codes[i] = j.current; }
-      }else{
-        AH.days.forEach((x, i) => { if(x >= d && x <= (to || d)) row.codes[i] = j.code; });
-        if(STATUS && STATUS.date >= d && STATUS.date <= (to || d)){ (kind === 'car' ? STATUS.cars : STATUS.drivers)[key] = j.code; updateCarBar(); }
-        toast('บันทึก ' + key + ' = ' + (j.code || '(ว่าง)') + (j.days > 1 ? ' ' + j.days + ' วัน' : '') + ' ลงชีตแล้ว ✓', false);
-      }
-    }catch(err){ toast('บันทึกสถานะไม่สำเร็จ: ' + err.message, true); }
-    closeStatus(); drawAhead();
+    closeStatus();
+    ahCommit(kind, key, d, to || d, b.dataset.code, cur, by);
   });
 }
 // ── ระบายสี: เลือกรหัสครั้งเดียว แล้วกด/ลากผ่านช่องวันในแถวเดียวกัน = ลงรหัสช่วงนั้นทันที ──
@@ -7044,34 +7053,65 @@ function markDrag(){
   const lo = AH_DRAG.a < AH_DRAG.b ? AH_DRAG.a : AH_DRAG.b, hi = AH_DRAG.a < AH_DRAG.b ? AH_DRAG.b : AH_DRAG.a;
   AH_DRAG.tr.querySelectorAll('td.c[data-d]').forEach(t => t.classList.toggle('pt', t.dataset.d >= lo && t.dataset.d <= hi));
 }
-async function paintAhead(g){
+let AH_SAVING = 0, AH_CHAIN = Promise.resolve();          // จำนวนที่รอบันทึก · คิวส่งทีละรายการ (กันเขียนชนกันเอง)
+function ahSaving(){
+  const el = document.getElementById('ahSave'); if(!el) return;
+  el.textContent = AH_SAVING ? '⏳ กำลังบันทึกลงชีต ' + AH_SAVING + ' รายการ…' : '✓ บันทึกลงชีตครบแล้ว';
+  el.className = AH_SAVING ? 'sv on' : 'sv';
+}
+window.addEventListener('beforeunload', e => { if(AH_SAVING){ e.preventDefault(); e.returnValue = ''; } });
+// ลงรหัสช่วง lo..hi ให้ key: เปลี่ยนบนจอก่อน แล้วค่อยส่งเข้าคิว
+function ahCommit(kind, key, lo, hi, code, old, by){
+  const row = ahRow(kind, key), prev = row.codes.slice();
+  const stPrev = STATUS ? (kind === 'car' ? STATUS.cars : STATUS.drivers)[key] : undefined;
+  AH.days.forEach((x, i) => { if(x >= lo && x <= hi) row.codes[i] = code; });
+  const onDay = STATUS && STATUS.date >= lo && STATUS.date <= hi;
+  if(onDay){ (kind === 'car' ? STATUS.cars : STATUS.drivers)[key] = code; updateCarBar(); }
+  drawAhead();
+  AH_SAVING++; ahSaving();
+  const body = JSON.stringify({date: lo, to: hi > lo ? hi : '', kind: kind, key: key, code: code, old: old, by: by});
+  AH_CHAIN = AH_CHAIN.then(async () => {
+    let msg = '', cur = null;
+    for(let t = 0; t < 6; t++){
+      msg = ''; let busy = false;
+      try{
+        const res = await fetch('/api/plan/status', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: body});
+        const j = await res.json().catch(() => ({}));
+        if(!res.ok){ msg = j.detail || ('HTTP ' + res.status); busy = res.status === 429; if(res.status === 409 && 'current' in j) cur = j.current; }
+      }catch(err){ msg = err.message; }
+      if(!busy) break;
+      const el = document.getElementById('ahSave');
+      if(el){ el.textContent = '⏳ Google ให้รอสักครู่ — จะลองบันทึกใหม่เอง (' + AH_SAVING + ' รายการ)'; el.className = 'sv on'; }
+      await new Promise(r => setTimeout(r, 6000 * (t + 1)));
+    }
+    AH_SAVING--; ahSaving();
+    if(msg){                                              // ไม่สำเร็จ → คืนค่าเดิมบนจอ
+      row.codes = prev; if(cur !== null){ const i = AH.days.indexOf(lo); if(i >= 0) row.codes[i] = cur; }
+      if(onDay){ (kind === 'car' ? STATUS.cars : STATUS.drivers)[key] = stPrev || ''; updateCarBar(); }
+      toast('บันทึก ' + key + ' ไม่สำเร็จ (คืนค่าเดิมแล้ว): ' + msg, true);
+      drawAhead();
+    }
+  });
+}
+function paintAhead(g){
   const lo = g.a < g.b ? g.a : g.b, hi = g.a < g.b ? g.b : g.a, code = AH_BRUSH ? AH_BRUSH.code : null;
   const cells = [...g.tr.querySelectorAll('td.c[data-d]')].filter(t => t.dataset.d >= lo && t.dataset.d <= hi);
   if(code === null || cells.every(t => (t.dataset.code || '').toUpperCase() === code.toUpperCase())){ drawAhead(); return; }
   const by = editorName(); if(!by){ drawAhead(); return; }
-  const old = cells[0].dataset.code || '', row = ahRow(g.kind, g.key);
-  cells.forEach(t => t.classList.add('busy'));
-  try{
-    const res = await fetch('/api/plan/status', {method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({date: lo, to: hi > lo ? hi : '', kind: g.kind, key: g.key, code: code, old: old, by: by})});
-    const j = await res.json().catch(() => ({}));
-    if(!res.ok){
-      toast('บันทึกสถานะไม่สำเร็จ: ' + (j.detail || res.status), true);
-      if(res.status === 409 && 'current' in j){ const i = AH.days.indexOf(lo); if(i >= 0) row.codes[i] = j.current; }
-    }else{
-      AH.days.forEach((x, i) => { if(x >= lo && x <= hi) row.codes[i] = j.code; });
-      if(STATUS && STATUS.date >= lo && STATUS.date <= hi){ (g.kind === 'car' ? STATUS.cars : STATUS.drivers)[g.key] = j.code; updateCarBar(); }
-      toast('บันทึก ' + g.key + ' = ' + (j.code || '(ว่าง)') + ' ' + dmy(lo) + (hi > lo ? ' ถึง ' + dmy(hi) + ' (' + (j.days || '') + ' วัน)' : '') + ' ลงชีตแล้ว ✓', false);
-    }
-  }catch(err){ toast('บันทึกสถานะไม่สำเร็จ: ' + err.message, true); }
-  drawAhead();
+  ahCommit(g.kind, g.key, lo, hi, code, cells[0].dataset.code || '', by);
 }
 document.addEventListener('pointermove', e => {
   if(!AH_DRAG) return;
   const el = document.elementFromPoint(e.clientX, e.clientY), td = el && el.closest && el.closest('#ahPop td.c[data-d]');
   if(td && td.parentNode === AH_DRAG.tr && td.dataset.d !== AH_DRAG.b){ AH_DRAG.b = td.dataset.d; markDrag(); }
 });
-document.addEventListener('pointerup', () => { if(!AH_DRAG) return; const g = AH_DRAG; AH_DRAG = null; paintAhead(g); });
+document.addEventListener('pointerup', () => {
+  if(!AH_DRAG) return;
+  const g = AH_DRAG; AH_DRAG = null;
+  if(AH_BRUSH){ paintAhead(g); return; }
+  const lo = g.a < g.b ? g.a : g.b, hi = g.a < g.b ? g.b : g.a, td = g.tr.querySelector('td.c[data-d="' + lo + '"]');
+  if(td){ editAhead(td, hi); g.tr.querySelectorAll('td.c[data-d]').forEach(t => t.classList.toggle('pt', t.dataset.d >= lo && t.dataset.d <= hi)); }
+});
 document.addEventListener('pointercancel', () => { if(!AH_DRAG) return; AH_DRAG = null; drawAhead(); });
 let AH_FROM = '';                                     // วันแรกของช่วง 14 วันที่ดูอยู่ (ย้อนหลัง/ล่วงหน้า)
 async function openAhead(from){
@@ -7095,13 +7135,12 @@ async function openAhead(from){
     const nv = e.target.closest('[data-nav]');
     if(nv){ const n = +nv.dataset.nav; openAhead(n ? shift(AH_FROM, n) : todayISO()); return; }
     if(e.target.closest('.tl')) return;
-    const td = e.target.closest('td.c[data-d]'); if(!td || AH_BRUSH) return;   // โหมดระบาย จัดการใน pointerdown/up
-    editAhead(td);
+    // ช่องวัน: จัดการใน pointerdown/up (กดช่องเดียว = เลือกรหัส · ลาก = เลือกหลายวัน)
   });
   p.addEventListener('pointerdown', e => {
-    if(!AH_BRUSH || e.button > 0) return;
+    if(e.button > 0) return;
     const td = e.target.closest('td.c[data-d]'); if(!td) return;
-    if(AH_BRUSH.kind !== '*' && td.dataset.kind !== AH_BRUSH.kind){
+    if(AH_BRUSH && AH_BRUSH.kind !== '*' && td.dataset.kind !== AH_BRUSH.kind){
       toast('รหัส ' + AH_BRUSH.code + ' ใช้กับแถว' + (AH_BRUSH.kind === 'car' ? 'รถ' : ' พขร.') + 'เท่านั้น', true); return;
     }
     e.preventDefault();
