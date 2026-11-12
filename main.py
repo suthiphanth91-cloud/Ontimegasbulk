@@ -3781,16 +3781,16 @@ def _ready_grid(rows: list, need: list) -> tuple:
     return h, ix, days
 
 
-def _ready_sheet(tab: str, need: list, date_iso: str, first_row: int = 0) -> dict:
+def _ready_sheet(tab: str, need: list, date_iso: str, first_row: int = 0, sid: str = "") -> dict:
     """อ่านแท็บสถานะรายวันหนึ่งแท็บ → {rows: [{key, code, cells}], legend, head, ix, has_day, note}
     first_row = แถวแรกของข้อมูลตามเลขแถวในชีต (เช่น 20) — แถวเหนือขึ้นไปไม่นับ แม้อยู่ใต้หัวตาราง"""
-    sid = CARS_SHEET_ID or PLAN_PAGE_ID
+    sid = sid or CARS_SHEET_ID or PLAN_PAGE_ID
     try:
         grid = _fetch_sheet(sid, tab)
     except Exception as e:
         return {"rows": [], "legend": {}, "head": [], "ix": {}, "has_day": False,
                 "note": f"อ่านแท็บ “{tab}” ไม่ได้ — {type(e).__name__} (ต้องแชร์ชีตให้บัญชีของเว็บแบบผู้ดู)"}
-    memo = _ready_parse_memo.get(tab)
+    memo = _ready_parse_memo.get((sid, tab))
     if memo and memo[0] is grid and memo[2] == first_row:   # ตารางเดิมจากแคช → ใช้ผลแยกหัว/รหัสเดิม
         h, ix, days, legend = memo[1]
     else:
@@ -3801,18 +3801,129 @@ def _ready_sheet(tab: str, need: list, date_iso: str, first_row: int = 0) -> dic
             start = max(h + 1, first_row - 1)
             used = {_cell(r, c).upper() for r in grid[start:] for c in day_cols if _cell(r, c)}
             legend = _ready_legend(grid[:h], used)
-        _ready_parse_memo[tab] = (grid, (h, ix, days, legend), first_row)
+        _ready_parse_memo[(sid, tab)] = (grid, (h, ix, days, legend), first_row)
     if h is None:
         return {"rows": [], "legend": {}, "head": [], "ix": {}, "has_day": False,
                 "note": f"แท็บ “{tab}” ไม่พบหัวตาราง ({' + '.join(need)}) จึงยังสรุปจากแท็บนี้ไม่ได้"}
     col = days.get(date_iso)
     out = []
-    for r in grid[max(h + 1, first_row - 1):]:
+    start = max(h + 1, first_row - 1)
+    for n, r in enumerate(grid[start:]):
         key = _cell(r, ix[need[0]])
         if key:
-            out.append({"key": key, "cells": r, "code": (_cell(r, col).upper() if col is not None else "")})
+            out.append({"key": key, "cells": r, "code": (_cell(r, col).upper() if col is not None else ""),
+                        "row": start + n + 1})                   # เลขแถวในชีต (เริ่ม 1) ไว้เขียนสถานะกลับ
     note = "" if col is not None else f"แท็บ “{tab}” ยังไม่มีคอลัมน์ของวันที่นี้ (ชีตลงสถานะถึงเดือนล่าสุดเท่านั้น)"
-    return {"rows": out, "legend": legend, "head": _hdr_cells(grid[h]), "ix": ix, "has_day": col is not None, "note": note}
+    return {"rows": out, "legend": legend, "head": _hdr_cells(grid[h]), "ix": ix, "has_day": col is not None, "note": note,
+            "day_col": col}
+
+
+# ─── แก้สถานะรถ/พขร. รายวันจากหน้าแผนงาน ────────────────────────────────────────
+# เขียนได้เฉพาะไฟล์สำเนา "DEMO ข้อมูลรถ+พขร (แก๊สบัลค์)" — ชีตจริง (CARS_SHEET_ID) อ่านอย่างเดียวเหมือนเดิม
+_m_status = re.search(r"/d/([A-Za-z0-9_-]{20,})", os.environ.get("STATUS_SHEET_ID", ""))
+STATUS_SHEET_ID = (_m_status.group(1) if _m_status else os.environ.get("STATUS_SHEET_ID", "").strip().strip("\"'").strip()) \
+    or "1xsVtlB8ge6TbdlvJPfqPcLOpOCrQbsTxJHg217SToiA"
+STATUS_LOG_TAB = "StatusLog"
+
+
+def _status_block() -> str:
+    """ว่าง = เขียนสถานะได้ · มีข้อความ = เหตุผลที่ไม่ให้เขียน"""
+    if not _flag_on("PLAN_EDIT_ENABLED"):
+        return "ยังไม่เปิดการเขียนลงชีต (PLAN_EDIT_ENABLED) — ตอนนี้ดูได้อย่างเดียว"
+    if STATUS_SHEET_ID in (SOURCE_ID, PLAN_ID, PLAN_PAGE_ID) or (CARS_SHEET_ID and STATUS_SHEET_ID == CARS_SHEET_ID):
+        return "ไฟล์สถานะเป็นชีตจริง — ระบบยอมเขียนเฉพาะไฟล์สำเนา DEMO ข้อมูลรถ+พขร"
+    return ""
+
+
+def _status_tabs(date_iso: str) -> tuple:
+    cs = _ready_sheet(READY_CAR_TAB, ["เบอร์รถ", "ทะเบียนรถ"], date_iso, READY_CAR_FIRST_ROW, sid=STATUS_SHEET_ID)
+    ds = _ready_sheet(READY_DRIVER_TAB, ["ชื่อ-สกุล"], date_iso, READY_DRIVER_FIRST_ROW, sid=STATUS_SHEET_ID)
+    ds["legend"] = dict(_DRIVER_CODE_EXTRA, **ds["legend"])
+    return cs, ds
+
+
+def _status_legend(lg: dict) -> list:
+    return [{"code": k, "desc": v, "kind": _ready_kind(v)} for k, v in lg.items()]
+
+
+@app.get("/api/plan/status", include_in_schema=False)
+def plan_status(date_str: str = Query(None, alias="date")):
+    """สถานะรถ/พขร. ของวันนั้นจากไฟล์ DEMO ข้อมูลรถ+พขร → {cars: {เบอร์รถ: รหัส}, drivers: {ชื่อ: รหัส}, legend รหัสที่เลือกได้}"""
+    day = _parse_date(date_str or "") or _thai_now().strftime("%Y-%m-%d")
+    cs, ds = _status_tabs(day)
+    cars, drivers = {}, {}
+    for r in cs["rows"]:
+        if _CAR_RE.match(r["key"]):
+            cars.setdefault(r["key"], r["code"])
+    for r in ds["rows"]:
+        if r["key"] not in _NO_PERSON:
+            drivers.setdefault(r["key"], r["code"])
+    return {"date": day, "cars": cars, "drivers": drivers,
+            "car_legend": _status_legend(cs["legend"]), "driver_legend": _status_legend(ds["legend"]),
+            "car_day": cs["has_day"], "driver_day": ds["has_day"],
+            "notes": [n for n in (cs["note"], ds["note"]) if n], "block": _status_block()}
+
+
+class StatusEdit(BaseModel):
+    date: str
+    kind: str            # car | driver
+    key: str             # เบอร์รถ หรือ ชื่อ-สกุล พขร.
+    code: str = ""       # รหัสใหม่ (ว่าง = ล้างช่อง)
+    old: str = ""        # รหัสที่หน้าเว็บเห็นก่อนแก้ (กันเขียนทับคนอื่น)
+    by: str = ""
+
+
+@app.post("/api/plan/status", include_in_schema=False)
+def plan_status_edit(p: StatusEdit):
+    """เขียนรหัสสถานะ 1 ช่อง (คน/รถ × วัน) ลงไฟล์ DEMO ข้อมูลรถ+พขร แล้วจดประวัติในแท็บ StatusLog ของไฟล์เดียวกัน"""
+    block = _status_block()
+    if block:
+        raise HTTPException(403, block)
+    day = _parse_date(p.date)
+    if not day or p.kind not in ("car", "driver") or not p.key.strip():
+        raise HTTPException(400, "ข้อมูลไม่ครบ")
+    tab = READY_CAR_TAB if p.kind == "car" else READY_DRIVER_TAB
+    _drop_sheet_cache(STATUS_SHEET_ID, tab)                       # อ่านสดก่อนตัดสิน
+    try:
+        cs, ds = _status_tabs(day)
+    except Exception as e:
+        raise HTTPException(502, f"อ่านไฟล์สถานะไม่ได้ — {type(e).__name__}")
+    sh_info = cs if p.kind == "car" else ds
+    if sh_info["note"] and not sh_info["rows"]:
+        raise HTTPException(502, sh_info["note"])
+    col = sh_info.get("day_col")
+    if col is None:
+        raise HTTPException(409, f"แท็บ “{tab}” ยังไม่มีคอลัมน์ของวันที่ {day} — เพิ่มคอลัมน์เดือนนั้นในชีตก่อน")
+    code = p.code.strip()
+    legend = {k.upper(): k for k in sh_info["legend"]}
+    if code and code.upper() not in legend:
+        raise HTTPException(400, f"รหัส “{code}” ไม่มีในตารางรหัสของแท็บ “{tab}”")
+    code = legend.get(code.upper(), "") if code else ""
+    hit = next((r for r in sh_info["rows"] if r["key"] == p.key.strip()), None)
+    if not hit:
+        raise HTTPException(404, f"ไม่พบ “{p.key}” ในแท็บ “{tab}”")
+    if hit["code"] != p.old.strip().upper():
+        return JSONResponse(status_code=409, content={"detail": "ช่องนี้มีคนแก้ไปก่อนแล้ว — ยังไม่เขียนทับ", "current": hit["code"]})
+    a1 = gspread.utils.rowcol_to_a1(hit["row"], col + 1)
+    try:
+        sh = _gc().open_by_key(STATUS_SHEET_ID)
+        sh.worksheet(tab).update(values=[[code]], range_name=a1, value_input_option="RAW")
+    except gspread.exceptions.APIError as e:
+        raise HTTPException(502, f"เขียนไม่ได้ — ต้องแชร์ไฟล์ DEMO ข้อมูลรถ+พขร ให้บัญชีของเว็บเป็นผู้แก้ไข ({e.response.status_code})")
+    except Exception as e:
+        raise HTTPException(502, f"เขียนไม่ได้ — {type(e).__name__}")
+    _drop_sheet_cache(STATUS_SHEET_ID, tab)
+    try:                                                          # ประวัติ: เขียนไม่ได้ไม่ถือว่าการแก้ล้มเหลว
+        try:
+            lg = sh.worksheet(STATUS_LOG_TAB)
+        except gspread.WorksheetNotFound:
+            lg = sh.add_worksheet(STATUS_LOG_TAB, rows=1000, cols=8)
+            lg.append_row(["เวลา", "ผู้แก้", "แท็บ", "รถ/ชื่อ", "วันที่", "ช่อง", "เดิม", "ใหม่"], value_input_option="RAW")
+        lg.append_row([_thai_now().strftime("%Y-%m-%d %H:%M:%S"), p.by.strip()[:40], tab, p.key.strip(), day, a1,
+                       hit["code"], code], value_input_option="RAW")
+    except Exception:
+        pass
+    return {"ok": True, "code": code, "cell": a1}
 
 
 def _ready_plan(rows: list, date_iso: str) -> tuple:
@@ -6331,6 +6442,23 @@ PLAN_HTML = """<!doctype html>
   .carbar .cp.u{background:#eff6ff;border-color:#bfdbfe;color:#1e3a8a}
   .carbar .cp small{font-size:11.5px;opacity:.8;white-space:nowrap}
   .carbar .cp.sel{outline:2px solid #2563eb}
+  .carbar .cp.x{background:#fef2f2;border-color:#fecaca;color:#991b1b}
+  .carbar .stb{font-style:normal;font-size:11px;font-weight:700;padding:1px 6px;border-radius:6px;border:1px solid currentColor;cursor:pointer;opacity:.85;flex:none}
+  .carbar .stb:hover{opacity:1;background:rgba(127,127,127,.15)}
+  #stPop{position:fixed;z-index:70;width:300px;max-height:80vh;overflow:auto;padding:12px;border-radius:14px;background:var(--card);color:var(--ink);
+         border:1px solid var(--line);box-shadow:0 10px 30px rgba(0,0,0,.25);font-size:14px}
+  #stPop h5{margin:10px 0 6px;font-size:13px;color:var(--mut)}
+  #stPop .hd{display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:15px}
+  #stPop .hd button{border:0;background:none;font-size:18px;cursor:pointer;color:var(--mut)}
+  #stPop .codes{display:flex;flex-wrap:wrap;gap:5px}
+  #stPop .codes button{font:inherit;font-size:12.5px;padding:4px 8px;border-radius:8px;border:1px solid var(--line);background:none;color:inherit;cursor:pointer}
+  #stPop .codes button b{margin-right:4px}
+  #stPop .codes button.k-ok{border-color:#86efac}
+  #stPop .codes button.k-nd{border-color:#fcd34d}
+  #stPop .codes button.k-dn{border-color:#fca5a5}
+  #stPop .codes button.on{background:var(--acc,#2563eb);border-color:var(--acc,#2563eb);color:#fff}
+  #stPop .codes button:disabled{opacity:.5;cursor:wait}
+  #stPop .mut{font-size:12px;color:var(--mut)}
   tr.dropok td{background:#dbeafe !important}
   @media (max-width:820px){ .tblrow{flex-direction:column} .carbar{position:static;flex:none;width:100%;max-height:220px} }
   .imp-back{position:fixed;inset:0;background:rgba(15,23,42,.5);z-index:60;display:flex;
@@ -6606,6 +6734,74 @@ function refreshCarList(cellRows){             // รายการเบอร
   const free = cars.filter(k => !use[k]), busy = cars.filter(k => use[k]);
   dl.innerHTML = free.concat(busy).map(k => '<option value="' + esc(k) + '" label="' + esc(useText(use[k])) + '"></option>').join('');
 }
+// ── สถานะรถ/พขร. รายวัน (ไฟล์ DEMO ข้อมูลรถ+พขร): ดูบนการ์ดรถ + กดป้ายเพื่อแก้ ──
+let STATUS = null, STATUS_LOADING = '';
+async function loadStatus(d){
+  if(!d || STATUS_LOADING === d) return;
+  STATUS_LOADING = d;
+  try{
+    const r = await fetch('/api/plan/status?date=' + d), j = await r.json();
+    if(r.ok && DATA && DATA.date === d){ STATUS = j; updateCarBar(); }
+  }catch(e){}
+  STATUS_LOADING = '';
+}
+function stKind(lg, code){ const x = (lg || []).find(c => c.code.toUpperCase() === String(code || '').toUpperCase()); return x ? x.kind : (code ? 'down' : ''); }
+function stDesc(lg, code){ const x = (lg || []).find(c => c.code.toUpperCase() === String(code || '').toUpperCase()); return x ? x.desc : ''; }
+function carCode(k){ return STATUS && STATUS.date === (DATA && DATA.date) ? (STATUS.cars[k] || '') : ''; }
+function closeStatus(){ const p = document.getElementById('stPop'); if(p) p.remove(); }
+function stCodes(kind, key, cur, lg){
+  const cls = k => k === 'down' ? 'k-dn' : k === 'nodriver' ? 'k-nd' : 'k-ok';
+  return '<div class="codes">' + lg.map(c => '<button data-kind="' + kind + '" data-key="' + esc(key) + '" data-code="' + esc(c.code) + '" data-old="' + esc(cur) +
+    '" class="' + cls(c.kind) + (c.code.toUpperCase() === String(cur).toUpperCase() ? ' on' : '') + '" title="' + esc(c.desc) + '"><b>' + esc(c.code) + '</b>' + esc(c.desc) + '</button>').join('') +
+    (cur ? '<button data-kind="' + kind + '" data-key="' + esc(key) + '" data-code="" data-old="' + esc(cur) + '" title="ล้างช่องนี้">✕ ล้าง</button>' : '') + '</div>';
+}
+function openStatus(car, anchor){
+  closeStatus();
+  if(!STATUS){ toast('กำลังโหลดสถานะรถ… ลองอีกครั้ง', true); loadStatus(DATA && DATA.date); return; }
+  const info = (CARS && CARS[car]) || {}, ppl = [info.d1, info.d2].filter(Boolean);
+  const cur = STATUS.cars[car] || '';
+  const p = document.createElement('div'); p.id = 'stPop'; p.dataset.car = car;
+  p.innerHTML = '<div class="hd"><span>🚛 ' + esc(car) + ' · ' + dmy(STATUS.date) + '</span><button type="button" data-x="1" title="ปิด">✕</button></div>' +
+    (STATUS.block ? '<p class="mut">⚠ ' + esc(STATUS.block) + '</p>' : '') +
+    (STATUS.notes || []).map(n => '<p class="mut">⚠ ' + esc(n) + '</p>').join('') +
+    '<h5>สถานะรถ' + (cur ? ' — ตอนนี้ <b>' + esc(cur) + '</b> ' + esc(stDesc(STATUS.car_legend, cur)) : ' — ยังไม่ได้ลง') + '</h5>' +
+    (car in STATUS.cars ? stCodes('car', car, cur, STATUS.car_legend) : '<p class="mut">ไม่พบรถคันนี้ในแท็บข้อมูลรถ</p>') +
+    ppl.map(nm => { const c = STATUS.drivers[nm] || '';
+      return '<h5>👤 ' + esc(nm) + (c ? ' — ตอนนี้ <b>' + esc(c) + '</b> ' + esc(stDesc(STATUS.driver_legend, c)) : ' — ยังไม่ได้ลง') + '</h5>' +
+        (nm in STATUS.drivers ? stCodes('driver', nm, c, STATUS.driver_legend) : '<p class="mut">ไม่พบชื่อนี้ในแท็บข้อมูลพขร.</p>'); }).join('') +
+    (ppl.length ? '' : '<p class="mut">รถคันนี้ยังไม่มี พขร. ประจำรถ</p>') +
+    '<p class="mut" style="margin-top:10px">บันทึกลงไฟล์ DEMO ข้อมูลรถ+พขร ทันที (ประวัติอยู่ในแท็บ StatusLog)</p>';
+  document.body.appendChild(p);
+  const r = anchor.getBoundingClientRect(), w = p.offsetWidth, h = p.offsetHeight;
+  p.style.left = Math.max(8, Math.min(r.right + 8, innerWidth - w - 8)) + 'px';
+  p.style.top = Math.max(8, Math.min(r.top, innerHeight - h - 8)) + 'px';
+  p.addEventListener('click', async e => {
+    e.stopPropagation();
+    if(e.target.closest('[data-x]')){ closeStatus(); return; }
+    const b = e.target.closest('button[data-kind]'); if(!b) return;
+    if(b.dataset.code.toUpperCase() === b.dataset.old.toUpperCase()) return;
+    const by = editorName(); if(!by) return;
+    p.querySelectorAll('button[data-kind]').forEach(x => { x.disabled = true; });
+    try{
+      const res = await fetch('/api/plan/status', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({date: STATUS.date, kind: b.dataset.kind, key: b.dataset.key, code: b.dataset.code, old: b.dataset.old, by: by})});
+      const j = await res.json().catch(() => ({}));
+      if(!res.ok){
+        toast('บันทึกสถานะไม่สำเร็จ: ' + (j.detail || res.status), true);
+        if(res.status === 409 && 'current' in j) (b.dataset.kind === 'car' ? STATUS.cars : STATUS.drivers)[b.dataset.key] = j.current;
+      }else{
+        (b.dataset.kind === 'car' ? STATUS.cars : STATUS.drivers)[b.dataset.key] = j.code;
+        toast('บันทึก ' + b.dataset.key + ' = ' + (j.code || '(ว่าง)') + ' ลงชีตแล้ว ✓', false);
+      }
+    }catch(err){ toast('บันทึกสถานะไม่สำเร็จ: ' + err.message, true); }
+    updateCarBar();
+    const keep = [p.style.left, p.style.top], a = document.querySelector('#carbar .cp[data-car="' + car + '"]') || anchor;
+    openStatus(car, a);                                         // เปิดใหม่ด้วยค่าล่าสุด ตำแหน่งเดิม (รถอาจย้ายกลุ่มไปแล้ว)
+    const np = document.getElementById('stPop'); if(np){ np.style.left = keep[0]; np.style.top = keep[1]; }
+  });
+}
+document.addEventListener('click', e => { const p = document.getElementById('stPop'); if(p && !p.contains(e.target) && !(e.target.closest && e.target.closest('.stb'))) closeStatus(); });
+document.addEventListener('keydown', e => { if(e.key === 'Escape') closeStatus(); });
 function updateCarBar(){
   const bar = document.getElementById('carbar');
   if(!bar || !DATA) return;
@@ -6616,19 +6812,26 @@ function updateCarBar(){
     return;
   }
   const use = carUse(DATA.rows.map(x => x.cells));
-  const busy = cars.filter(k => use[k]), free = cars.filter(k => !use[k]);
+  if(!STATUS || STATUS.date !== DATA.date) loadStatus(DATA.date);
+  const lg = STATUS ? STATUS.car_legend : [], down = k => { const c = carCode(k); return c && stKind(lg, c) === 'down'; };   // D ไม่มีคนขับ ยังอยู่กลุ่มว่าง (จับคู่คนขับได้)
+  const busy = cars.filter(k => use[k]), free = cars.filter(k => !use[k] && !down(k)), off = cars.filter(k => !use[k] && down(k));
   Object.keys(use).forEach(k => { if(cars.indexOf(k) < 0) busy.push(k); });
   const q = document.getElementById('q').value.trim();
-  const chip = (k, cls, sub) => '<div class="cp ' + cls + (q === k ? ' sel' : '') + '" draggable="true" data-car="' + esc(k) + '" title="' +
-    esc(k + ' · ' + useText(use[k]) + ' — ลากไปวางบนแถวในตาราง หรือกดเพื่อดูงานของคันนี้') + '"><span>' + esc(k) + '</span>' + (sub ? '<small>' + esc(sub) + '</small>' : '') + '</div>';
+  const chip = (k, cls, sub) => { const c = carCode(k);
+    return '<div class="cp ' + cls + (q === k ? ' sel' : '') + '" draggable="true" data-car="' + esc(k) + '" title="' +
+    esc(k + ' · ' + useText(use[k]) + (c ? ' · สถานะ ' + c + ' ' + stDesc(lg, c) : '') + ' — ลากไปวางบนแถวในตาราง หรือกดเพื่อดูงานของคันนี้') + '"><span>' + esc(k) + '</span>' +
+    (sub ? '<small>' + esc(sub) + '</small>' : '') + (STATUS ? '<i class="stb" data-st="' + esc(k) + '" title="กดเพื่อแก้สถานะรถ/พขร.">' + esc(c || '+') + '</i>' : '') + '</div>'; };
   bar.hidden = false;
   bar.innerHTML = '<div class="hd2">🚛 รถวันที่ ' + dmy(DATA.date) + '</div>' +
     '<div class="sum2"><span class="on">จัดแล้ว <b>' + busy.length + '</b></span><span class="free">ว่าง <b>' + free.length + '</b></span><span class="mut">/ ' + cars.length + ' คัน</span></div>' +
-    '<p class="tipd">' + (EDITING ? '✋ ลากรถไปวางบนแถวในตาราง = ใส่เบอร์รถ' : '✋ กด "โหมดแก้ไข" ก่อน แล้วลากรถไปวางบนแถวได้') + ' · กดชื่อรถ = ดูงานของคันนั้น</p>' +
+    '<p class="tipd">' + (EDITING ? '✋ ลากรถไปวางบนแถวในตาราง = ใส่เบอร์รถ' : '✋ กด "โหมดแก้ไข" ก่อน แล้วลากรถไปวางบนแถวได้') + ' · กดชื่อรถ = ดูงานของคันนั้น · กดป้ายรหัส = แก้สถานะรถ/พขร.</p>' +
     '<h4>🟢 ว่าง (' + free.length + ')</h4>' + (free.length ? '<div class="g2">' + free.map(k => chip(k, 'f', '')).join('') + '</div>' : '<div class="mut">ไม่มีรถว่าง</div>') +
+    (off.length ? '<h4>🔴 ไม่พร้อม (' + off.length + ')</h4><div class="g2">' + off.map(k => chip(k, 'x', '')).join('') + '</div>' : '') +
     '<h4>🔵 จัดแล้ว (' + busy.length + ')</h4>' + (busy.map(k => chip(k, 'u', (use[k].trips.map(t => t.replace('เที่ยว ', 'ท.')).join(',') || '') + ' · ' + use[k].drops + 'd')).join('') || '<div class="mut">ยังไม่มี</div>');
 }
 document.addEventListener('click', e => {
+  const sb = e.target.closest && e.target.closest('#carbar .stb');
+  if(sb){ e.stopPropagation(); const o = document.getElementById('stPop'); closeStatus(); if(!o || !o.dataset || o.dataset.car !== sb.dataset.st) openStatus(sb.dataset.st, sb); return; }
   const cp = e.target.closest && e.target.closest('#carbar .cp');
   if(cp){ const q = document.getElementById('q'); q.value = q.value === cp.dataset.car ? '' : cp.dataset.car; render(); }   // กดชื่อรถ = ค้นหาแถวของคันนั้น (กดซ้ำ = ล้าง)
 });
