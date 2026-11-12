@@ -3864,6 +3864,36 @@ def plan_status(date_str: str = Query(None, alias="date")):
             "notes": [n for n in (cs["note"], ds["note"]) if n], "block": _status_block()}
 
 
+@app.get("/api/plan/status/ahead", include_in_schema=False)
+def plan_status_ahead(date_str: str = Query(None, alias="date"), n: int = Query(14), all_: int = Query(0, alias="all")):
+    """ดูล่วงหน้า: รถ/พขร. ที่ลงรหัสไม่พร้อม/ไม่มีคนขับ ในช่วง n วันนับจากวันที่เลือก (อ่านจากไฟล์ DEMO ข้อมูลรถ+พขร)"""
+    day = _parse_date(date_str or "") or _thai_now().strftime("%Y-%m-%d")
+    n = max(1, min(int(n or 14), 31))
+    d0 = datetime.strptime(day, "%Y-%m-%d")
+    span = [(d0 + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(n)]
+    cs, ds = _status_tabs(day)
+
+    def pick(info, keep):
+        lg = {k.upper(): _ready_kind(v) for k, v in info["legend"].items()}
+        cols = [(info.get("days") or {}).get(d) for d in span]
+        out, seen = [], set()
+        for r in info["rows"]:
+            if not keep(r["key"]) or r["key"] in seen:
+                continue
+            seen.add(r["key"])
+            codes = [(_cell(r["cells"], c).upper() if c is not None else "") for c in cols]
+            if all_ or any(c and lg.get(c, "down") in ("down", "nodriver") for c in codes):
+                out.append({"key": r["key"], "codes": codes})
+        return out, [d for d, c in zip(span, cols) if c is None]
+
+    cars, miss_c = pick(cs, lambda k: bool(_CAR_RE.match(k)))
+    drivers, miss_d = pick(ds, lambda k: k not in _NO_PERSON)
+    return {"from": day, "days": span, "cars": cars, "drivers": drivers,
+            "car_legend": _status_legend(cs["legend"]), "driver_legend": _status_legend(ds["legend"]),
+            "missing": sorted(set(miss_c) | set(miss_d)),
+            "notes": [x for x in (cs["note"], ds["note"]) if x and "ยังไม่มีคอลัมน์" not in x]}
+
+
 class StatusEdit(BaseModel):
     date: str
     kind: str            # car | driver
@@ -6460,6 +6490,45 @@ PLAN_HTML = """<!doctype html>
   .carbar .cp.x{background:#fef2f2;border-color:#fecaca;color:#991b1b}
   .carbar .cp.n{background:#fffbeb;border-color:#fcd34d;color:#92400e}
   .carbar .drvq{width:100%;box-sizing:border-box;font:inherit;font-size:13px;padding:6px 8px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:inherit;margin:2px 0 4px}
+  .carbar .ahb{width:100%;font:inherit;font-size:13px;font-weight:600;padding:6px 8px;border-radius:8px;border:1px solid #93c5fd;background:#eff6ff;color:#1e3a8a;cursor:pointer;margin:2px 0 4px}
+  #ahPop{position:fixed;inset:0;z-index:75;background:rgba(0,0,0,.35);display:flex;align-items:flex-start;justify-content:center;padding:24px 12px;overflow:auto}
+  #ahPop .bx{background:var(--card);color:var(--ink);border-radius:14px;padding:14px;max-width:100%;box-shadow:0 10px 30px rgba(0,0,0,.3);font-size:13px}
+  #ahPop .hd{display:flex;justify-content:space-between;align-items:center;gap:10px;font-weight:700;font-size:16px;margin-bottom:6px}
+  #ahPop .hd button{border:0;background:none;font-size:20px;cursor:pointer;color:var(--mut)}
+  #ahPop .tw{overflow:auto;max-height:70vh;border:1px solid var(--line);border-radius:10px}
+  #ahPop table{border-collapse:separate;border-spacing:0}
+  #ahPop th,#ahPop td{border-bottom:1px solid var(--line);padding:4px 5px;text-align:center;white-space:nowrap}
+  #ahPop thead th{position:sticky;top:0;background:var(--card);z-index:2;font-size:11.5px}
+  #ahPop th.nm,#ahPop td.nm{position:sticky;left:0;background:var(--card);text-align:left;z-index:1;max-width:210px;overflow:hidden;text-overflow:ellipsis}
+  #ahPop thead th.nm{z-index:3}
+  #ahPop th.we{color:#b91c1c}
+  #ahPop th.cur{background:#dbeafe;color:#1e3a8a}
+  #ahPop tr.sec td{background:var(--line);font-weight:700;text-align:left}
+  #ahPop td.c{min-width:30px;cursor:pointer;font-weight:700;font-size:11.5px}
+  #ahPop td.c:hover{outline:2px solid #2563eb;outline-offset:-2px}
+  #ahPop td.dn{background:#fee2e2;color:#991b1b}
+  #ahPop td.nd{background:#fef3c7;color:#92400e}
+  #ahPop td.ok{color:var(--mut);font-weight:400}
+  #ahPop .nav{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 8px}
+  #ahPop .nav button,#ahPop .nav input{font:inherit;font-size:13px;padding:4px 10px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:inherit;cursor:pointer}
+  #ahPop .nav button:hover{border-color:#2563eb;color:#2563eb}
+  #ahPop .br{display:flex;flex-wrap:wrap;align-items:center;gap:5px;margin:0 0 8px;padding:8px;border:1px dashed var(--line);border-radius:10px}
+  #ahPop .br .gp{font-size:12px;color:var(--mut);margin-left:6px}
+  #ahPop .br button{font:inherit;font-size:12px;padding:3px 8px;border-radius:8px;border:1px solid var(--line);background:none;color:inherit;cursor:pointer}
+  #ahPop .br button b{margin-right:3px}
+  #ahPop .br button.k-ok{border-color:#86efac}
+  #ahPop .br button.k-nd{border-color:#fcd34d}
+  #ahPop .br button.k-dn{border-color:#fca5a5}
+  #ahPop .br button.on{background:var(--acc,#2563eb);border-color:var(--acc,#2563eb);color:#fff}
+  #ahPop.paint table{user-select:none}
+  #ahPop.paint td.c{cursor:crosshair;touch-action:none}
+  #ahPop td.c.pt{outline:3px solid #2563eb;outline-offset:-3px;background:#dbeafe}
+  #ahPop td.c.busy{opacity:.45}
+  #ahPop .tl{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin:0 0 8px}
+  #ahPop .tl input[type=search]{font:inherit;font-size:13px;padding:5px 8px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:inherit;min-width:220px}
+  #ahPop .tl label{display:flex;align-items:center;gap:5px;cursor:pointer}
+  #ahPop .lg{display:flex;flex-wrap:wrap;gap:4px 12px;margin:8px 0 0;color:var(--mut)}
+  #ahPop .lg i{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-2px;margin-right:4px;font-style:normal}
   #stPop .rng{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:8px 0 2px;font-size:13px}
   #stPop .rng input{font:inherit;font-size:13px;padding:3px 6px;border-radius:7px;border:1px solid var(--line);background:var(--card);color:inherit}
   .carbar .stb{font-style:normal;font-size:11px;font-weight:700;padding:1px 6px;border-radius:6px;border:1px solid currentColor;cursor:pointer;opacity:.85;flex:none}
@@ -6838,14 +6907,211 @@ function openStatus(car, anchor, drv){
     const np = document.getElementById('stPop'); if(np){ np.style.left = keep[0]; np.style.top = keep[1]; }
   });
 }
-document.addEventListener('click', e => { const p = document.getElementById('stPop'); if(p && !p.contains(e.target) && !(e.target.closest && e.target.closest('.stb, .drvq'))) closeStatus(); });
+document.addEventListener('click', e => { const p = document.getElementById('stPop'); if(p && !p.contains(e.target) && !(e.target.closest && e.target.closest('.stb, .drvq, #ahPop td.c'))) closeStatus(); });
 document.addEventListener('change', e => {                // ค้นชื่อ พขร. → เปิดหน้าต่างลงสถานะของคนนั้น
   if(e.target.id !== 'drvQ' || !STATUS) return;
   const nm = e.target.value.trim(); if(!nm) return;
   if(!(nm in STATUS.drivers)){ toast('ไม่พบชื่อ "' + nm + '" ในแท็บข้อมูลพขร. — เลือกจากรายชื่อที่ขึ้นมา', true); return; }
   openStatus('', e.target, nm);
 });
-document.addEventListener('keydown', e => { if(e.key === 'Escape') closeStatus(); });
+document.addEventListener('keydown', e => { if(e.key === 'Escape' && document.getElementById('stPop')){ closeStatus(); e.stopImmediatePropagation(); } });
+// ── ดูล่วงหน้า: ตารางรถ/พขร. ที่ไม่พร้อม 14 วันข้างหน้า (กดช่อง = ไปวันนั้นเพื่อจัดรถ/แก้สถานะ) ──
+const TH_DOW = ['อา', 'จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส'];
+function closeAhead(){ const p = document.getElementById('ahPop'); if(p) p.remove(); }
+let AH = null, AH_ALL = true, AH_Q = '';               // ข้อมูลล่วงหน้าที่โหลดไว้ · แสดงทุกคัน/ทุกคน · คำค้น
+function drawAhead(){
+  const p = document.getElementById('ahPop'), j = AH; if(!p || !j) return;
+  const bx = p.querySelector('.bx');
+  if(!bx.querySelector('#ahT')){
+    bx.innerHTML = '<div class="hd"><span>📅 สถานะรถ / พขร. — ' + dmy(j.days[0]) + ' ถึง ' + dmy(j.days[j.days.length - 1]) + '</span><button type="button" data-x="1" title="ปิด">✕</button></div>' +
+      '<div class="nav"><button type="button" data-nav="-14">◀ 14 วันก่อน</button><button type="button" data-nav="0">วันนี้</button>' +
+      '<button type="button" data-nav="14">14 วันถัดไป ▶</button><input type="date" id="ahFrom" value="' + AH_FROM + '" title="เริ่มดูตั้งแต่วันที่"></div>' +
+      (j.missing.length ? '<p class="tipd" style="color:#b45309">⚠ ยังไม่มีคอลัมน์ในชีต ' + j.missing.length + ' วัน (' + dmy(j.missing[0]) + ' เป็นต้นไป) — เพิ่มคอลัมน์เดือนนั้นในไฟล์ DEMO ข้อมูลรถ+พขร ก่อน</p>' : '') +
+      (j.notes || []).map(n => '<p class="tipd" style="color:#b45309">⚠ ' + esc(n) + '</p>').join('') +
+      '<div class="tl"><input id="ahQ" type="search" placeholder="🔍 ค้นเบอร์รถ / ชื่อ" autocomplete="off" value="' + esc(AH_Q) + '">' +
+      '<label><input type="checkbox" id="ahAll"' + (AH_ALL ? ' checked' : '') + '> แสดงทุกคัน / ทุกคน</label></div>' +
+      '<div class="br"><b>🖌 ระบายสี:</b> ' + brushBtns(j) + '</div>' +
+      '<div class="tw" id="ahT"></div>' +
+      '<div class="lg"><span><i style="background:#fee2e2;border:1px solid #fca5a5"></i>ไม่พร้อม (ซ่อม/ลา/หยุด)</span><span><i style="background:#fef3c7;border:1px solid #fcd34d"></i>ไม่มีคนขับ (👤✕ = พขร. ประจำรถไม่มาทุกคน)</span>' +
+      '<span>ช่องว่าง = ยังไม่ได้ลง · <b>เลือกรหัสที่แถบระบายสี แล้วกด/ลากผ่านช่องวัน = บันทึกทันที</b></span></div>';
+  }
+  p.classList.toggle('paint', !!AH_BRUSH);
+  const kd = (lg, c) => { const k = c ? stKind(lg, c) : ''; return k === 'down' ? 'dn' : k === 'nodriver' ? 'nd' : 'ok'; };
+  const offDay = {};                                  // ชื่อ พขร. → [วันที่ไม่มา true/false]
+  j.drivers.forEach(x => { offDay[x.key] = x.codes.map(c => !!c && stKind(j.driver_legend, c) === 'down'); });
+  const carRows = {};                                 // รถ → รหัสรายวัน (+ 👤✕ วันที่ พขร. ประจำรถไม่มาทุกคน)
+  const carRaw = {};                                  // รหัสรถจริงในชีต (ช่อง 👤✕ ยังต้องรู้รหัสเดิมไว้แก้)
+  j.cars.forEach(x => { carRows[x.key] = x.codes.slice(); carRaw[x.key] = x.codes; });
+  Object.keys(CARS || {}).forEach(k => {
+    const ppl = [(CARS[k] || {}).d1, (CARS[k] || {}).d2].filter(Boolean); if(!ppl.length) return;
+    j.days.forEach((d, i) => { if(ppl.every(nm => offDay[nm] && offDay[nm][i])){ carRows[k] = carRows[k] || j.days.map(() => ''); if(!carRows[k][i] || kd(j.car_legend, carRows[k][i]) === 'ok') carRows[k][i] = '👤✕'; } });
+  });
+  const bad = (lg, codes) => codes.some(c => c === '👤✕' || (c && kd(lg, c) !== 'ok'));
+  const q = AH_Q.toLowerCase(), hit = t => !q || t.toLowerCase().indexOf(q) >= 0;
+  const cars = Object.keys(carRows).filter(k => (AH_ALL || bad(j.car_legend, carRows[k])) && hit(k)).sort((a, b) => a.localeCompare(b, 'th', {numeric: true}));
+  const ppl = j.drivers.filter(x => (AH_ALL || bad(j.driver_legend, x.codes)) && hit(x.key + ' ' + carsOf(x.key).join(' '))).sort((a, b) => a.key.localeCompare(b.key, 'th'));
+  const head = '<tr><th class="nm">รถ / ชื่อ</th>' + j.days.map(d => { const w = new Date(d + 'T00:00:00').getDay();
+    return '<th class="' + (w === 0 || w === 6 ? 'we ' : '') + (d === todayISO() ? 'cur' : '') + '">' + TH_DOW[w] + '<br>' + d.slice(8, 10) + '/' + d.slice(5, 7) + '</th>'; }).join('') + '</tr>';
+  const cell = (lg, c, d, k, kind, raw) => '<td class="c ' + (c === '👤✕' ? 'nd' : kd(lg, c)) + '" data-d="' + d + '" data-kind="' + kind + '" data-key="' + esc(k) + '" data-code="' + esc(raw) + '" title="' +
+    esc(k + ' · ' + dmy(d) + (c ? ' · ' + c + ' ' + (c === '👤✕' ? 'พขร. ประจำรถไม่มา' : stDesc(lg, c)) : ' · ยังไม่ได้ลง') + ' — กดเพื่อเปลี่ยนสถานะ') + '">' + esc(c) + '</td>';
+  const span = j.days.length + 1;
+  const sec = (t, n) => '<tr class="sec"><td colspan="' + span + '">' + t + ' (' + n + ')</td></tr>';
+  const none = t => '<tr><td class="mut" colspan="' + span + '">' + t + '</td></tr>';
+  const body = sec('🚛 รถ', cars.length) + (cars.map(k => '<tr><td class="nm" title="' + esc(k) + '">' + esc(k) + '</td>' +
+      carRows[k].map((c, i) => cell(j.car_legend, c, j.days[i], k, 'car', (carRaw[k] || [])[i] || '')).join('') + '</tr>').join('') || none(q ? 'ไม่พบรถที่ค้น' : 'ไม่มีรถที่ลงไม่พร้อมไว้')) +
+    sec('👤 พขร.', ppl.length) + (ppl.map(x => { const cs = carsOf(x.key);
+      return '<tr><td class="nm" title="' + esc(x.key + (cs.length ? ' · ประจำรถ ' + cs.join(', ') : '')) + '">' + esc(x.key) + (cs.length ? ' <span class="mut">' + esc(cs.join(',')) + '</span>' : '') + '</td>' +
+        x.codes.map((c, i) => cell(j.driver_legend, c, j.days[i], x.key, 'driver', c)).join('') + '</tr>'; }).join('') || none(q ? 'ไม่พบชื่อที่ค้น' : 'ไม่มีคนที่ลงลา/หยุดไว้'));
+  bx.querySelector('#ahT').innerHTML = '<table><thead>' + head + '</thead><tbody>' + body + '</tbody></table>';
+}
+// กดช่องในตารางล่วงหน้า → ป๊อปอัปเลือกรหัส ลงชีต DEMO ทันที (ลงหลายวันได้) แล้ววาดตารางใหม่
+function editAhead(td){
+  closeStatus();
+  const kind = td.dataset.kind, key = td.dataset.key, d = td.dataset.d, cur = td.dataset.code || '';
+  const lg = kind === 'car' ? AH.car_legend : AH.driver_legend;
+  const p = document.createElement('div'); p.id = 'stPop'; p.style.zIndex = 80;
+  p.innerHTML = '<div class="hd"><span>' + (kind === 'car' ? '🚛 ' : '👤 ') + esc(key) + ' · ' + dmy(d) + '</span><button type="button" data-x="1" title="ปิด">✕</button></div>' +
+    (STATUS && STATUS.block ? '<p class="mut">⚠ ' + esc(STATUS.block) + '</p>' : '') +
+    (kind === 'driver' && carsOf(key).length ? '<p class="mut">ประจำรถ: ' + carsOf(key).map(esc).join(', ') + '</p>' : '') +
+    '<div class="rng">📅 ลงตั้งแต่ <b>' + dmy(d) + '</b> ถึง <input type="date" id="stTo" value="' + d + '" min="' + d + '"></div>' +
+    '<p class="mut" style="margin:0">ลาหลายวัน / ซ่อมหลายวัน เลือกวันสุดท้ายก่อน แล้วค่อยกดรหัส</p>' +
+    '<h5>' + (cur ? 'ตอนนี้ <b>' + esc(cur) + '</b> ' + esc(stDesc(lg, cur)) : 'ยังไม่ได้ลง') + '</h5>' + stCodes(kind, key, cur, lg) +
+    '<p class="mut" style="margin-top:10px"><a href="#" data-go="1">📋 ไปวันนี้ในแผนงาน</a> · บันทึกลงไฟล์ DEMO ข้อมูลรถ+พขร ทันที</p>';
+  document.body.appendChild(p);
+  const r = td.getBoundingClientRect(), w = p.offsetWidth, h = p.offsetHeight;
+  p.style.left = Math.max(8, Math.min(r.right + 6, innerWidth - w - 8)) + 'px';
+  p.style.top = Math.max(8, Math.min(r.top, innerHeight - h - 8)) + 'px';
+  const toEl = p.querySelector('#stTo');
+  p.addEventListener('click', async e => {
+    e.stopPropagation();
+    if(e.target.closest('[data-x]')){ closeStatus(); return; }
+    if(e.target.closest('[data-go]')){ e.preventDefault(); closeStatus(); closeAhead(); dateEl.value = d; load(); return; }
+    const b = e.target.closest('button[data-kind]'); if(!b) return;
+    const to = toEl.value && toEl.value > d ? toEl.value : '';
+    if(!to && b.dataset.code.toUpperCase() === cur.toUpperCase()) return;
+    if(to){
+      const n = Math.round((new Date(to) - new Date(d)) / 86400000) + 1;
+      if(!confirm('ลง ' + (b.dataset.code || '(ล้าง)') + ' ให้ ' + key + ' ตั้งแต่ ' + dmy(d) + ' ถึง ' + dmy(to) + ' (' + n + ' วัน) — ถ้าวันไหนลงไว้แล้วจะถูกเขียนทับ ?')) return;
+    }
+    const by = editorName(); if(!by) return;
+    p.querySelectorAll('button[data-kind]').forEach(x => { x.disabled = true; });
+    const list = kind === 'car' ? AH.cars : AH.drivers;
+    let row = list.find(x => x.key === key);
+    if(!row){ row = {key: key, codes: AH.days.map(() => '')}; list.push(row); }
+    try{
+      const res = await fetch('/api/plan/status', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({date: d, kind: kind, key: key, code: b.dataset.code, old: cur, by: by, to: to})});
+      const j = await res.json().catch(() => ({}));
+      if(!res.ok){
+        toast('บันทึกสถานะไม่สำเร็จ: ' + (j.detail || res.status), true);
+        if(res.status === 409 && 'current' in j){ const i = AH.days.indexOf(d); if(i >= 0) row.codes[i] = j.current; }
+      }else{
+        AH.days.forEach((x, i) => { if(x >= d && x <= (to || d)) row.codes[i] = j.code; });
+        if(STATUS && STATUS.date >= d && STATUS.date <= (to || d)){ (kind === 'car' ? STATUS.cars : STATUS.drivers)[key] = j.code; updateCarBar(); }
+        toast('บันทึก ' + key + ' = ' + (j.code || '(ว่าง)') + (j.days > 1 ? ' ' + j.days + ' วัน' : '') + ' ลงชีตแล้ว ✓', false);
+      }
+    }catch(err){ toast('บันทึกสถานะไม่สำเร็จ: ' + err.message, true); }
+    closeStatus(); drawAhead();
+  });
+}
+// ── ระบายสี: เลือกรหัสครั้งเดียว แล้วกด/ลากผ่านช่องวันในแถวเดียวกัน = ลงรหัสช่วงนั้นทันที ──
+let AH_BRUSH = null, AH_DRAG = null;                  // พู่กัน {kind: car|driver|*, code} · การลากที่ค้างอยู่
+function brushBtns(j){
+  const cls = k => k === 'down' ? 'k-dn' : k === 'nodriver' ? 'k-nd' : 'k-ok';
+  const on = (kind, code) => AH_BRUSH && AH_BRUSH.kind === kind && AH_BRUSH.code === code ? ' on' : '';
+  const g = (kind, lg) => lg.map(c => '<button type="button" data-br="' + kind + '" data-code="' + esc(c.code) + '" class="' + cls(c.kind) + on(kind, c.code) + '" title="' + esc(c.desc) + '"><b>' + esc(c.code) + '</b>' + esc(c.desc) + '</button>').join('');
+  return '<span class="gp">🚛 รถ</span>' + g('car', j.car_legend) + '<span class="gp">👤 พขร.</span>' + g('driver', j.driver_legend) +
+    '<span class="gp"></span><button type="button" data-br="*" data-code="" class="' + on('*', '') + '">✕ ล้างช่อง</button>' +
+    '<button type="button" data-br="" class="off' + (AH_BRUSH ? '' : ' on') + '">✋ ไม่ระบาย (กดช่อง = เลือกเอง)</button>';
+}
+function ahRow(kind, key){
+  const list = kind === 'car' ? AH.cars : AH.drivers;
+  let row = list.find(x => x.key === key);
+  if(!row){ row = {key: key, codes: AH.days.map(() => '')}; list.push(row); }
+  return row;
+}
+function markDrag(){
+  if(!AH_DRAG) return;
+  const lo = AH_DRAG.a < AH_DRAG.b ? AH_DRAG.a : AH_DRAG.b, hi = AH_DRAG.a < AH_DRAG.b ? AH_DRAG.b : AH_DRAG.a;
+  AH_DRAG.tr.querySelectorAll('td.c[data-d]').forEach(t => t.classList.toggle('pt', t.dataset.d >= lo && t.dataset.d <= hi));
+}
+async function paintAhead(g){
+  const lo = g.a < g.b ? g.a : g.b, hi = g.a < g.b ? g.b : g.a, code = AH_BRUSH ? AH_BRUSH.code : null;
+  const cells = [...g.tr.querySelectorAll('td.c[data-d]')].filter(t => t.dataset.d >= lo && t.dataset.d <= hi);
+  if(code === null || cells.every(t => (t.dataset.code || '').toUpperCase() === code.toUpperCase())){ drawAhead(); return; }
+  const by = editorName(); if(!by){ drawAhead(); return; }
+  const old = cells[0].dataset.code || '', row = ahRow(g.kind, g.key);
+  cells.forEach(t => t.classList.add('busy'));
+  try{
+    const res = await fetch('/api/plan/status', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({date: lo, to: hi > lo ? hi : '', kind: g.kind, key: g.key, code: code, old: old, by: by})});
+    const j = await res.json().catch(() => ({}));
+    if(!res.ok){
+      toast('บันทึกสถานะไม่สำเร็จ: ' + (j.detail || res.status), true);
+      if(res.status === 409 && 'current' in j){ const i = AH.days.indexOf(lo); if(i >= 0) row.codes[i] = j.current; }
+    }else{
+      AH.days.forEach((x, i) => { if(x >= lo && x <= hi) row.codes[i] = j.code; });
+      if(STATUS && STATUS.date >= lo && STATUS.date <= hi){ (g.kind === 'car' ? STATUS.cars : STATUS.drivers)[g.key] = j.code; updateCarBar(); }
+      toast('บันทึก ' + g.key + ' = ' + (j.code || '(ว่าง)') + ' ' + dmy(lo) + (hi > lo ? ' ถึง ' + dmy(hi) + ' (' + (j.days || '') + ' วัน)' : '') + ' ลงชีตแล้ว ✓', false);
+    }
+  }catch(err){ toast('บันทึกสถานะไม่สำเร็จ: ' + err.message, true); }
+  drawAhead();
+}
+document.addEventListener('pointermove', e => {
+  if(!AH_DRAG) return;
+  const el = document.elementFromPoint(e.clientX, e.clientY), td = el && el.closest && el.closest('#ahPop td.c[data-d]');
+  if(td && td.parentNode === AH_DRAG.tr && td.dataset.d !== AH_DRAG.b){ AH_DRAG.b = td.dataset.d; markDrag(); }
+});
+document.addEventListener('pointerup', () => { if(!AH_DRAG) return; const g = AH_DRAG; AH_DRAG = null; paintAhead(g); });
+let AH_FROM = '';                                     // วันแรกของช่วง 14 วันที่ดูอยู่ (ย้อนหลัง/ล่วงหน้า)
+async function openAhead(from){
+  closeAhead(); closeStatus();
+  from = from || (DATA && DATA.date) || todayISO(); AH_FROM = from; AH = null;
+  const p = document.createElement('div'); p.id = 'ahPop';
+  p.innerHTML = '<div class="bx"><div class="hd"><span>📅 สถานะรถ / พขร. — ' + dmy(from) + ' ถึง ' + dmy(shift(from, 13)) + '</span><button type="button" data-x="1">✕</button></div>' +
+    '<div class="nav"><button type="button" data-nav="-14">◀ 14 วันก่อน</button><button type="button" data-nav="0">วันนี้</button>' +
+      '<button type="button" data-nav="14">14 วันถัดไป ▶</button><input type="date" id="ahFrom" value="' + AH_FROM + '" title="เริ่มดูตั้งแต่วันที่"></div>' + '<p class="mut">⏳ กำลังโหลด…</p></div>';
+  document.body.appendChild(p);
+  p.addEventListener('click', e => {
+    if(e.target === p || e.target.closest('[data-x]')){ closeAhead(); return; }
+    const bb = e.target.closest('[data-br]');
+    if(bb){
+      AH_BRUSH = bb.dataset.br ? {kind: bb.dataset.br, code: bb.dataset.code || ''} : null;
+      p.querySelectorAll('[data-br]').forEach(x => x.classList.toggle('on', x === bb));
+      p.classList.toggle('paint', !!AH_BRUSH); return;
+    }
+    const nv = e.target.closest('[data-nav]');
+    if(nv){ const n = +nv.dataset.nav; openAhead(n ? shift(AH_FROM, n) : todayISO()); return; }
+    if(e.target.closest('.tl')) return;
+    const td = e.target.closest('td.c[data-d]'); if(!td || AH_BRUSH) return;   // โหมดระบาย จัดการใน pointerdown/up
+    editAhead(td);
+  });
+  p.addEventListener('pointerdown', e => {
+    if(!AH_BRUSH || e.button > 0) return;
+    const td = e.target.closest('td.c[data-d]'); if(!td) return;
+    if(AH_BRUSH.kind !== '*' && td.dataset.kind !== AH_BRUSH.kind){
+      toast('รหัส ' + AH_BRUSH.code + ' ใช้กับแถว' + (AH_BRUSH.kind === 'car' ? 'รถ' : ' พขร.') + 'เท่านั้น', true); return;
+    }
+    e.preventDefault();
+    AH_DRAG = {kind: td.dataset.kind, key: td.dataset.key, a: td.dataset.d, b: td.dataset.d, tr: td.parentNode};
+    markDrag();
+  });
+  p.addEventListener('input', e => { if(e.target.id === 'ahQ'){ AH_Q = e.target.value.trim(); drawAhead(); } });
+  p.addEventListener('change', e => {
+    if(e.target.id === 'ahAll'){ AH_ALL = e.target.checked; drawAhead(); }
+    if(e.target.id === 'ahFrom' && e.target.value) openAhead(e.target.value);
+  });
+  let j = null, msg = '';
+  try{
+    const r = await fetch('/api/plan/status/ahead?n=14&all=1&date=' + from); j = await r.json().catch(() => null);
+    if(!r.ok || !j) msg = 'HTTP ' + r.status + (j && j.detail ? ' — ' + j.detail : '');
+  }catch(e){ msg = e.message; }
+  const bx = p.querySelector('.bx'); if(!bx) return;
+  if(!document.getElementById('ahPop') || AH_FROM !== from) return;          // กดเลื่อนช่วงไปแล้ว ผลเก่าทิ้ง
+  if(msg){ bx.querySelector('p.mut').textContent = '⚠ โหลดไม่ได้: ' + msg; return; }
+  AH = j; drawAhead();
+}
+document.addEventListener('keydown', e => { if(e.key === 'Escape' && !document.getElementById('stPop')) closeAhead(); });
 function updateCarBar(){
   const bar = document.getElementById('carbar');
   if(!bar || !DATA) return;
@@ -6882,6 +7148,7 @@ function updateCarBar(){
     (STATUS_ERR && STATUS_ERR.date === DATA.date ? '<p class="tipd" style="color:#b91c1c">⚠ อ่านสถานะรถ/พขร. จากไฟล์ DEMO ไม่ได้: ' + esc(STATUS_ERR.msg) +
       ' <a href="#" id="stRetry">ลองใหม่</a></p>' : (!STATUS || STATUS.date !== DATA.date ? '<p class="tipd">⏳ กำลังโหลดสถานะรถ/พขร.…</p>' : '')) +
     (STATUS && STATUS.date === DATA.date && STATUS.notes && STATUS.notes.length ? '<p class="tipd" style="color:#b45309">⚠ ' + STATUS.notes.map(esc).join(' · ') + '</p>' : '') +
+    (ok ? '<button type="button" class="ahb" id="ahBtn">📅 ดูสถานะ 14 วัน (ย้อนหลัง / ล่วงหน้า) — รถซ่อม / คนลา</button>' : '') +
     (ok ? '<input class="drvq" id="drvQ" list="drvList" placeholder="🔍 ลงลา/สถานะ พขร. (พิมพ์ชื่อ)" autocomplete="off">' +
       '<datalist id="drvList">' + Object.keys(STATUS.drivers).sort((a, b) => a.localeCompare(b, 'th')).map(nm => '<option value="' + esc(nm) + '"></option>').join('') + '</datalist>' : '') +
     '<h4>🟢 ว่าง (' + free.length + ')</h4>' + (free.length ? '<div class="g2">' + free.map(k => chip(k, 'f', '')).join('') + '</div>' : '<div class="mut">ไม่มีรถว่าง</div>') +
@@ -6891,6 +7158,7 @@ function updateCarBar(){
 }
 document.addEventListener('click', e => {
   if(e.target.id === 'stRetry'){ e.preventDefault(); retryStatus(); return; }
+  if(e.target.id === 'ahBtn'){ openAhead(); return; }
   const sb = e.target.closest && e.target.closest('#carbar .stb');
   if(sb){ e.stopPropagation(); const o = document.getElementById('stPop'); closeStatus(); if(!o || !o.dataset || o.dataset.car !== sb.dataset.st) openStatus(sb.dataset.st, sb); return; }
   const cp = e.target.closest && e.target.closest('#carbar .cp');
