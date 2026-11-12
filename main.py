@@ -6524,6 +6524,10 @@ PLAN_HTML = """<!doctype html>
   #ahPop.paint td.c{cursor:crosshair;touch-action:none}
   #ahPop td.c.pt{outline:3px solid #2563eb;outline-offset:-3px;background:#dbeafe}
   #ahPop td.c.busy{opacity:.45}
+  #ahPop .tabs{display:flex;gap:6px;margin:0 0 8px}
+  #ahPop .tabs button{font:inherit;font-size:14px;font-weight:700;padding:6px 16px;border-radius:10px;border:1px solid var(--line);background:none;color:inherit;cursor:pointer}
+  #ahPop .tabs button.on{background:var(--acc,#2563eb);border-color:var(--acc,#2563eb);color:#fff}
+  #ahPop #ahBy{font:inherit;font-size:13px;padding:5px 8px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:inherit;width:170px}
   #ahPop .tl{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin:0 0 8px}
   #ahPop .tl input[type=search]{font:inherit;font-size:13px;padding:5px 8px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:inherit;min-width:220px}
   #ahPop .tl label{display:flex;align-items:center;gap:5px;cursor:pointer}
@@ -6928,7 +6932,10 @@ function drawAhead(){
       '<button type="button" data-nav="14">14 วันถัดไป ▶</button><input type="date" id="ahFrom" value="' + AH_FROM + '" title="เริ่มดูตั้งแต่วันที่"></div>' +
       (j.missing.length ? '<p class="tipd" style="color:#b45309">⚠ ยังไม่มีคอลัมน์ในชีต ' + j.missing.length + ' วัน (' + dmy(j.missing[0]) + ' เป็นต้นไป) — เพิ่มคอลัมน์เดือนนั้นในไฟล์ DEMO ข้อมูลรถ+พขร ก่อน</p>' : '') +
       (j.notes || []).map(n => '<p class="tipd" style="color:#b45309">⚠ ' + esc(n) + '</p>').join('') +
-      '<div class="tl"><input id="ahQ" type="search" placeholder="🔍 ค้นเบอร์รถ / ชื่อ" autocomplete="off" value="' + esc(AH_Q) + '">' +
+      '<div class="tabs"><button type="button" data-tab="car" class="' + (AH_TAB === 'car' ? 'on' : '') + '">🚛 รถ</button>' +
+      '<button type="button" data-tab="driver" class="' + (AH_TAB === 'driver' ? 'on' : '') + '">👤 พขร.</button></div>' +
+      '<div class="tl"><input id="ahQ" type="search" placeholder="🔍 ค้น' + (AH_TAB === 'car' ? 'เบอร์รถ' : 'ชื่อ / เบอร์รถ') + '" autocomplete="off" value="' + esc(AH_Q) + '">' +
+      '<input id="ahBy" placeholder="👤 ชื่อผู้แก้ (ต้องใส่)" autocomplete="off" value="' + esc(ahByName()) + '">' +
       '<label><input type="checkbox" id="ahAll"' + (AH_ALL ? ' checked' : '') + '> แสดงทุกคัน / ทุกคน</label></div>' +
       '<div class="br"><b>🖌 ระบายสี:</b> ' + brushBtns(j) + '</div>' +
       '<div class="tw" id="ahT"></div>' +
@@ -6956,10 +6963,11 @@ function drawAhead(){
     esc(k + ' · ' + dmy(d) + (c ? ' · ' + c + ' ' + (c === '👤✕' ? 'พขร. ประจำรถไม่มา' : stDesc(lg, c)) : ' · ยังไม่ได้ลง') + ' — กดเพื่อเปลี่ยนสถานะ') + '">' + esc(c) + '</td>';
   const span = j.days.length + 1;
   const sec = (t, n) => '<tr class="sec"><td colspan="' + span + '">' + t + ' (' + n + ')</td></tr>';
+  p.querySelectorAll('[data-tab]').forEach(b => { b.textContent = (b.dataset.tab === 'car' ? '🚛 รถ (' + cars.length + ')' : '👤 พขร. (' + ppl.length + ')'); });
   const none = t => '<tr><td class="mut" colspan="' + span + '">' + t + '</td></tr>';
-  const body = sec('🚛 รถ', cars.length) + (cars.map(k => '<tr><td class="nm" title="' + esc(k) + '">' + esc(k) + '</td>' +
-      carRows[k].map((c, i) => cell(j.car_legend, c, j.days[i], k, 'car', (carRaw[k] || [])[i] || '')).join('') + '</tr>').join('') || none(q ? 'ไม่พบรถที่ค้น' : 'ไม่มีรถที่ลงไม่พร้อมไว้')) +
-    sec('👤 พขร.', ppl.length) + (ppl.map(x => { const cs = carsOf(x.key);
+  const body = AH_TAB === 'car' ? (cars.map(k => '<tr><td class="nm" title="' + esc(k) + '">' + esc(k) + '</td>' +
+      carRows[k].map((c, i) => cell(j.car_legend, c, j.days[i], k, 'car', (carRaw[k] || [])[i] || '')).join('') + '</tr>').join('') || none(q ? 'ไม่พบรถที่ค้น' : 'ไม่มีรถที่ลงไม่พร้อมไว้')) :
+    (ppl.map(x => { const cs = carsOf(x.key);
       return '<tr><td class="nm" title="' + esc(x.key + (cs.length ? ' · ประจำรถ ' + cs.join(', ') : '')) + '">' + esc(x.key) + (cs.length ? ' <span class="mut">' + esc(cs.join(',')) + '</span>' : '') + '</td>' +
         x.codes.map((c, i) => cell(j.driver_legend, c, j.days[i], x.key, 'driver', c)).join('') + '</tr>'; }).join('') || none(q ? 'ไม่พบชื่อที่ค้น' : 'ไม่มีคนที่ลงลา/หยุดไว้'));
   bx.querySelector('#ahT').innerHTML = '<table><thead>' + head + '</thead><tbody>' + body + '</tbody></table>';
@@ -7015,13 +7023,14 @@ function editAhead(td){
   });
 }
 // ── ระบายสี: เลือกรหัสครั้งเดียว แล้วกด/ลากผ่านช่องวันในแถวเดียวกัน = ลงรหัสช่วงนั้นทันที ──
-let AH_BRUSH = null, AH_DRAG = null;                  // พู่กัน {kind: car|driver|*, code} · การลากที่ค้างอยู่
+let AH_BRUSH = null, AH_DRAG = null, AH_TAB = 'car';    // + แท็บที่ดูอยู่: car = รถ · driver = พขร.
+function ahByName(){ try{ return localStorage.getItem('gb_plan_editor') || ''; }catch(e){ return ''; } }                  // พู่กัน {kind: car|driver|*, code} · การลากที่ค้างอยู่
 function brushBtns(j){
   const cls = k => k === 'down' ? 'k-dn' : k === 'nodriver' ? 'k-nd' : 'k-ok';
   const on = (kind, code) => AH_BRUSH && AH_BRUSH.kind === kind && AH_BRUSH.code === code ? ' on' : '';
   const g = (kind, lg) => lg.map(c => '<button type="button" data-br="' + kind + '" data-code="' + esc(c.code) + '" class="' + cls(c.kind) + on(kind, c.code) + '" title="' + esc(c.desc) + '"><b>' + esc(c.code) + '</b>' + esc(c.desc) + '</button>').join('');
-  return '<span class="gp">🚛 รถ</span>' + g('car', j.car_legend) + '<span class="gp">👤 พขร.</span>' + g('driver', j.driver_legend) +
-    '<span class="gp"></span><button type="button" data-br="*" data-code="" class="' + on('*', '') + '">✕ ล้างช่อง</button>' +
+  return (AH_TAB === 'car' ? g('car', j.car_legend) : g('driver', j.driver_legend)) +
+    '<span class="gp"></span><button type="button" data-br="' + AH_TAB + '" data-code="" class="' + on(AH_TAB, '') + '">✕ ล้างช่อง</button>' +
     '<button type="button" data-br="" class="off' + (AH_BRUSH ? '' : ' on') + '">✋ ไม่ระบาย (กดช่อง = เลือกเอง)</button>';
 }
 function ahRow(kind, key){
@@ -7063,6 +7072,7 @@ document.addEventListener('pointermove', e => {
   if(td && td.parentNode === AH_DRAG.tr && td.dataset.d !== AH_DRAG.b){ AH_DRAG.b = td.dataset.d; markDrag(); }
 });
 document.addEventListener('pointerup', () => { if(!AH_DRAG) return; const g = AH_DRAG; AH_DRAG = null; paintAhead(g); });
+document.addEventListener('pointercancel', () => { if(!AH_DRAG) return; AH_DRAG = null; drawAhead(); });
 let AH_FROM = '';                                     // วันแรกของช่วง 14 วันที่ดูอยู่ (ย้อนหลัง/ล่วงหน้า)
 async function openAhead(from){
   closeAhead(); closeStatus();
@@ -7074,6 +7084,8 @@ async function openAhead(from){
   document.body.appendChild(p);
   p.addEventListener('click', e => {
     if(e.target === p || e.target.closest('[data-x]')){ closeAhead(); return; }
+    const tb = e.target.closest('[data-tab]');
+    if(tb){ if(AH_TAB !== tb.dataset.tab){ AH_TAB = tb.dataset.tab; AH_BRUSH = null; AH_Q = ''; p.querySelector('.bx').innerHTML = ''; drawAhead(); } return; }
     const bb = e.target.closest('[data-br]');
     if(bb){
       AH_BRUSH = bb.dataset.br ? {kind: bb.dataset.br, code: bb.dataset.code || ''} : null;
@@ -7096,7 +7108,10 @@ async function openAhead(from){
     AH_DRAG = {kind: td.dataset.kind, key: td.dataset.key, a: td.dataset.d, b: td.dataset.d, tr: td.parentNode};
     markDrag();
   });
-  p.addEventListener('input', e => { if(e.target.id === 'ahQ'){ AH_Q = e.target.value.trim(); drawAhead(); } });
+  p.addEventListener('input', e => {
+    if(e.target.id === 'ahQ'){ AH_Q = e.target.value.trim(); drawAhead(); }
+    if(e.target.id === 'ahBy'){ try{ localStorage.setItem('gb_plan_editor', e.target.value.trim()); }catch(err){} }
+  });
   p.addEventListener('change', e => {
     if(e.target.id === 'ahAll'){ AH_ALL = e.target.checked; drawAhead(); }
     if(e.target.id === 'ahFrom' && e.target.value) openAhead(e.target.value);
@@ -7109,7 +7124,7 @@ async function openAhead(from){
   const bx = p.querySelector('.bx'); if(!bx) return;
   if(!document.getElementById('ahPop') || AH_FROM !== from) return;          // กดเลื่อนช่วงไปแล้ว ผลเก่าทิ้ง
   if(msg){ bx.querySelector('p.mut').textContent = '⚠ โหลดไม่ได้: ' + msg; return; }
-  AH = j; drawAhead();
+  AH = j; bx.innerHTML = ''; drawAhead();
 }
 document.addEventListener('keydown', e => { if(e.key === 'Escape' && !document.getElementById('stPop')) closeAhead(); });
 function updateCarBar(){
@@ -7438,10 +7453,12 @@ function toast(msg, bad){
 function editorName(){                  // ชื่อผู้แก้ ไว้บันทึกประวัติ (จำไว้ในเบราว์เซอร์)
   let n = '';
   try{ n = localStorage.getItem('gb_plan_editor') || ''; }catch(e){}
+  if(!n){ const f = document.getElementById('ahBy'); n = f ? f.value.trim() : ''; }
   if(!n){
-    n = (prompt('ชื่อผู้แก้ไข (ใช้บันทึกประวัติการแก้ไขในชีต EditLog):') || '').trim();
-    if(n){ try{ localStorage.setItem('gb_plan_editor', n); }catch(e){} }
+    try{ n = (prompt('ชื่อผู้แก้ไข (ใช้บันทึกประวัติการแก้ไขในชีต EditLog):') || '').trim(); }
+    catch(e){ n = ''; toast('ใส่ชื่อผู้แก้ในช่อง "👤 ชื่อผู้แก้" ก่อน แล้วลองใหม่', true); const f = document.getElementById('ahBy'); if(f) f.focus(); return ''; }
   }
+  if(n){ try{ localStorage.setItem('gb_plan_editor', n); }catch(e){} }
   return n;
 }
 
