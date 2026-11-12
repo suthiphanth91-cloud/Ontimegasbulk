@@ -3879,34 +3879,194 @@ def plan_status(date_str: str = Query(None, alias="date")):
             "notes": [n for n in (cs["note"], ds["note"]) if n], "block": _status_block()}
 
 
-@app.get("/api/plan/status/ahead", include_in_schema=False)
-def plan_status_ahead(date_str: str = Query(None, alias="date"), n: int = Query(14), all_: int = Query(0, alias="all")):
-    """ดูล่วงหน้า: รถ/พขร. ที่ลงรหัสไม่พร้อม/ไม่มีคนขับ ในช่วง n วันนับจากวันที่เลือก (อ่านจากไฟล์ DEMO ข้อมูลรถ+พขร)"""
-    day = _parse_date(date_str or "") or _thai_now().strftime("%Y-%m-%d")
-    n = max(1, min(int(n or 14), 31))
+# รหัสที่ระบบเติมเองจากแผนงาน (มีงาน, ไม่มีงาน) — รหัสอื่นที่คนลงไว้ ระบบไม่แตะ
+# รถ: ไม่มีงาน = ไม่เติม (รถไม่ประจำ คนลง W พร้อมใช้ว่างงาน เอง) · มีงาน = R
+STATUS_AUTO = {"car": ("R", None), "driver": ("W", "SB")}
+
+
+def _status_staff(info) -> callable:
+    """แท็บ พขร.: เอาเฉพาะคนที่คอลัมน์ "สถานะ" = พนักงาน (ไม่มีคอลัมน์นี้ = เอาทุกคน)"""
+    c = _ready_col(info["head"], "สถานะ")
+    if c is None:
+        return lambda r: True
+    return lambda r: "พนักงาน" in _cell(r["cells"], c)
+
+
+def _plan_dt(v: str) -> str:
+    """ "31/8/2026, 17:00:10" / "01/09/2026, 16:52" / "01/09/2026" → "2026-08-31" (อ่านไม่ออก = "")"""
+    m = re.match(r"\s*(\d{1,2})/(\d{1,2})/(\d{4})", v or "")
+    if not m:
+        return ""
+    try:
+        return datetime(int(m.group(3)), int(m.group(2)), int(m.group(1))).strftime("%Y-%m-%d")
+    except ValueError:
+        return ""
+
+
+def _plan_busy(r: list, today: str):
+    """งาน 1 แถวในแผนงาน กินวันไหนถึงวันไหน → (วันเริ่ม, วันจบ) · งานยกเลิก = None · โหลดเก็บ = มีงาน
+    เริ่ม = เข้าลานจอด (AB) / เวลาออกตามแผน (X) / วันที่ (C) · จบ = ออกปลายทาง (AG)
+    ยังไม่จบแต่เริ่มแล้ว = ถึงวันนี้ · ยังไม่เริ่ม = วันส่งมอบ (F) · ยาวสุด 7 วัน กันข้อมูลผิด"""
+    flag = (_cell(r, PLAN_STATUS) + " " + _cell(r, PLAN_DEST)).lower()
+    if STORED_WORD not in flag and any(k in flag for k in CANCEL_KEYWORDS):
+        return None
+    base = _parse_date(_cell(r, PLAN_DATE))
+    if not base:
+        return None
+    yard = _plan_dt(_cell(r, PLAN_YARD))
+    starts = [d for d in (yard, _plan_dt(_cell(r, PLAN_P_OUT)), base) if d]
+    start = min(starts)
+    due = _parse_date(_cell(r, PLAN_DUE)) or _plan_dt(_cell(r, PLAN_DUE)) or base
+    leave = _plan_dt(_cell(r, PLAN_LEAVE))
+    if leave:
+        end = leave
+    elif yard and start <= today:
+        end = max(due, base, today)
+    else:
+        end = max(due, base)
+    end = max(end, start)
+    cap = (datetime.strptime(start, "%Y-%m-%d") + timedelta(days=6)).strftime("%Y-%m-%d")
+    return start, min(end, cap)
+
+
+def _ahead_data(day: str, n: int, fresh: bool = False) -> dict:
     d0 = datetime.strptime(day, "%Y-%m-%d")
     span = [(d0 + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(n)]
+    if fresh:                                                     # ก่อนเขียน: อ่านสดทั้ง 2 แท็บ (อ่าน 2 ครั้ง) ใส่แคช
+        sh = _status_file()
+        for tab in (READY_CAR_TAB, READY_DRIVER_TAB):
+            qt = "'" + tab.replace("'", "''") + "'"
+            _sheet_cache[f"{STATUS_SHEET_ID}:{tab}"] = (time(), gspread.utils.fill_gaps(sh.values_get(qt).get("values", [])))
     cs, ds = _status_tabs(day)
+    try:                                                          # งานในแผนงาน (ชีตเดียวกับหน้าแผนงาน)
+        prow = _fetch_sheet(PLAN_PAGE_ID, PLAN_PAGE_TAB)
+    except Exception:
+        prow = None
+    plan_c, plan_p = [set() for _ in span], [set() for _ in span]
+    today = _thai_now().strftime("%Y-%m-%d")
+    for r in prow or []:
+        busy = _plan_busy(r, today)
+        if not busy or busy[1] < span[0] or busy[0] > span[-1]:
+            continue
+        key = _car_key(_cell(r, PLAN_CARNO))
+        ppl = [nm for c in (PLAN_DRIVER, PLAN_DRIVER2) if (nm := _cell(r, c)) and nm not in _NO_PERSON]
+        for i, d in enumerate(span):
+            if busy[0] <= d <= busy[1]:
+                if key:
+                    plan_c[i].add(key)
+                plan_p[i].update(ppl)
+    staff = _status_staff(ds)
 
-    def pick(info, keep):
-        lg = {k.upper(): _ready_kind(v) for k, v in info["legend"].items()}
+    def pick(info, keep, kind):
         cols = [(info.get("days") or {}).get(d) for d in span]
+        lg = {k.upper() for k in info["legend"]}
+        auto = STATUS_AUTO[kind] if all(c in lg for c in STATUS_AUTO[kind] if c) else None
         out, seen = [], set()
         for r in info["rows"]:
-            if not keep(r["key"]) or r["key"] in seen:
+            if not keep(r) or r["key"] in seen:
                 continue
             seen.add(r["key"])
             codes = [(_cell(r["cells"], c).upper() if c is not None else "") for c in cols]
-            if all_ or any(c and lg.get(c, "down") in ("down", "nodriver") for c in codes):
-                out.append({"key": r["key"], "codes": codes})
-        return out, [d for d, c in zip(span, cols) if c is None]
+            if kind == "car":
+                ck = _car_key(r["key"])
+                plan = [1 if ck in plan_c[i] else 0 for i in range(len(span))]
+            else:
+                plan = [1 if r["key"] in plan_p[i] else 0 for i in range(len(span))]
+            out.append({"key": r["key"], "codes": codes, "plan": plan, "row": r["row"]})
+        return out, cols, auto
 
-    cars, miss_c = pick(cs, lambda k: bool(_CAR_RE.match(k)))
-    drivers, miss_d = pick(ds, lambda k: k not in _NO_PERSON)
-    return {"from": day, "days": span, "cars": cars, "drivers": drivers,
+    cars, c_cols, c_auto = pick(cs, lambda r: bool(_CAR_RE.match(r["key"])), "car")
+    drivers, d_cols, d_auto = pick(ds, lambda r: r["key"] not in _NO_PERSON and staff(r), "driver")
+    miss = sorted({d for d, c in zip(span, c_cols) if c is None} | {d for d, c in zip(span, d_cols) if c is None})
+    return {"from": day, "days": span, "cars": cars, "drivers": drivers, "today": _thai_now().strftime("%Y-%m-%d"),
             "car_legend": _status_legend(cs["legend"]), "driver_legend": _status_legend(ds["legend"]),
-            "missing": sorted(set(miss_c) | set(miss_d)),
-            "notes": [x for x in (cs["note"], ds["note"]) if x and "ยังไม่มีคอลัมน์" not in x]}
+            "auto": {"car": list(c_auto) if c_auto else None, "driver": list(d_auto) if d_auto else None},
+            "has_plan": prow is not None, "missing": miss, "_cols": {"car": c_cols, "driver": d_cols},
+            "notes": [x for x in (cs["note"], ds["note"]) if x and "ยังไม่มีคอลัมน์" not in x]
+                     + ([] if prow is not None else ["อ่านชีตแผนงานไม่ได้ — ยังเติมสถานะจากแผนงานไม่ได้"])}
+
+
+def _auto_todo(data: dict) -> list:
+    """ช่องที่ต้องเติม/ปรับตามแผนงาน: วันนี้เป็นต้นไป · ช่องว่าง หรือเป็นรหัสอัตโนมัติที่ไม่ตรงแผนแล้ว"""
+    out = []
+    for kind, rows in (("car", data["cars"]), ("driver", data["drivers"])):
+        auto = data["auto"][kind]
+        if not auto:
+            continue
+        for r in rows:
+            for i, d in enumerate(data["days"]):
+                if d < data["today"] or data["_cols"][kind][i] is None:
+                    continue
+                want = auto[0] if r["plan"][i] else auto[1]
+                cur = r["codes"][i]
+                swap = {c for c in auto if c} | ({"W"} if kind == "car" else set())   # รถ: W ที่คนลงไว้ มีงานเข้าแล้ว → R
+                if want and cur != want and (not cur or cur in swap):
+                    out.append({"kind": kind, "key": r["key"], "date": d, "i": i, "row": r["row"], "old": cur, "code": want})
+    return out
+
+
+@app.get("/api/plan/status/ahead", include_in_schema=False)
+def plan_status_ahead(date_str: str = Query(None, alias="date"), n: int = Query(14), all_: int = Query(1, alias="all")):
+    """ตารางสถานะรถ/พขร. n วัน (อ่านไฟล์ DEMO ข้อมูลรถ+พขร + งานในแผนงาน) · auto_todo = จำนวนช่องที่ควรเติมจากแผนงาน"""
+    day = _parse_date(date_str or "") or _thai_now().strftime("%Y-%m-%d")
+    data = _ahead_data(day, max(1, min(int(n or 14), 31)))
+    data["auto_todo"] = len(_auto_todo(data))
+    data["block"] = _status_block()
+    for r in data["cars"] + data["drivers"]:
+        r.pop("row", None)
+    data.pop("_cols", None)
+    return data
+
+
+class AutoFill(BaseModel):
+    date: str
+    n: int = 14
+    by: str = ""
+
+
+@app.post("/api/plan/status/autofill", include_in_schema=False)
+def plan_status_autofill(p: AutoFill):
+    """เติมสถานะจากแผนงานลงไฟล์ DEMO: มีงาน → R/W · ไม่มีงาน → W/SB — เฉพาะวันนี้เป็นต้นไป ไม่ทับรหัสที่คนลงไว้ (ลา/ซ่อม ฯลฯ)"""
+    block = _status_block()
+    if block:
+        raise HTTPException(403, block)
+    day = _parse_date(p.date)
+    if not day:
+        raise HTTPException(400, "ข้อมูลไม่ครบ")
+    try:
+        data = _ahead_data(day, max(1, min(int(p.n or 14), 31)), fresh=True)
+    except gspread.exceptions.APIError as e:
+        st, msg = _quota_msg(e)
+        raise HTTPException(st, msg.replace("เขียนไม่ได้", "อ่านไฟล์สถานะไม่ได้"))
+    todo = _auto_todo(data)
+    if not todo:
+        return {"ok": True, "cells": []}
+    tabs = {"car": READY_CAR_TAB, "driver": READY_DRIVER_TAB}
+    upd = []
+    for t in todo:
+        col = data["_cols"][t["kind"]][t["i"]]
+        qt = "'" + tabs[t["kind"]].replace("'", "''") + "'!"
+        upd.append({"range": qt + gspread.utils.rowcol_to_a1(t["row"], col + 1), "values": [[t["code"]]]})
+    sh = _status_file()
+    try:
+        sh.values_batch_update({"valueInputOption": "RAW", "data": upd})
+    except gspread.exceptions.APIError as e:
+        raise HTTPException(*_quota_msg(e))
+    for tab in tabs.values():
+        _drop_sheet_cache(STATUS_SHEET_ID, tab)
+    now = _thai_now().strftime("%Y-%m-%d %H:%M:%S")
+    by = (p.by.strip() or "ระบบ (เติมจากแผนงาน)")[:40]
+    rows = []
+    for kind, tab in tabs.items():
+        k = [t for t in todo if t["kind"] == kind]
+        if k:
+            rows.append([now, by, tab, f"เติมจากแผนงาน {len({t['key'] for t in k})} รายการ", f"{min(t['date'] for t in k)} ถึง {max(t['date'] for t in k)}",
+                         f"{len(k)} ช่อง", "ว่าง/อัตโนมัติ", "/".join(c for c in STATUS_AUTO[kind] if c)])
+    try:
+        sh.values_append(f"'{STATUS_LOG_TAB}'!A1", {"valueInputOption": "RAW"}, {"values": rows})
+    except Exception:
+        pass
+    return {"ok": True, "cells": [{k: t[k] for k in ("kind", "key", "date", "code")} for t in todo]}
 
 
 class StatusEdit(BaseModel):
@@ -6545,6 +6705,14 @@ PLAN_HTML = """<!doctype html>
   #ahPop.paint td.c{cursor:crosshair}
   #ahPop td.c.pt{outline:3px solid #2563eb;outline-offset:-3px;background:#dbeafe}
   #ahPop td.c.busy{opacity:.45}
+  #ahPop .wn{border:2px solid #dc2626;background:#fef2f2;color:#991b1b;border-radius:10px;padding:8px 10px;margin:0 0 8px;font-size:13px}
+  #ahPop .wn ul{margin:4px 0 0;padding-left:18px;max-height:120px;overflow-y:auto;overflow-x:hidden}
+  #ahPop .wn li[data-wk]{cursor:pointer;text-decoration:underline dotted}
+  #ahPop #ahAuto{display:block;margin:0 0 6px}
+  #ahPop td.c.pl{box-shadow:inset 0 -3px 0 #2563eb}
+  #ahPop td.c.warn{outline:2px solid #dc2626;outline-offset:-2px}
+  #ahPop td.c.warn::after{content:'⚠';font-size:10px;margin-left:1px}
+  .carbar .ahb.wn{border-color:#dc2626;background:#fef2f2;color:#991b1b}
   #ahPop .tabs{display:flex;gap:6px;margin:0 0 8px}
   #ahPop .tabs button{font:inherit;font-size:14px;font-weight:700;padding:6px 16px;border-radius:10px;border:1px solid var(--line);background:none;color:inherit;cursor:pointer}
   #ahPop .tabs button.on{background:var(--acc,#2563eb);border-color:var(--acc,#2563eb);color:#fff}
@@ -6950,9 +7118,9 @@ function drawAhead(){
   const p = document.getElementById('ahPop'), j = AH; if(!p || !j) return;
   const bx = p.querySelector('.bx');
   if(!bx.querySelector('#ahT')){
-    bx.innerHTML = '<div class="hd"><span>📅 สถานะรถ / พขร. — ' + dmy(j.days[0]) + ' ถึง ' + dmy(j.days[j.days.length - 1]) + '</span><button type="button" data-x="1" title="ปิด">✕</button></div>' +
-      '<div class="nav"><button type="button" data-nav="-14">◀ 14 วันก่อน</button><button type="button" data-nav="0">วันนี้</button>' +
-      '<button type="button" data-nav="14">14 วันถัดไป ▶</button><input type="date" id="ahFrom" value="' + AH_FROM + '" title="เริ่มดูตั้งแต่วันที่"></div>' +
+    bx.innerHTML = '<div class="hd"><span>📅 สถานะรถ / พขร. — ' + ahMonth(j.days[0]) + '</span><button type="button" data-x="1" title="ปิด">✕</button></div>' +
+      '<div class="nav"><button type="button" data-nav="-1">◀ เดือนก่อน</button><button type="button" data-nav="0">เดือนนี้</button>' +
+      '<button type="button" data-nav="1">เดือนถัดไป ▶</button><input type="month" id="ahFrom" value="' + AH_FROM.slice(0, 7) + '" title="เลือกเดือน"></div>' +
       (j.missing.length ? '<p class="tipd" style="color:#b45309">⚠ ยังไม่มีคอลัมน์ในชีต ' + j.missing.length + ' วัน (' + dmy(j.missing[0]) + ' เป็นต้นไป) — เพิ่มคอลัมน์เดือนนั้นในไฟล์ DEMO ข้อมูลรถ+พขร ก่อน</p>' : '') +
       (j.notes || []).map(n => '<p class="tipd" style="color:#b45309">⚠ ' + esc(n) + '</p>').join('') +
       '<div class="tabs"><button type="button" data-tab="car" class="' + (AH_TAB === 'car' ? 'on' : '') + '">🚛 รถ</button>' +
@@ -6961,10 +7129,12 @@ function drawAhead(){
       '<input id="ahBy" placeholder="👤 ชื่อผู้แก้ (ต้องใส่)" autocomplete="off" value="' + esc(ahByName()) + '">' +
       '<span id="ahSave" class="sv"></span>' +
       '<label><input type="checkbox" id="ahAll"' + (AH_ALL ? ' checked' : '') + '> แสดงทุกคัน / ทุกคน</label></div>' +
+      '<div id="ahWarn"></div><div id="ahAuto" class="sv"></div>' +
       '<div class="br"><b>🖌 ระบายสี:</b> ' + brushBtns(j) + '</div>' +
       '<div class="tw" id="ahT"></div>' +
       '<div class="lg"><span><i style="background:#fee2e2;border:1px solid #fca5a5"></i>ไม่พร้อม (ซ่อม/ลา/หยุด)</span><span><i style="background:#fef3c7;border:1px solid #fcd34d"></i>ไม่มีคนขับ (👤✕ = พขร. ประจำรถไม่มาทุกคน)</span>' +
-      '<span>ช่องว่าง = ยังไม่ได้ลง · <b>ลากผ่านช่องวัน = เลือกหลายวัน</b> (เลือกรหัสที่แถบระบายสีไว้ก่อน = บันทึกทันทีตอนปล่อย)</span></div>';
+      '<span><i style="background:none;border-bottom:3px solid #2563eb;border-radius:0"></i>มีงานในแผนงาน</span>' +
+      '<span>ช่องว่าง = ยังไม่ได้ลง · <b>ลากเป็นกรอบได้ (ซ้าย-ขวา / บน-ล่าง)</b> · เลือกรหัสที่แถบระบายสีไว้ก่อน = บันทึกทันทีตอนปล่อย</span></div>';
   }
   p.classList.toggle('paint', !!AH_BRUSH); ahSaving();
   const kd = (lg, c) => { const k = c ? stKind(lg, c) : ''; return k === 'down' ? 'dn' : k === 'nodriver' ? 'nd' : 'ok'; };
@@ -6977,24 +7147,97 @@ function drawAhead(){
     const ppl = [(CARS[k] || {}).d1, (CARS[k] || {}).d2].filter(Boolean); if(!ppl.length) return;
     j.days.forEach((d, i) => { if(ppl.every(nm => offDay[nm] && offDay[nm][i])){ carRows[k] = carRows[k] || j.days.map(() => ''); if(!carRows[k][i] || kd(j.car_legend, carRows[k][i]) === 'ok') carRows[k][i] = '👤✕'; } });
   });
+  const warn = ahWarnings(j), wk = {};                 // ช่องที่มีปัญหา: 'kind|key|date' → ข้อความ
+  warn.forEach(w => { wk[w.kind + '|' + w.key + '|' + w.date] = w.msg; });
+  const wbx = bx.querySelector('#ahWarn');
+  if(wbx) wbx.innerHTML = warn.length ? '<div class="wn"><b>⚠ ข้อมูลไม่ถูกต้อง ' + warn.length + ' จุด — กรุณาแก้ไข</b> (กดรายการเพื่อไปที่แถวนั้น)<ul>' +
+    warn.slice(0, 8).map(w => '<li data-wk="' + w.kind + '" data-wq="' + esc(w.key) + '">' + (w.kind === 'car' ? '🚛 ' : '👤 ') + esc(w.key) + ' · ' + dmy(w.date) + ' — ' + esc(w.msg) + '</li>').join('') +
+    (warn.length > 8 ? '<li class="mut">… และอีก ' + (warn.length - 8) + ' จุด</li>' : '') + '</ul></div>' : '';
+  if(AH_WARN !== warn.length){ AH_WARN = warn.length; updateCarBar(); }
   const bad = (lg, codes) => codes.some(c => c === '👤✕' || (c && kd(lg, c) !== 'ok'));
   const q = AH_Q.toLowerCase(), hit = t => !q || t.toLowerCase().indexOf(q) >= 0;
   const cars = Object.keys(carRows).filter(k => (AH_ALL || bad(j.car_legend, carRows[k])) && hit(k)).sort((a, b) => a.localeCompare(b, 'th', {numeric: true}));
   const ppl = j.drivers.filter(x => (AH_ALL || bad(j.driver_legend, x.codes)) && hit(x.key + ' ' + carsOf(x.key).join(' '))).sort((a, b) => a.key.localeCompare(b.key, 'th'));
   const head = '<tr><th class="nm">รถ / ชื่อ</th>' + j.days.map(d => { const w = new Date(d + 'T00:00:00').getDay();
     return '<th class="' + (w === 0 || w === 6 ? 'we ' : '') + (d === todayISO() ? 'cur' : '') + '">' + TH_DOW[w] + '<br>' + d.slice(8, 10) + '/' + d.slice(5, 7) + '</th>'; }).join('') + '</tr>';
-  const cell = (lg, c, d, k, kind, raw) => '<td class="c ' + (c === '👤✕' ? 'nd' : kd(lg, c)) + '" data-d="' + d + '" data-kind="' + kind + '" data-key="' + esc(k) + '" data-code="' + esc(raw) + '" title="' +
-    esc(k + ' · ' + dmy(d) + (c ? ' · ' + c + ' ' + (c === '👤✕' ? 'พขร. ประจำรถไม่มา' : stDesc(lg, c)) : ' · ยังไม่ได้ลง') + ' — กดเพื่อเปลี่ยนสถานะ') + '">' + esc(c) + '</td>';
+  const cell = (lg, c, d, k, kind, raw, pl) => { const w = wk[kind + '|' + k + '|' + d];
+    return '<td class="c ' + (c === '👤✕' ? 'nd' : kd(lg, c)) + (pl ? ' pl' : '') + (w ? ' warn' : '') + '" data-d="' + d + '" data-kind="' + kind + '" data-key="' + esc(k) + '" data-code="' + esc(raw) + '" title="' +
+    esc(k + ' · ' + dmy(d) + (c ? ' · ' + c + ' ' + (c === '👤✕' ? 'พขร. ประจำรถไม่มา' : stDesc(lg, c)) : ' · ยังไม่ได้ลง') + (pl ? ' · มีงานในแผนงาน' : '') + (w ? ' · ⚠ ' + w : '')) + '">' + esc(c) + '</td>'; };
+  const planOf = {};
+  j.cars.forEach(x => { planOf['car|' + x.key] = x.plan || []; }); j.drivers.forEach(x => { planOf['driver|' + x.key] = x.plan || []; });
   const span = j.days.length + 1;
   const sec = (t, n) => '<tr class="sec"><td colspan="' + span + '">' + t + ' (' + n + ')</td></tr>';
   p.querySelectorAll('[data-tab]').forEach(b => { b.textContent = (b.dataset.tab === 'car' ? '🚛 รถ (' + cars.length + ')' : '👤 พขร. (' + ppl.length + ')'); });
   const none = t => '<tr><td class="mut" colspan="' + span + '">' + t + '</td></tr>';
   const body = AH_TAB === 'car' ? (cars.map(k => '<tr><td class="nm" title="' + esc(k) + '">' + esc(k) + '</td>' +
-      carRows[k].map((c, i) => cell(j.car_legend, c, j.days[i], k, 'car', (carRaw[k] || [])[i] || '')).join('') + '</tr>').join('') || none(q ? 'ไม่พบรถที่ค้น' : 'ไม่มีรถที่ลงไม่พร้อมไว้')) :
+      carRows[k].map((c, i) => cell(j.car_legend, c, j.days[i], k, 'car', (carRaw[k] || [])[i] || '', (planOf['car|' + k] || [])[i])).join('') + '</tr>').join('') || none(q ? 'ไม่พบรถที่ค้น' : 'ไม่มีรถที่ลงไม่พร้อมไว้')) :
     (ppl.map(x => { const cs = carsOf(x.key);
       return '<tr><td class="nm" title="' + esc(x.key + (cs.length ? ' · ประจำรถ ' + cs.join(', ') : '')) + '">' + esc(x.key) + (cs.length ? ' <span class="mut">' + esc(cs.join(',')) + '</span>' : '') + '</td>' +
-        x.codes.map((c, i) => cell(j.driver_legend, c, j.days[i], x.key, 'driver', c)).join('') + '</tr>'; }).join('') || none(q ? 'ไม่พบชื่อที่ค้น' : 'ไม่มีคนที่ลงลา/หยุดไว้'));
+        x.codes.map((c, i) => cell(j.driver_legend, c, j.days[i], x.key, 'driver', c, (x.plan || [])[i])).join('') + '</tr>'; }).join('') || none(q ? 'ไม่พบชื่อที่ค้น' : 'ไม่มีคนที่ลงลา/หยุดไว้'));
   bx.querySelector('#ahT').innerHTML = '<table><thead>' + head + '</thead><tbody>' + body + '</tbody></table>';
+}
+let AH_WARN = 0;                                       // จำนวนจุดที่ข้อมูลไม่ถูก (โชว์บนปุ่มในแผงรถด้วย)
+function ahWarnings(j){
+  const out = [], lgs = {car: j.car_legend, driver: j.driver_legend};
+  const known = {car: new Set(j.car_legend.map(c => c.code.toUpperCase())), driver: new Set(j.driver_legend.map(c => c.code.toUpperCase()))};
+  [['car', j.cars], ['driver', j.drivers]].forEach(([kind, rows]) => rows.forEach(r => r.codes.forEach((c, i) => {
+    const d = j.days[i], pl = (r.plan || [])[i], k = c ? stKind(lgs[kind], c) : '';
+    let msg = '';
+    if(c && !known[kind].has(c.toUpperCase())) msg = 'รหัส "' + c + '" ไม่มีในตารางรหัส';
+    else if(pl && k === 'down') msg = 'มีงานในแผนงาน แต่ลง ' + c + ' ' + stDesc(lgs[kind], c);
+    else if(pl && kind === 'car' && k === 'nodriver') msg = 'มีงานในแผนงาน แต่ลง ' + c + ' ไม่มีคนขับ';
+    else if(!pl && kind === 'car' && k === 'run' && d >= j.today && j.has_plan) msg = 'ลง ' + c + ' วิ่งงาน แต่ไม่มีงานในแผนงาน';
+    if(msg) out.push({kind: kind, key: r.key, date: d, msg: msg});
+  })));
+  return out;
+}
+async function ahAutoFill(){                           // เติมจากแผนงาน: มีงาน → R/W · ไม่มีงาน → W/SB (วันนี้เป็นต้นไป)
+  const j = AH, el = () => document.getElementById('ahAuto');
+  if(!j || !j.auto_todo || j.block) return;
+  const from = AH_FROM;
+  if(el()){ el().textContent = '⏳ กำลังเติมสถานะจากแผนงาน ' + j.auto_todo + ' ช่อง…'; el().className = 'sv on'; }
+  let msg = '', res = null;
+  for(let t = 0; t < 4; t++){
+    try{
+      const r = await fetch('/api/plan/status/autofill', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({date: from, n: j.days.length, by: ahByName()})});
+      res = await r.json().catch(() => ({}));
+      msg = r.ok ? '' : (res.detail || ('HTTP ' + r.status));
+      if(r.status !== 429) break;
+    }catch(e){ msg = e.message; break; }
+    await new Promise(r => setTimeout(r, 6000 * (t + 1)));
+  }
+  if(AH !== j || AH_FROM !== from) return;
+  if(msg){ if(el()){ el().textContent = '⚠ เติมจากแผนงานไม่สำเร็จ: ' + msg; el().className = 'sv on'; } return; }
+  (res.cells || []).forEach(c => { const row = ahRow(c.kind, c.key), i = j.days.indexOf(c.date); if(i >= 0) row.codes[i] = c.code; });
+  j.auto_todo = 0;
+  if(el()){ el().textContent = '✓ เติมสถานะจากแผนงานแล้ว ' + (res.cells || []).length + ' ช่อง (มีงาน: รถ R · คน W — คนไม่มีงาน SB · รถไม่มีงานลงเอง)'; el().className = 'sv'; }
+  drawAhead();
+}
+// ลากเลือกหลายแถว (โหมด ✋) → หน้าต่างเลือกรหัส ลงให้ทุกแถวที่เลือก
+function multiAhead(rows, lo, hi, anchor){
+  closeStatus();
+  const kind = rows[0].kind, lg = kind === 'car' ? AH.car_legend : AH.driver_legend;
+  const nd = Math.round((new Date(hi) - new Date(lo)) / 86400000) + 1;
+  const cls = k => k === 'down' ? 'k-dn' : k === 'nodriver' ? 'k-nd' : 'k-ok';
+  const p = document.createElement('div'); p.id = 'stPop'; p.style.zIndex = 80;
+  p.innerHTML = '<div class="hd"><span>' + (kind === 'car' ? '🚛 ' : '👤 ') + rows.length + (kind === 'car' ? ' คัน' : ' คน') + ' × ' + nd + ' วัน</span><button type="button" data-x="1" title="ปิด">✕</button></div>' +
+    '<p style="margin:2px 0;font-weight:700;color:#1d4ed8">' + dmy(lo) + (hi > lo ? ' ถึง ' + dmy(hi) : '') + ' — กดรหัสได้เลย</p>' +
+    '<p class="mut" style="margin:0">' + rows.map(r => esc(r.key)).join(', ') + '</p>' +
+    '<div class="codes" style="margin-top:8px">' + lg.map(c => '<button type="button" data-code="' + esc(c.code) + '" class="' + cls(c.kind) + '" title="' + esc(c.desc) + '"><b>' + esc(c.code) + '</b>' + esc(c.desc) + '</button>').join('') +
+    '<button type="button" data-code="">✕ ล้าง</button></div>';
+  document.body.appendChild(p);
+  const r = anchor.getBoundingClientRect(), w = p.offsetWidth, h = p.offsetHeight;
+  p.style.left = Math.max(8, Math.min(r.right + 6, innerWidth - w - 8)) + 'px';
+  p.style.top = Math.max(8, Math.min(r.top, innerHeight - h - 8)) + 'px';
+  p.addEventListener('click', e => {
+    e.stopPropagation();
+    if(e.target.closest('[data-x]')){ closeStatus(); return; }
+    const b = e.target.closest('button[data-code]'); if(!b) return;
+    const by = editorName(); if(!by) return;
+    closeStatus();
+    rows.forEach(x => ahCommit(x.kind, x.key, lo, hi, b.dataset.code, x.old, by));
+  });
 }
 // กดช่องในตารางล่วงหน้า → ป๊อปอัปเลือกรหัส ลงชีต DEMO ทันที (ลงหลายวันได้) แล้ววาดตารางใหม่
 function editAhead(td, toPre){
@@ -7048,10 +7291,14 @@ function ahRow(kind, key){
   if(!row){ row = {key: key, codes: AH.days.map(() => '')}; list.push(row); }
   return row;
 }
-function markDrag(){
-  if(!AH_DRAG) return;
-  const lo = AH_DRAG.a < AH_DRAG.b ? AH_DRAG.a : AH_DRAG.b, hi = AH_DRAG.a < AH_DRAG.b ? AH_DRAG.b : AH_DRAG.a;
-  AH_DRAG.tr.querySelectorAll('td.c[data-d]').forEach(t => t.classList.toggle('pt', t.dataset.d >= lo && t.dataset.d <= hi));
+function dragRows(g){                                  // แถว (tr) ในกรอบที่ลาก บน→ล่าง
+  const all = [...document.querySelectorAll('#ahT tbody tr')], i0 = all.indexOf(g.tr), i1 = all.indexOf(g.tr2 || g.tr);
+  return all.slice(Math.min(i0, i1), Math.max(i0, i1) + 1).filter(tr => tr.querySelector('td.c[data-d]'));
+}
+function markDrag(g){
+  g = g || AH_DRAG; if(!g) return;
+  const lo = g.a < g.b ? g.a : g.b, hi = g.a < g.b ? g.b : g.a, rows = new Set(dragRows(g));
+  document.querySelectorAll('#ahT td.c[data-d]').forEach(t => t.classList.toggle('pt', rows.has(t.parentNode) && t.dataset.d >= lo && t.dataset.d <= hi));
 }
 let AH_SAVING = 0, AH_CHAIN = Promise.resolve();          // จำนวนที่รอบันทึก · คิวส่งทีละรายการ (กันเขียนชนกันเอง)
 function ahSaving(){
@@ -7093,37 +7340,50 @@ function ahCommit(kind, key, lo, hi, code, old, by){
     }
   });
 }
+function dragTargets(g){                               // [{kind, key, old(รหัสวันแรก), cells}] ของทุกแถวในกรอบ
+  const lo = g.a < g.b ? g.a : g.b, hi = g.a < g.b ? g.b : g.a;
+  return dragRows(g).map(tr => { const cells = [...tr.querySelectorAll('td.c[data-d]')].filter(t => t.dataset.d >= lo && t.dataset.d <= hi);
+    return cells.length ? {kind: cells[0].dataset.kind, key: cells[0].dataset.key, old: cells[0].dataset.code || '', cells: cells} : null; }).filter(Boolean);
+}
 function paintAhead(g){
   const lo = g.a < g.b ? g.a : g.b, hi = g.a < g.b ? g.b : g.a, code = AH_BRUSH ? AH_BRUSH.code : null;
-  const cells = [...g.tr.querySelectorAll('td.c[data-d]')].filter(t => t.dataset.d >= lo && t.dataset.d <= hi);
-  if(code === null || cells.every(t => (t.dataset.code || '').toUpperCase() === code.toUpperCase())){ drawAhead(); return; }
+  const ts = dragTargets(g).filter(x => code !== null && !x.cells.every(t => (t.dataset.code || '').toUpperCase() === code.toUpperCase()));
+  if(!ts.length){ drawAhead(); return; }
   const by = editorName(); if(!by){ drawAhead(); return; }
-  ahCommit(g.kind, g.key, lo, hi, code, cells[0].dataset.code || '', by);
+  ts.forEach(x => ahCommit(x.kind, x.key, lo, hi, code, x.old, by));
 }
 document.addEventListener('pointermove', e => {
   if(!AH_DRAG) return;
   const el = document.elementFromPoint(e.clientX, e.clientY), td = el && el.closest && el.closest('#ahPop td.c[data-d]');
-  if(td && td.parentNode === AH_DRAG.tr && td.dataset.d !== AH_DRAG.b){ AH_DRAG.b = td.dataset.d; markDrag(); }
+  if(td && (td.dataset.d !== AH_DRAG.b || td.parentNode !== AH_DRAG.tr2)){ AH_DRAG.b = td.dataset.d; AH_DRAG.tr2 = td.parentNode; markDrag(); }
 });
 document.addEventListener('pointerup', () => {
   if(!AH_DRAG) return;
   const g = AH_DRAG; AH_DRAG = null;
   if(AH_BRUSH){ paintAhead(g); return; }
-  const lo = g.a < g.b ? g.a : g.b, hi = g.a < g.b ? g.b : g.a, td = g.tr.querySelector('td.c[data-d="' + lo + '"]');
-  if(td){ editAhead(td, hi); g.tr.querySelectorAll('td.c[data-d]').forEach(t => t.classList.toggle('pt', t.dataset.d >= lo && t.dataset.d <= hi)); }
+  const lo = g.a < g.b ? g.a : g.b, hi = g.a < g.b ? g.b : g.a, ts = dragTargets(g);
+  if(!ts.length) return;
+  if(ts.length === 1) editAhead(ts[0].cells[0], hi); else multiAhead(ts, lo, hi, ts[ts.length - 1].cells[ts[ts.length - 1].cells.length - 1]);
+  markDrag(g);
 });
 document.addEventListener('pointercancel', () => { if(!AH_DRAG) return; AH_DRAG = null; drawAhead(); });
-let AH_FROM = '';                                     // วันแรกของช่วง 14 วันที่ดูอยู่ (ย้อนหลัง/ล่วงหน้า)
+let AH_FROM = '';                                     // วันที่ 1 ของเดือนที่ดูอยู่
+const TH_MON = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'];
+function ahMonth(iso){ return TH_MON[+iso.slice(5, 7) - 1] + ' ' + iso.slice(0, 4); }
+function ahAddMonth(iso, n){ const d = new Date(Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1 + n, 1)); return d.toISOString().slice(0, 10); }
+function ahDays(iso){ return new Date(Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7), 0)).getUTCDate(); }
 async function openAhead(from){
   closeAhead(); closeStatus();
-  from = from || (DATA && DATA.date) || todayISO(); AH_FROM = from; AH = null;
+  from = (from || (DATA && DATA.date) || todayISO()).slice(0, 7) + '-01'; AH_FROM = from; AH = null;
   const p = document.createElement('div'); p.id = 'ahPop';
-  p.innerHTML = '<div class="bx"><div class="hd"><span>📅 สถานะรถ / พขร. — ' + dmy(from) + ' ถึง ' + dmy(shift(from, 13)) + '</span><button type="button" data-x="1">✕</button></div>' +
-    '<div class="nav"><button type="button" data-nav="-14">◀ 14 วันก่อน</button><button type="button" data-nav="0">วันนี้</button>' +
-      '<button type="button" data-nav="14">14 วันถัดไป ▶</button><input type="date" id="ahFrom" value="' + AH_FROM + '" title="เริ่มดูตั้งแต่วันที่"></div>' + '<p class="mut">⏳ กำลังโหลด…</p></div>';
+  p.innerHTML = '<div class="bx"><div class="hd"><span>📅 สถานะรถ / พขร. — ' + ahMonth(from) + '</span><button type="button" data-x="1">✕</button></div>' +
+    '<div class="nav"><button type="button" data-nav="-1">◀ เดือนก่อน</button><button type="button" data-nav="0">เดือนนี้</button>' +
+      '<button type="button" data-nav="1">เดือนถัดไป ▶</button><input type="month" id="ahFrom" value="' + AH_FROM.slice(0, 7) + '" title="เลือกเดือน"></div>' + '<p class="mut">⏳ กำลังโหลด…</p></div>';
   document.body.appendChild(p);
   p.addEventListener('click', e => {
     if(e.target === p || e.target.closest('[data-x]')){ closeAhead(); return; }
+    const wl = e.target.closest('li[data-wk]');
+    if(wl){ AH_TAB = wl.dataset.wk; AH_Q = wl.dataset.wq; AH_BRUSH = null; p.querySelector('.bx').innerHTML = ''; drawAhead(); return; }
     const tb = e.target.closest('[data-tab]');
     if(tb){ if(AH_TAB !== tb.dataset.tab){ AH_TAB = tb.dataset.tab; AH_BRUSH = null; AH_Q = ''; p.querySelector('.bx').innerHTML = ''; drawAhead(); } return; }
     const bb = e.target.closest('[data-br]');
@@ -7133,7 +7393,7 @@ async function openAhead(from){
       p.classList.toggle('paint', !!AH_BRUSH); return;
     }
     const nv = e.target.closest('[data-nav]');
-    if(nv){ const n = +nv.dataset.nav; openAhead(n ? shift(AH_FROM, n) : todayISO()); return; }
+    if(nv){ const n = +nv.dataset.nav; openAhead(n ? ahAddMonth(AH_FROM, n) : todayISO()); return; }
     if(e.target.closest('.tl')) return;
     // ช่องวัน: จัดการใน pointerdown/up (กดช่องเดียว = เลือกรหัส · ลาก = เลือกหลายวัน)
   });
@@ -7144,7 +7404,7 @@ async function openAhead(from){
       toast('รหัส ' + AH_BRUSH.code + ' ใช้กับแถว' + (AH_BRUSH.kind === 'car' ? 'รถ' : ' พขร.') + 'เท่านั้น', true); return;
     }
     e.preventDefault();
-    AH_DRAG = {kind: td.dataset.kind, key: td.dataset.key, a: td.dataset.d, b: td.dataset.d, tr: td.parentNode};
+    AH_DRAG = {kind: td.dataset.kind, key: td.dataset.key, a: td.dataset.d, b: td.dataset.d, tr: td.parentNode, tr2: td.parentNode};
     markDrag();
   });
   p.addEventListener('input', e => {
@@ -7153,17 +7413,19 @@ async function openAhead(from){
   });
   p.addEventListener('change', e => {
     if(e.target.id === 'ahAll'){ AH_ALL = e.target.checked; drawAhead(); }
-    if(e.target.id === 'ahFrom' && e.target.value) openAhead(e.target.value);
+    if(e.target.id === 'ahFrom' && e.target.value) openAhead(e.target.value + '-01');
   });
   let j = null, msg = '';
   try{
-    const r = await fetch('/api/plan/status/ahead?n=14&all=1&date=' + from); j = await r.json().catch(() => null);
+    const r = await fetch('/api/plan/status/ahead?all=1&n=' + ahDays(from) + '&date=' + from); j = await r.json().catch(() => null);
     if(!r.ok || !j) msg = 'HTTP ' + r.status + (j && j.detail ? ' — ' + j.detail : '');
   }catch(e){ msg = e.message; }
   const bx = p.querySelector('.bx'); if(!bx) return;
   if(!document.getElementById('ahPop') || AH_FROM !== from) return;          // กดเลื่อนช่วงไปแล้ว ผลเก่าทิ้ง
   if(msg){ bx.querySelector('p.mut').textContent = '⚠ โหลดไม่ได้: ' + msg; return; }
-  AH = j; bx.innerHTML = ''; drawAhead();
+  AH = j; bx.innerHTML = ''; drawAhead(); ahAutoFill();
+  const tw = p.querySelector('#ahT'), th = tw && tw.querySelector('th.cur');
+  if(th) tw.scrollLeft = Math.max(0, th.offsetLeft - 260);
 }
 document.addEventListener('keydown', e => { if(e.key === 'Escape' && !document.getElementById('stPop')) closeAhead(); });
 function updateCarBar(){
@@ -7202,7 +7464,7 @@ function updateCarBar(){
     (STATUS_ERR && STATUS_ERR.date === DATA.date ? '<p class="tipd" style="color:#b91c1c">⚠ อ่านสถานะรถ/พขร. จากไฟล์ DEMO ไม่ได้: ' + esc(STATUS_ERR.msg) +
       ' <a href="#" id="stRetry">ลองใหม่</a></p>' : (!STATUS || STATUS.date !== DATA.date ? '<p class="tipd">⏳ กำลังโหลดสถานะรถ/พขร.…</p>' : '')) +
     (STATUS && STATUS.date === DATA.date && STATUS.notes && STATUS.notes.length ? '<p class="tipd" style="color:#b45309">⚠ ' + STATUS.notes.map(esc).join(' · ') + '</p>' : '') +
-    (ok ? '<button type="button" class="ahb" id="ahBtn">📅 ดูสถานะ 14 วัน (ย้อนหลัง / ล่วงหน้า) — รถซ่อม / คนลา</button>' : '') +
+    (ok ? '<button type="button" class="ahb' + (AH_WARN ? ' wn' : '') + '" id="ahBtn">📅 สถานะรถ / พขร. ทั้งเดือน — รถซ่อม / คนลา' + (AH_WARN ? ' · ⚠ ต้องแก้ ' + AH_WARN + ' จุด' : '') + '</button>' : '') +
     (ok ? '<input class="drvq" id="drvQ" list="drvList" placeholder="🔍 ลงลา/สถานะ พขร. (พิมพ์ชื่อ)" autocomplete="off">' +
       '<datalist id="drvList">' + Object.keys(STATUS.drivers).sort((a, b) => a.localeCompare(b, 'th')).map(nm => '<option value="' + esc(nm) + '"></option>').join('') + '</datalist>' : '') +
     '<h4>🟢 ว่าง (' + free.length + ')</h4>' + (free.length ? '<div class="g2">' + free.map(k => chip(k, 'f', '')).join('') + '</div>' : '<div class="mut">ไม่มีรถว่าง</div>') +
