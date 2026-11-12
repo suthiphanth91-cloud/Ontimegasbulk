@@ -6735,16 +6735,22 @@ function refreshCarList(cellRows){             // รายการเบอร
   dl.innerHTML = free.concat(busy).map(k => '<option value="' + esc(k) + '" label="' + esc(useText(use[k])) + '"></option>').join('');
 }
 // ── สถานะรถ/พขร. รายวัน (ไฟล์ DEMO ข้อมูลรถ+พขร): ดูบนการ์ดรถ + กดป้ายเพื่อแก้ ──
-let STATUS = null, STATUS_LOADING = '';
+let STATUS = null, STATUS_LOADING = '', STATUS_ERR = null;      // STATUS_ERR = {date, msg} — โหลดไม่ได้ ไม่ลองซ้ำเองจนกว่าจะกดลองใหม่
 async function loadStatus(d){
-  if(!d || STATUS_LOADING === d) return;
+  if(!d || STATUS_LOADING === d || (STATUS_ERR && STATUS_ERR.date === d)) return;
   STATUS_LOADING = d;
+  let msg = '';
   try{
-    const r = await fetch('/api/plan/status?date=' + d), j = await r.json();
-    if(r.ok && DATA && DATA.date === d){ STATUS = j; updateCarBar(); }
-  }catch(e){}
+    const r = await fetch('/api/plan/status?date=' + d), t = await r.text();
+    let j = null; try{ j = JSON.parse(t); }catch(e){}
+    if(r.ok && j){ if(DATA && DATA.date === d){ STATUS = j; STATUS_ERR = null; } }
+    else msg = 'HTTP ' + r.status + (j && j.detail ? ' — ' + j.detail : (r.status === 504 ? ' — ใช้เวลานานเกิน' : ''));
+  }catch(e){ msg = e.message; }
+  if(msg) STATUS_ERR = {date: d, msg: msg};
   STATUS_LOADING = '';
+  if(DATA && DATA.date === d) updateCarBar();
 }
+function retryStatus(){ STATUS_ERR = null; STATUS = null; loadStatus(DATA && DATA.date); updateCarBar(); }
 function stKind(lg, code){ const x = (lg || []).find(c => c.code.toUpperCase() === String(code || '').toUpperCase()); return x ? x.kind : (code ? 'down' : ''); }
 function stDesc(lg, code){ const x = (lg || []).find(c => c.code.toUpperCase() === String(code || '').toUpperCase()); return x ? x.desc : ''; }
 function carCode(k){ return STATUS && STATUS.date === (DATA && DATA.date) ? (STATUS.cars[k] || '') : ''; }
@@ -6825,11 +6831,15 @@ function updateCarBar(){
   bar.innerHTML = '<div class="hd2">🚛 รถวันที่ ' + dmy(DATA.date) + '</div>' +
     '<div class="sum2"><span class="on">จัดแล้ว <b>' + busy.length + '</b></span><span class="free">ว่าง <b>' + free.length + '</b></span><span class="mut">/ ' + cars.length + ' คัน</span></div>' +
     '<p class="tipd">' + (EDITING ? '✋ ลากรถไปวางบนแถวในตาราง = ใส่เบอร์รถ' : '✋ กด "โหมดแก้ไข" ก่อน แล้วลากรถไปวางบนแถวได้') + ' · กดชื่อรถ = ดูงานของคันนั้น · กดป้ายรหัส = แก้สถานะรถ/พขร.</p>' +
+    (STATUS_ERR && STATUS_ERR.date === DATA.date ? '<p class="tipd" style="color:#b91c1c">⚠ อ่านสถานะรถ/พขร. จากไฟล์ DEMO ไม่ได้: ' + esc(STATUS_ERR.msg) +
+      ' <a href="#" id="stRetry">ลองใหม่</a></p>' : (!STATUS || STATUS.date !== DATA.date ? '<p class="tipd">⏳ กำลังโหลดสถานะรถ/พขร.…</p>' : '')) +
+    (STATUS && STATUS.date === DATA.date && STATUS.notes && STATUS.notes.length ? '<p class="tipd" style="color:#b45309">⚠ ' + STATUS.notes.map(esc).join(' · ') + '</p>' : '') +
     '<h4>🟢 ว่าง (' + free.length + ')</h4>' + (free.length ? '<div class="g2">' + free.map(k => chip(k, 'f', '')).join('') + '</div>' : '<div class="mut">ไม่มีรถว่าง</div>') +
     (off.length ? '<h4>🔴 ไม่พร้อม (' + off.length + ')</h4><div class="g2">' + off.map(k => chip(k, 'x', '')).join('') + '</div>' : '') +
     '<h4>🔵 จัดแล้ว (' + busy.length + ')</h4>' + (busy.map(k => chip(k, 'u', (use[k].trips.map(t => t.replace('เที่ยว ', 'ท.')).join(',') || '') + ' · ' + use[k].drops + 'd')).join('') || '<div class="mut">ยังไม่มี</div>');
 }
 document.addEventListener('click', e => {
+  if(e.target.id === 'stRetry'){ e.preventDefault(); retryStatus(); return; }
   const sb = e.target.closest && e.target.closest('#carbar .stb');
   if(sb){ e.stopPropagation(); const o = document.getElementById('stPop'); closeStatus(); if(!o || !o.dataset || o.dataset.car !== sb.dataset.st) openStatus(sb.dataset.st, sb); return; }
   const cp = e.target.closest && e.target.closest('#carbar .cp');
