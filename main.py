@@ -3975,30 +3975,55 @@ def _ahead_data(day: str, n: int, fresh: bool = False) -> dict:
             out.append({"key": r["key"], "codes": codes, "plan": plan, "row": r["row"]})
         return out, cols, auto
 
+    def real_codes(tab, need, first, rows, kind):
+        """รหัสในไฟล์จริง (CARS_SHEET_ID — อ่านอย่างเดียว) ของแต่ละแถว/วัน → ใส่ r["real"] ไว้คัดลอกมาช่องที่ DEMO ยังว่าง"""
+        if not CARS_SHEET_ID or CARS_SHEET_ID == STATUS_SHEET_ID:
+            return
+        try:
+            rs = _ready_sheet(tab, need, day, first, sid=CARS_SHEET_ID)
+        except Exception:
+            return
+        cols = [(rs.get("days") or {}).get(d) for d in span]
+        mp = {}
+        for x in rs["rows"]:
+            mp.setdefault(x["key"], [(_cell(x["cells"], c).upper() if c is not None else "") for c in cols])
+        for r in rows:
+            r["real"] = mp.get(r["key"], [""] * len(span))
+
     cars, c_cols, c_auto = pick(cs, lambda r: bool(_CAR_RE.match(r["key"])), "car")
     drivers, d_cols, d_auto = pick(ds, lambda r: r["key"] not in _NO_PERSON and staff(r), "driver")
+    real_codes(READY_CAR_TAB, ["เบอร์รถ", "ทะเบียนรถ"], READY_CAR_FIRST_ROW, cars, "car")
+    real_codes(READY_DRIVER_TAB, ["ชื่อ-สกุล"], READY_DRIVER_FIRST_ROW, drivers, "driver")
+    legends = {"car": {k.upper(): k for k in cs["legend"]}, "driver": {k.upper(): k for k in ds["legend"]}}
     miss = sorted({d for d, c in zip(span, c_cols) if c is None} | {d for d, c in zip(span, d_cols) if c is None})
     return {"from": day, "days": span, "cars": cars, "drivers": drivers, "today": _thai_now().strftime("%Y-%m-%d"),
             "car_legend": _status_legend(cs["legend"]), "driver_legend": _status_legend(ds["legend"]),
-            "auto": {"car": list(c_auto) if c_auto else None, "driver": list(d_auto) if d_auto else None},
+            "auto": {"car": list(c_auto) if c_auto else None, "driver": list(d_auto) if d_auto else None}, "_lg": legends,
             "has_plan": prow is not None, "missing": miss, "_cols": {"car": c_cols, "driver": d_cols},
             "notes": [x for x in (cs["note"], ds["note"]) if x and "ยังไม่มีคอลัมน์" not in x]
                      + ([] if prow is not None else ["อ่านชีตแผนงานไม่ได้ — ยังเติมสถานะจากแผนงานไม่ได้"])}
 
 
 def _auto_todo(data: dict) -> list:
-    """ช่องที่ต้องเติม/ปรับตามแผนงาน: วันนี้เป็นต้นไป · ช่องว่าง หรือเป็นรหัสอัตโนมัติที่ไม่ตรงแผนแล้ว"""
+    """ช่องที่ต้องเติมลงไฟล์ DEMO:
+    1) ช่องที่ DEMO ยังว่าง แต่ไฟล์จริงลงรหัสไว้ → คัดลอกรหัสจากไฟล์จริง (ทุกวันในเดือน · ไม่ทับที่ลงไว้แล้ว)
+    2) วันนี้เป็นต้นไป · ช่องว่าง หรือเป็นรหัสอัตโนมัติที่ไม่ตรงแผนแล้ว → ตามแผนงาน"""
     out = []
     for kind, rows in (("car", data["cars"]), ("driver", data["drivers"])):
         auto = data["auto"][kind]
-        if not auto:
-            continue
+        lg = data.get("_lg", {}).get(kind, {})
         for r in rows:
             for i, d in enumerate(data["days"]):
-                if d < data["today"] or data["_cols"][kind][i] is None:
+                if data["_cols"][kind][i] is None:
+                    continue
+                cur = r["codes"][i]
+                real = (r.get("real") or [""] * len(data["days"]))[i]
+                if not cur and real and real in lg:
+                    out.append({"kind": kind, "key": r["key"], "date": d, "i": i, "row": r["row"], "old": cur, "code": lg[real]})
+                    continue
+                if not auto or d < data["today"]:
                     continue
                 want = auto[0] if r["plan"][i] else auto[1]
-                cur = r["codes"][i]
                 swap = {c for c in auto if c} | ({"W"} if kind == "car" else set())   # รถ: W ที่คนลงไว้ มีงานเข้าแล้ว → R
                 if want and cur != want and (not cur or cur in swap):
                     out.append({"kind": kind, "key": r["key"], "date": d, "i": i, "row": r["row"], "old": cur, "code": want})
@@ -4013,8 +4038,8 @@ def plan_status_ahead(date_str: str = Query(None, alias="date"), n: int = Query(
     data["auto_todo"] = len(_auto_todo(data))
     data["block"] = _status_block()
     for r in data["cars"] + data["drivers"]:
-        r.pop("row", None)
-    data.pop("_cols", None)
+        r.pop("row", None); r.pop("real", None)
+    data.pop("_cols", None); data.pop("_lg", None)
     return data
 
 
@@ -4060,7 +4085,7 @@ def plan_status_autofill(p: AutoFill):
     for kind, tab in tabs.items():
         k = [t for t in todo if t["kind"] == kind]
         if k:
-            rows.append([now, by, tab, f"เติมจากแผนงาน {len({t['key'] for t in k})} รายการ", f"{min(t['date'] for t in k)} ถึง {max(t['date'] for t in k)}",
+            rows.append([now, by, tab, f"เติมจากไฟล์จริง/แผนงาน {len({t['key'] for t in k})} รายการ", f"{min(t['date'] for t in k)} ถึง {max(t['date'] for t in k)}",
                          f"{len(k)} ช่อง", "ว่าง/อัตโนมัติ", "/".join(c for c in STATUS_AUTO[kind] if c)])
     try:
         sh.values_append(f"'{STATUS_LOG_TAB}'!A1", {"valueInputOption": "RAW"}, {"values": rows})
@@ -7195,7 +7220,7 @@ async function ahAutoFill(){                           // เติมจาก�
   const j = AH, el = () => document.getElementById('ahAuto');
   if(!j || !j.auto_todo || j.block) return;
   const from = AH_FROM;
-  if(el()){ el().textContent = '⏳ กำลังเติมสถานะจากแผนงาน ' + j.auto_todo + ' ช่อง…'; el().className = 'sv on'; }
+  if(el()){ el().textContent = '⏳ กำลังเติมสถานะจากไฟล์จริง/แผนงาน ' + j.auto_todo + ' ช่อง…'; el().className = 'sv on'; }
   let msg = '', res = null;
   for(let t = 0; t < 4; t++){
     try{
@@ -7208,10 +7233,10 @@ async function ahAutoFill(){                           // เติมจาก�
     await new Promise(r => setTimeout(r, 6000 * (t + 1)));
   }
   if(AH !== j || AH_FROM !== from) return;
-  if(msg){ if(el()){ el().textContent = '⚠ เติมจากแผนงานไม่สำเร็จ: ' + msg; el().className = 'sv on'; } return; }
+  if(msg){ if(el()){ el().textContent = '⚠ เติมจากไฟล์จริง/แผนงานไม่สำเร็จ: ' + msg; el().className = 'sv on'; } return; }
   (res.cells || []).forEach(c => { const row = ahRow(c.kind, c.key), i = j.days.indexOf(c.date); if(i >= 0) row.codes[i] = c.code; });
   j.auto_todo = 0;
-  if(el()){ el().textContent = '✓ เติมสถานะจากแผนงานแล้ว ' + (res.cells || []).length + ' ช่อง (มีงาน: รถ R · คน W — คนไม่มีงาน SB · รถไม่มีงานลงเอง)'; el().className = 'sv'; }
+  if(el()){ el().textContent = '✓ เติมสถานะแล้ว ' + (res.cells || []).length + ' ช่อง (ช่องว่าง: คัดลอกจากไฟล์จริงก่อน · วันนี้เป็นต้นไปตามแผนงาน รถมีงาน R · คนมีงาน W / ไม่มีงาน SB)'; el().className = 'sv'; }
   drawAhead();
 }
 // ลากเลือกหลายแถว (โหมด ✋) → หน้าต่างเลือกรหัส ลงให้ทุกแถวที่เลือก
