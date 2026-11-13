@@ -3278,6 +3278,60 @@ def plan_edit(p: PlanEdit):
             "overwrote_formula": is_formula, "logged": logged}
 
 
+class PlanCancel(BaseModel):
+    row: int
+    key: str = ""        # "เลข JOB|Drop" ของแถวที่เห็น กันแถวเลื่อน
+    cancel: bool = True  # True = ยกเลิกงาน · False = คืนงาน
+    by: str = ""
+
+
+@app.post("/api/plan/cancel", include_in_schema=False)
+def plan_cancel(p: PlanCancel):
+    """ยกเลิกงาน 1 แถว: ช่อง AA (สถานะจัดส่ง) = "ยกเลิก" · คืนงาน = ล้างช่อง AA (เฉพาะที่เป็นยกเลิก ไม่แตะ "โหลดเก็บ")"""
+    block = _write_block_reason("PLAN_EDIT_ENABLED")
+    if block:
+        raise HTTPException(403, block)
+    if p.row < 2:
+        raise HTTPException(400, "ตำแหน่งแถวไม่ถูกต้อง")
+    letter = _col_letter(PLAN_STATUS + 1)
+    try:
+        ws, sh = _plan_ws()
+        got = ws.get(f"A{p.row}:{letter}{p.row}")
+        cur = list(got[0]) if got else []
+    except Exception as e:
+        _gs_forget()
+        raise HTTPException(502, f"อ่านชีตไม่ได้ — {type(e).__name__}")
+    cur += [""] * (PLAN_STATUS + 1 - len(cur))
+    cur_key = f"{cur[1]}|{cur[13]}" if cur[1] else ""
+    if not any(str(x).strip() for x in cur) or p.key != cur_key:
+        return JSONResponse(status_code=409, content={"detail": "แถวนี้ในชีตเปลี่ยนไปแล้ว (มีคนแก้หรือแทรกแถว) — กดรีเฟรชแล้วลองใหม่"})
+    old = str(cur[PLAN_STATUS]).strip()
+    if p.cancel:
+        if "ยกเลิก" in old:
+            return {"ok": True, "status": old, "row": p.row}
+        if old:
+            return JSONResponse(status_code=409, content={"detail": f"ช่องสถานะจัดส่งของแถวนี้เป็น “{old}” อยู่แล้ว — แก้ในชีตเอง", "status": old})
+        new = "ยกเลิก"
+    else:
+        if "ยกเลิก" not in old:
+            return JSONResponse(status_code=409, content={"detail": "แถวนี้ไม่ได้ยกเลิกไว้", "status": old})
+        new = ""
+    try:
+        ws.update(values=[[new]], range_name=f"{letter}{p.row}", value_input_option="RAW")
+    except Exception as e:
+        _gs_forget()
+        raise HTTPException(502, f"เขียนลงชีตไม่สำเร็จ — {type(e).__name__}")
+    _drop_sheet_cache(PLAN_PAGE_ID, PLAN_PAGE_TAB)
+    try:
+        _editlog_ws(sh).append_row([_thai_now().strftime("%Y-%m-%d %H:%M:%S"), p.by[:60], p.row, letter, old, new, cur_key,
+                                    "ยกเลิกงาน" if p.cancel else "คืนงาน"], value_input_option="RAW")
+    except Exception:
+        _gs_cache.pop("log", None)
+    global _recent_cache
+    _recent_cache = (0.0, None)
+    return {"ok": True, "status": new, "row": p.row}
+
+
 _recent_cache: tuple = (0.0, None)
 
 
@@ -6636,6 +6690,10 @@ PLAN_HTML = """<!doctype html>
   th.sk1,td.sk1{left:0;min-width:52px}
   th.sk2,td.sk2{left:52px;border-right:2px solid var(--line)}
   td.rn{color:var(--mut);font-size:12px}
+  td.rn .cxb{margin-top:3px;font:inherit;font-size:11px;padding:1px 6px;border-radius:6px;border:1px solid #fca5a5;background:none;color:#b91c1c;cursor:pointer;white-space:nowrap}
+  td.rn .cxb:hover{background:#fee2e2}
+  td.rn .cxb.on{border-color:#86efac;color:#166534}
+  td.rn .cxb.on:hover{background:#dcfce7}
   td.tm{font-weight:700;font-variant-numeric:tabular-nums}
   td.cust{font-weight:600;max-width:280px;overflow:hidden;text-overflow:ellipsis}
   td.car{font-weight:700;color:#7c3aed}
@@ -6714,6 +6772,7 @@ PLAN_HTML = """<!doctype html>
   #ahPop td.dn{background:#fee2e2;color:#991b1b}
   #ahPop td.nd{background:#fef3c7;color:#92400e}
   #ahPop td.ok{color:var(--mut);font-weight:400}
+  #ahPop td.run{background:#dcfce7;color:#166534}
   #ahPop .nav{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 8px}
   #ahPop .nav button,#ahPop .nav input{font:inherit;font-size:13px;padding:4px 10px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:inherit;cursor:pointer}
   #ahPop .nav button:hover{border-color:#2563eb;color:#2563eb}
@@ -7157,7 +7216,8 @@ function drawAhead(){
       '<div id="ahWarn"></div><div id="ahAuto" class="sv"></div>' +
       '<div class="br"><b>🖌 ระบายสี:</b> ' + brushBtns(j) + '</div>' +
       '<div class="tw" id="ahT"></div>' +
-      '<div class="lg"><span><i style="background:#fee2e2;border:1px solid #fca5a5"></i>ไม่พร้อม (ซ่อม/ลา/หยุด)</span><span><i style="background:#fef3c7;border:1px solid #fcd34d"></i>ไม่มีคนขับ (👤✕ = พขร. ประจำรถไม่มาทุกคน)</span>' +
+      '<div class="lg"><span><i style="background:#dcfce7;border:1px solid #86efac"></i>วิ่งงาน / ทำงาน</span><span><i style="background:#fff;border:1px solid #d1d5db"></i>ว่าง / พร้อมใช้</span>' +
+      '<span><i style="background:#fef3c7;border:1px solid #fcd34d"></i>ไม่มีคนขับ (D · 👤✕ = พขร. ประจำรถไม่มาทุกคน)</span><span><i style="background:#fee2e2;border:1px solid #fca5a5"></i>ไม่พร้อม (ซ่อม/เช็ค/ลา/หยุด)</span>' +
       '<span><i style="background:none;border-bottom:3px solid #2563eb;border-radius:0"></i>มีงานในแผนงาน</span>' +
       '<span>ช่องว่าง = ยังไม่ได้ลง · <b>ลากเป็นกรอบได้ (ซ้าย-ขวา / บน-ล่าง)</b> · เลือกรหัสที่แถบระบายสีไว้ก่อน = บันทึกทันทีตอนปล่อย</span></div>';
   }
@@ -7170,7 +7230,8 @@ function drawAhead(){
   j.cars.forEach(x => { carRows[x.key] = x.codes.slice(); carRaw[x.key] = x.codes; });
   Object.keys(CARS || {}).forEach(k => {
     const ppl = [(CARS[k] || {}).d1, (CARS[k] || {}).d2].filter(Boolean); if(!ppl.length) return;
-    j.days.forEach((d, i) => { if(ppl.every(nm => offDay[nm] && offDay[nm][i])){ carRows[k] = carRows[k] || j.days.map(() => ''); if(!carRows[k][i] || kd(j.car_legend, carRows[k][i]) === 'ok') carRows[k][i] = '👤✕'; } });
+    j.days.forEach((d, i) => { if(ppl.every(nm => offDay[nm] && offDay[nm][i])){ carRows[k] = carRows[k] || j.days.map(() => ''); const cc = carRows[k][i], pl = ((j.cars.find(x => x.key === k) || {}).plan || [])[i];
+      if(!pl && (!cc || (kd(j.car_legend, cc) === 'ok' && stKind(j.car_legend, cc) !== 'run'))) carRows[k][i] = '👤✕'; } });
   });
   const warn = ahWarnings(j), wk = {};                 // ช่องที่มีปัญหา: 'kind|key|date' → ข้อความ
   warn.forEach(w => { wk[w.kind + '|' + w.key + '|' + w.date] = w.msg; });
@@ -7186,7 +7247,8 @@ function drawAhead(){
   const head = '<tr><th class="nm">รถ / ชื่อ</th>' + j.days.map(d => { const w = new Date(d + 'T00:00:00').getDay();
     return '<th class="' + (w === 0 || w === 6 ? 'we ' : '') + (d === todayISO() ? 'cur' : '') + '">' + TH_DOW[w] + '<br>' + d.slice(8, 10) + '/' + d.slice(5, 7) + '</th>'; }).join('') + '</tr>';
   const cell = (lg, c, d, k, kind, raw, pl) => { const w = wk[kind + '|' + k + '|' + d];
-    return '<td class="c ' + (c === '👤✕' ? 'nd' : kd(lg, c)) + (pl ? ' pl' : '') + (w ? ' warn' : '') + '" data-d="' + d + '" data-kind="' + kind + '" data-key="' + esc(k) + '" data-code="' + esc(raw) + '" title="' +
+    const kc = c === '👤✕' ? 'nd' : kd(lg, c), run = kc === 'ok' && c && (stKind(lg, c) === 'run' || pl);
+    return '<td class="c ' + (run ? 'run' : kc) + (pl ? ' pl' : '') + (w ? ' warn' : '') + '" data-d="' + d + '" data-kind="' + kind + '" data-key="' + esc(k) + '" data-code="' + esc(raw) + '" title="' +
     esc(k + ' · ' + dmy(d) + (c ? ' · ' + c + ' ' + (c === '👤✕' ? 'พขร. ประจำรถไม่มา' : stDesc(lg, c)) : ' · ยังไม่ได้ลง') + (pl ? ' · มีงานในแผนงาน' : '') + (w ? ' · ⚠ ' + w : '')) + '">' + esc(c) + '</td>'; };
   const planOf = {};
   j.cars.forEach(x => { planOf['car|' + x.key] = x.plan || []; }); j.drivers.forEach(x => { planOf['driver|' + x.key] = x.plan || []; });
@@ -7573,10 +7635,40 @@ function render(){
       '</small>' + esc(DATA.headers[i].name) + '</th>').join('') + '</tr>';
   document.getElementById('rows').innerHTML = rows.length
     ? rows.map(x => '<tr class="' + (x.cancelled ? 'cx ' : '') + (x.chg ? 'chg' : '') + '"><td class="sk sk1 rn">' +
-        x.row + addedTag(x) + (x.chg ? '<br><span class="tag" title="' + (x.chg.type === 'new' ? 'ใหม่ = เพิ่งขึ้นมาหลังจากครั้งก่อนที่คุณเปิดดู (ในเครื่องนี้)' : 'แก้ = มีช่องที่เปลี่ยนหลังจากครั้งก่อนที่คุณเปิดดู') + '">' + (x.chg.type === 'new' ? 'ใหม่' : 'แก้') + '</span>' : '') + '</td>' +
+        x.row + addedTag(x) + cancelBtn(x) + (x.chg ? '<br><span class="tag" title="' + (x.chg.type === 'new' ? 'ใหม่ = เพิ่งขึ้นมาหลังจากครั้งก่อนที่คุณเปิดดู (ในเครื่องนี้)' : 'แก้ = มีช่องที่เปลี่ยนหลังจากครั้งก่อนที่คุณเปิดดู') + '">' + (x.chg.type === 'new' ? 'ใหม่' : 'แก้') + '</span>' : '') + '</td>' +
         shown.map(i => tdHtml(x, i)).join('') + '</tr>').join('')
     : '<tr><td colspan="30" class="empty">ไม่มีแผนงานของวันที่เลือก</td></tr>';
 }
+
+// ── ยกเลิกงาน / คืนงาน: เขียนช่อง AA สถานะจัดส่ง (ต้องอยู่โหมดแก้ไข) ──
+function cancelBtn(x){
+  if(!EDITING || x.stored) return '';
+  return x.cancelled
+    ? '<br><button type="button" class="cxb on" data-cx="' + x.row + '" title="คืนงาน (ล้างคำว่ายกเลิกในช่องสถานะจัดส่ง)">↩ คืนงาน</button>'
+    : '<br><button type="button" class="cxb" data-cx="' + x.row + '" title="ยกเลิกงานแถวนี้ (เขียน ยกเลิก ลงช่องสถานะจัดส่ง AA)">🚫 ยกเลิก</button>';
+}
+async function cancelRow(row){
+  const x = DATA && DATA.rows.find(r => r.row === row); if(!x) return;
+  const cancel = !x.cancelled;
+  const what = (x.cells[1] || ('แถว ' + row)) + (x.cells[12] ? ' · ' + x.cells[12] : '') + (x.cells[15] ? ' · ' + x.cells[15] : '');
+  if(!confirm((cancel ? 'ยกเลิกงานนี้? — ' : 'คืนงานนี้ (เลิกยกเลิก)? — ') + what)) return;
+  const by = editorName(); if(!by) return;
+  try{
+    const res = await fetch('/api/plan/cancel', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({row: row, key: x.cells[1] ? x.cells[1] + '|' + x.cells[13] : '', cancel: cancel, by: by})});
+    const j = await res.json().catch(() => ({}));
+    if(!res.ok){ toast((cancel ? 'ยกเลิกงาน' : 'คืนงาน') + 'ไม่สำเร็จ: ' + (j.detail || res.status), true); return; }
+    x.status = j.status;
+    const flag = (x.status || '') + ' ' + x.cells[12];
+    x.cancelled = /ยกเลิก|โหลดเก็บ|cancel/i.test(flag); x.stored = /โหลดเก็บ/.test(flag);
+    toast((cancel ? '🚫 ยกเลิกงาน ' : '↩ คืนงาน ') + (x.cells[1] || ('แถว ' + row)) + ' แล้ว ✓', false);
+    render();
+  }catch(e){ toast('ไม่สำเร็จ: ' + e.message, true); }
+}
+document.addEventListener('click', e => {
+  const b = e.target.closest && e.target.closest('button.cxb[data-cx]');
+  if(b){ e.preventDefault(); e.stopPropagation(); cancelRow(+b.dataset.cx); }
+});
 
 // ── เทียบกับที่เห็นครั้งก่อน (เก็บในเบราว์เซอร์ของแต่ละคน ไม่เขียนลงชีต) ──
 // ข้ามคอลัมน์ A (ลำดับ) เพราะเป็นสูตรรันเลข แทรกแถวทีเดียวเลขเลื่อนทั้งตาราง จะขึ้นว่าแก้ทุกแถว
