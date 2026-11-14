@@ -3321,21 +3321,59 @@ def plan_edit(p: PlanEdit):
             "overwrote_formula": is_formula, "logged": logged}
 
 
+# ตัวเลือกช่อง AA สถานะจัดส่ง — อ่านจาก dropdown ในชีตจริง ๆ (เผื่อชีตแก้รายการ) ถ้าอ่านไม่ได้ใช้รายการนี้
+PLAN_STATUS_OPTS = ["ยกเลิก", "ยกเลิก (เปลี่ยนคลังโหลด)", "ยกเลิก (Product Retrun)", "โหลดเก็บ"]
+_status_opts_cache: tuple = (0.0, None)
+
+
+def _plan_status_opts() -> list:
+    global _status_opts_cache
+    ts, hit = _status_opts_cache
+    if hit and time() - ts < 600:
+        return hit
+    opts = []
+    try:
+        ws, sh = _plan_ws()
+        rng = f"{_qtab(PLAN_PAGE_TAB)}!{_col_letter(PLAN_STATUS + 1)}4:{_col_letter(PLAN_STATUS + 1)}60"
+        meta = sh.fetch_sheet_metadata(params={"ranges": rng, "fields": "sheets.data.rowData.values.dataValidation"})
+        for sht in meta.get("sheets", []):
+            for d in sht.get("data", []):
+                for rd in d.get("rowData", []):
+                    for v in rd.get("values", []):
+                        cond = (v.get("dataValidation") or {}).get("condition") or {}
+                        if cond.get("type") == "ONE_OF_LIST" and not opts:
+                            opts = [x.get("userEnteredValue", "").strip() for x in cond.get("values", []) if x.get("userEnteredValue", "").strip()]
+    except Exception:
+        opts = []
+    opts = opts or list(PLAN_STATUS_OPTS)
+    _status_opts_cache = (time(), opts)
+    return opts
+
+
+@app.get("/api/plan/status-opts", include_in_schema=False)
+def plan_status_opts():
+    return {"opts": _plan_status_opts()}
+
+
 class PlanCancel(BaseModel):
     row: int
-    key: str = ""        # "เลข JOB|Drop" ของแถวที่เห็น กันแถวเลื่อน
-    cancel: bool = True  # True = ยกเลิกงาน · False = คืนงาน
+    key: str = ""             # "เลข JOB|Drop" ของแถวที่เห็น กันแถวเลื่อน
+    status: str = ""          # ค่าใหม่ของช่อง AA (ว่าง = งานปกติ)
+    old: str = ""             # ค่าที่หน้าเว็บเห็นก่อนแก้ (กันเขียนทับคนอื่น)
     by: str = ""
 
 
 @app.post("/api/plan/cancel", include_in_schema=False)
 def plan_cancel(p: PlanCancel):
-    """ยกเลิกงาน 1 แถว: ช่อง AA (สถานะจัดส่ง) = "ยกเลิก" · คืนงาน = ล้างช่อง AA (เฉพาะที่เป็นยกเลิก ไม่แตะ "โหลดเก็บ")"""
+    """ตั้งสถานะจัดส่ง (ช่อง AA) ของ 1 แถว: ยกเลิก / ยกเลิก (…) / โหลดเก็บ / ว่าง — เลือกได้เฉพาะรายการใน dropdown ของชีต"""
     block = _write_block_reason("PLAN_EDIT_ENABLED")
     if block:
         raise HTTPException(403, block)
     if p.row < 2:
         raise HTTPException(400, "ตำแหน่งแถวไม่ถูกต้อง")
+    new = p.status.strip()
+    if new and new not in _plan_status_opts():
+        raise HTTPException(400, f"“{new}” ไม่อยู่ในรายการสถานะจัดส่งของชีต")
     letter = _col_letter(PLAN_STATUS + 1)
     try:
         ws, sh = _plan_ws()
@@ -3349,16 +3387,10 @@ def plan_cancel(p: PlanCancel):
     if not any(str(x).strip() for x in cur) or p.key != cur_key:
         return JSONResponse(status_code=409, content={"detail": "แถวนี้ในชีตเปลี่ยนไปแล้ว (มีคนแก้หรือแทรกแถว) — กดรีเฟรชแล้วลองใหม่"})
     old = str(cur[PLAN_STATUS]).strip()
-    if p.cancel:
-        if "ยกเลิก" in old:
-            return {"ok": True, "status": old, "row": p.row}
-        if old:
-            return JSONResponse(status_code=409, content={"detail": f"ช่องสถานะจัดส่งของแถวนี้เป็น “{old}” อยู่แล้ว — แก้ในชีตเอง", "status": old})
-        new = "ยกเลิก"
-    else:
-        if "ยกเลิก" not in old:
-            return JSONResponse(status_code=409, content={"detail": "แถวนี้ไม่ได้ยกเลิกไว้", "status": old})
-        new = ""
+    if old == new:
+        return {"ok": True, "status": old, "row": p.row}
+    if old != p.old.strip():
+        return JSONResponse(status_code=409, content={"detail": f"สถานะจัดส่งของแถวนี้ถูกแก้ไปแล้วเป็น “{old or 'ว่าง'}” — ยังไม่เขียนทับ", "status": old})
     try:
         ws.update(values=[[new]], range_name=f"{letter}{p.row}", value_input_option="RAW")
     except Exception as e:
@@ -3367,7 +3399,7 @@ def plan_cancel(p: PlanCancel):
     _drop_sheet_cache(PLAN_PAGE_ID, PLAN_PAGE_TAB)
     try:
         _editlog_ws(sh).append_row([_thai_now().strftime("%Y-%m-%d %H:%M:%S"), p.by[:60], p.row, letter, old, new, cur_key,
-                                    "ยกเลิกงาน" if p.cancel else "คืนงาน"], value_input_option="RAW")
+                                    "สถานะจัดส่ง: " + (new or "งานปกติ")], value_input_option="RAW")
     except Exception:
         _gs_cache.pop("log", None)
     global _recent_cache
@@ -6735,8 +6767,15 @@ PLAN_HTML = """<!doctype html>
   td.rn{color:var(--mut);font-size:12px}
   td.rn .cxb{margin-top:3px;font:inherit;font-size:11px;padding:1px 6px;border-radius:6px;border:1px solid #fca5a5;background:none;color:#b91c1c;cursor:pointer;white-space:nowrap}
   td.rn .cxb:hover{background:#fee2e2}
-  td.rn .cxb.on{border-color:#86efac;color:#166534}
-  td.rn .cxb.on:hover{background:#dcfce7}
+  td.rn .cxb.on{border-color:#dc2626;background:#fee2e2;color:#991b1b;font-weight:700}
+  td.rn .cxb.st{border-color:#eab308;background:#fef9c3;color:#854d0e;font-weight:700}
+  #cxMenu{position:fixed;z-index:90;min-width:230px;padding:8px;border-radius:12px;background:var(--card);color:var(--ink);border:1px solid var(--line);box-shadow:0 10px 30px rgba(0,0,0,.25);display:flex;flex-direction:column;gap:4px;font-size:13px}
+  #cxMenu .hd{font-weight:700;font-size:12.5px;color:var(--mut);padding:2px 4px 4px}
+  #cxMenu button{font:inherit;text-align:left;padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:none;color:inherit;cursor:pointer}
+  #cxMenu button.cx:hover{background:#fee2e2;border-color:#fca5a5}
+  #cxMenu button.st:hover{background:#fef9c3;border-color:#fde047}
+  #cxMenu button.ok:hover{background:#dcfce7;border-color:#86efac}
+  #cxMenu button.on{outline:2px solid #2563eb}
   td.tm{font-weight:700;font-variant-numeric:tabular-nums}
   td.cust{font-weight:600;max-width:280px;overflow:hidden;text-overflow:ellipsis}
   td.car{font-weight:700;color:#7c3aed}
@@ -7685,33 +7724,59 @@ function render(){
 
 // ── ยกเลิกงาน / คืนงาน: เขียนช่อง AA สถานะจัดส่ง (ต้องอยู่โหมดแก้ไข) ──
 function cancelBtn(x){
-  if(!EDITING || x.stored) return '';
-  return x.cancelled
-    ? '<br><button type="button" class="cxb on" data-cx="' + x.row + '" title="คืนงาน (ล้างคำว่ายกเลิกในช่องสถานะจัดส่ง)">↩ คืนงาน</button>'
-    : '<br><button type="button" class="cxb" data-cx="' + x.row + '" title="ยกเลิกงานแถวนี้ (เขียน ยกเลิก ลงช่องสถานะจัดส่ง AA)">🚫 ยกเลิก</button>';
+  if(!EDITING) return '';
+  const st = String(x.status || '').trim();
+  return '<br><button type="button" class="cxb' + (st ? (x.stored ? ' st' : ' on') : '') + '" data-cx="' + x.row + '" title="สถานะจัดส่ง (ช่อง AA): ยกเลิก / โหลดเก็บ">' +
+    (st ? esc(st) + ' ▾' : '🚫 ยกเลิก ▾') + '</button>';
 }
-async function cancelRow(row){
+let CX_OPTS = null;
+async function cxOpts(){
+  if(CX_OPTS) return CX_OPTS;
+  try{ const r = await fetch('/api/plan/status-opts'); const j = await r.json(); if(r.ok && j.opts && j.opts.length) CX_OPTS = j.opts; }catch(e){}
+  return CX_OPTS || ['ยกเลิก', 'ยกเลิก (เปลี่ยนคลังโหลด)', 'ยกเลิก (Product Retrun)', 'โหลดเก็บ'];
+}
+function closeCx(){ const m = document.getElementById('cxMenu'); if(m) m.remove(); }
+async function openCx(row, anchor){
+  closeCx();
   const x = DATA && DATA.rows.find(r => r.row === row); if(!x) return;
-  const cancel = !x.cancelled;
-  const what = (x.cells[1] || ('แถว ' + row)) + (x.cells[12] ? ' · ' + x.cells[12] : '') + (x.cells[15] ? ' · ' + x.cells[15] : '');
-  if(!confirm((cancel ? 'ยกเลิกงานนี้? — ' : 'คืนงานนี้ (เลิกยกเลิก)? — ') + what)) return;
+  const cur = String(x.status || '').trim(), opts = await cxOpts();
+  const m = document.createElement('div'); m.id = 'cxMenu';
+  m.innerHTML = '<div class="hd">' + esc(x.cells[1] || ('แถว ' + row)) + (x.cells[12] ? ' · ' + esc(x.cells[12]) : '') + '</div>' +
+    opts.map(o => '<button type="button" data-st="' + esc(o) + '" class="' + (/โหลดเก็บ/.test(o) ? 'st' : 'cx') + (o === cur ? ' on' : '') + '">' + (/โหลดเก็บ/.test(o) ? '📦 ' : '🚫 ') + esc(o) + '</button>').join('') +
+    (cur ? '<button type="button" data-st="" class="ok">↩ งานปกติ (ล้างสถานะ)</button>' : '');
+  document.body.appendChild(m);
+  const r = anchor.getBoundingClientRect();
+  m.style.left = Math.max(8, Math.min(r.left, innerWidth - m.offsetWidth - 8)) + 'px';
+  m.style.top = Math.max(8, Math.min(r.bottom + 4, innerHeight - m.offsetHeight - 8)) + 'px';
+  m.addEventListener('click', e => { e.stopPropagation(); const b = e.target.closest('button[data-st]'); if(b){ closeCx(); setRowStatus(row, b.dataset.st); } });
+}
+async function setRowStatus(row, status){
+  const x = DATA && DATA.rows.find(r => r.row === row); if(!x) return;
+  const old = String(x.status || '').trim();
+  if(status === old) return;
   const by = editorName(); if(!by) return;
   try{
     const res = await fetch('/api/plan/cancel', {method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({row: row, key: x.cells[1] ? x.cells[1] + '|' + x.cells[13] : '', cancel: cancel, by: by})});
+      body: JSON.stringify({row: row, key: x.cells[1] ? x.cells[1] + '|' + x.cells[13] : '', status: status, old: old, by: by})});
     const j = await res.json().catch(() => ({}));
-    if(!res.ok){ toast((cancel ? 'ยกเลิกงาน' : 'คืนงาน') + 'ไม่สำเร็จ: ' + (j.detail || res.status), true); return; }
-    x.status = j.status;
+    if(!res.ok){
+      toast('บันทึกสถานะจัดส่งไม่สำเร็จ: ' + (j.detail || res.status), true);
+      if(res.status === 409 && 'status' in j){ x.status = j.status; }
+    }else{
+      x.status = j.status;
+      toast((j.status ? 'ตั้งสถานะ “' + j.status + '” ' : '↩ คืนเป็นงานปกติ ') + (x.cells[1] || ('แถว ' + row)) + ' แล้ว ✓', false);
+    }
     const flag = (x.status || '') + ' ' + x.cells[12];
     x.cancelled = /ยกเลิก|โหลดเก็บ|cancel/i.test(flag); x.stored = /โหลดเก็บ/.test(flag);
-    toast((cancel ? '🚫 ยกเลิกงาน ' : '↩ คืนงาน ') + (x.cells[1] || ('แถว ' + row)) + ' แล้ว ✓', false);
     render();
   }catch(e){ toast('ไม่สำเร็จ: ' + e.message, true); }
 }
 document.addEventListener('click', e => {
   const b = e.target.closest && e.target.closest('button.cxb[data-cx]');
-  if(b){ e.preventDefault(); e.stopPropagation(); cancelRow(+b.dataset.cx); }
+  if(b){ e.preventDefault(); e.stopPropagation(); const m = document.getElementById('cxMenu'); if(m && m.dataset.row === b.dataset.cx){ closeCx(); return; } openCx(+b.dataset.cx, b).then(() => { const mm = document.getElementById('cxMenu'); if(mm) mm.dataset.row = b.dataset.cx; }); return; }
+  if(!(e.target.closest && e.target.closest('#cxMenu'))) closeCx();
 });
+document.addEventListener('keydown', e => { if(e.key === 'Escape') closeCx(); });
 
 // ── เทียบกับที่เห็นครั้งก่อน (เก็บในเบราว์เซอร์ของแต่ละคน ไม่เขียนลงชีต) ──
 // ข้ามคอลัมน์ A (ลำดับ) เพราะเป็นสูตรรันเลข แทรกแถวทีเดียวเลขเลื่อนทั้งตาราง จะขึ้นว่าแก้ทุกแถว
