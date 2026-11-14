@@ -598,6 +598,41 @@ def _ttl_jitter(key: str) -> float:
     return ((hash(key) % 100) / 100 + _JITTER_SEED) % 1 * 150
 
 
+def _qtab(tab: str) -> str:
+    return "'" + tab.replace("'", "''") + "'"
+
+
+def _open_sheet(sheet_id: str, force: bool = False):
+    """ไฟล์ Google Sheet ที่เปิดไว้แล้ว (ใช้ client ตัวเดียว) — เปิดใหม่ทุก 10 นาที หรือเมื่ออ่านพลาด"""
+    box = _gs_cache.setdefault("sh", {})
+    hit = box.get(sheet_id)
+    if hit and not force and time() - hit[0] < 600:
+        return hit[1]
+    sh = _gc().open_by_key(sheet_id)
+    box[sheet_id] = (time(), sh)
+    return sh
+
+
+def _prefetch(sheet_id: str, tabs) -> None:
+    """อ่านหลายแท็บของไฟล์เดียวในคำขอเดียว ใส่แคชไว้ (แท็บที่ไม่มีในไฟล์ข้ามไป) — ล้มเหลว = ปล่อยให้อ่านทีละแท็บตามเดิม"""
+    now = time()
+    need = [t for t in tabs if not ((h := _sheet_cache.get(f"{sheet_id}:{t}")) and now - h[0] < CACHE_TTL)]
+    if not need:
+        return
+    try:
+        sh = _open_sheet(sheet_id)
+        meta = sh.fetch_sheet_metadata(params={"fields": "sheets.properties.title"})
+        have = {x["properties"]["title"] for x in meta.get("sheets", [])}
+        need = [t for t in need if t in have]
+        if not need:
+            return
+        res = sh.values_batch_get([_qtab(t) for t in need])
+        for t, vr in zip(need, res.get("valueRanges", [])):
+            _sheet_cache[f"{sheet_id}:{t}"] = (time(), gspread.utils.fill_gaps(vr.get("values", [])))
+    except Exception:
+        _gs_cache.get("sh", {}).pop(sheet_id, None)
+
+
 def _fetch_sheet(sheet_id: str, tab: str) -> list[list]:
     """อ่าน Sheet พร้อมแคชในหน่วยความจำ (ไม่พึ่ง Supabase แล้ว — อ่านจาก Google ตรง ๆ
     เสมอเมื่อแคชหมดอายุ ข้อมูลจึงอัปเดตตามไฟล์ต้นทางเร็วขึ้น)"""
@@ -608,13 +643,18 @@ def _fetch_sheet(sheet_id: str, tab: str) -> list[list]:
         if time() - ts < ttl:
             return data
 
-    def _read():
-        gc = gspread.authorize(_build_creds())
-        return gc.open_by_key(sheet_id).worksheet(tab).get_all_values()
+    def _read():                      # เปิดไฟล์ครั้งเดียวแล้วใช้ซ้ำ · อ่านแท็บด้วยคำขอเดียว (เดิม ขอ token + เปิดไฟล์ + หาแท็บ + อ่าน = 4 คำขอ)
+        try:
+            return gspread.utils.fill_gaps(_open_sheet(sheet_id).values_get(_qtab(tab)).get("values", []))
+        except gspread.exceptions.APIError as e:   # ไม่มีแท็บนี้ → Google ตอบ 400 "Unable to parse range" — คืนเป็น WorksheetNotFound เหมือนเดิม
+            if getattr(e.response, "status_code", 0) == 400 and "parse range" in str(e):
+                raise gspread.WorksheetNotFound(tab)
+            raise
 
     try:
         data = _with_retry(_read)
     except Exception:
+        _gs_cache.get("sh", {}).pop(sheet_id, None)           # ไฟล์ที่เปิดไว้อาจเสีย → ครั้งหน้าเปิดใหม่
         # อ่านสดไม่ได้ (ส่วนใหญ่คือ 429 quota เต็ม) — เอาของเก่าในแคชมาใช้แทน
         # ข้อมูลเก่าไม่กี่นาทียังมีประโยชน์กว่าหน้าจอว่างเปล่ามาก
         stale = _sheet_cache.get(key)
@@ -3101,6 +3141,9 @@ def _plan_cars() -> dict:
             return []
 
     # 1) แท็บข้อมูลรถ/พขร. ที่วางไว้ในชีตเอง  2) แท็บ MasterCarDriver ที่เว็บเก็บไว้ตอนนำเข้าไฟล์จัดงาน (ใหม่กว่า — ทับ)
+    _prefetch(PLAN_PAGE_ID, ("ข้อมูลรถ", "พขร.ประจำรถ", "ข้อมูลพขร.", MASTER_TAB))     # หลายแท็บ = คำขอเดียว
+    if CARS_SHEET_ID:
+        _prefetch(CARS_SHEET_ID, ("ข้อมูลรถ", "พขร.ประจำรถ", "ข้อมูลพขร."))
     phones_all: dict = {}
     names_all: list = []
     cars = _build_cars({n: tab(n) for n in ("ข้อมูลรถ", "พขร.ประจำรถ", "ข้อมูลพขร.")}, phones_all, names_all)
