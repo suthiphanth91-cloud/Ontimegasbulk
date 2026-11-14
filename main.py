@@ -2160,6 +2160,7 @@ def plan_rows(date_str: str = Query(None, alias="date"), fresh: int = Query(0)):
     h = _plan_header_row(rows)
     headers = [{"col": _col_name(i), "name": _cell(rows[h], i) if rows else ""}
                for i in range(PLAN_LAST_COL)]
+    rc = _reason_cols(rows)
     out = []
     for i in range(h + 1, len(rows)):
         row = rows[i]
@@ -2170,13 +2171,127 @@ def plan_rows(date_str: str = Query(None, alias="date"), fresh: int = Query(0)):
         flag = (_cell(row, PLAN_STATUS) + " " + _cell(row, PLAN_DEST)).lower()
         cancelled = any(k in flag for k in CANCEL_KEYWORDS)
         out.append({"row": i + 1, "cells": cells, "cancelled": cancelled, "stored": STORED_WORD in flag,
-                    "status": _cell(row, PLAN_STATUS)})
+                    "status": _cell(row, PLAN_STATUS), "why": {f: _cell(row, c) for f, c in rc.items()}})
     edit_block = _write_block_reason("PLAN_EDIT_ENABLED")
     return {"date": target, "fetched_at": _thai_now().strftime("%H:%M:%S"),
             "sheet_read_at": read_at, "throttled": throttled,
             "alt_source": PLAN_PAGE_ID != SOURCE_ID,      # True = กำลังอ่านชีตทดลอง ไม่ใช่ชีตจริง
             "can_edit": not edit_block, "edit_block_reason": edit_block,
-            "headers": headers, "total": len(out), "rows": out}
+            "headers": headers, "total": len(out), "rows": out,
+            "reason_fields": {f: PLAN_REASON_COLS[f] for f in rc}}
+
+
+# ─── สาเหตุ On Time / สาเหตุแก้ไขงาน (คอลัมน์นอกช่วง A–Z หาจากชื่อหัวตาราง · ตัวเลือกตาม dropdown ในชีต) ───
+PLAN_REASON_COLS = {"ot": "สาเหตุ On Time", "edit": "สาเหตุแก้ไขงาน"}
+_reason_opts_cache: tuple = (0.0, None)
+
+
+def _reason_cols(rows: list) -> dict:
+    """{ot: เลขคอลัมน์, edit: เลขคอลัมน์} จากแถวหัวตาราง (ไม่เจอหัว = ไม่มีช่องนั้น)"""
+    if not rows:
+        return {}
+    norm = lambda v: re.sub(r"\s+", "", str(v))
+    out = {}
+    for r in rows[:6]:
+        for i, v in enumerate(r):
+            for f, name in PLAN_REASON_COLS.items():
+                if f not in out and norm(v) == norm(name):
+                    out[f] = i
+    return out
+
+
+def _reason_opts() -> dict:
+    global _reason_opts_cache
+    ts, hit = _reason_opts_cache
+    if hit is not None and time() - ts < 600:
+        return hit
+    out = {}
+    try:
+        rows = _fetch_sheet(PLAN_PAGE_ID, PLAN_PAGE_TAB)
+        rc = _reason_cols(rows)
+        ws, sh = _plan_ws()
+        for f, c in rc.items():
+            L = _col_letter(c + 1)
+            meta = sh.fetch_sheet_metadata(params={"ranges": f"{_qtab(PLAN_PAGE_TAB)}!{L}4:{L}80",
+                                                   "fields": "sheets.data.rowData.values.dataValidation"})
+            cond = next((v["dataValidation"]["condition"] for sht in meta.get("sheets", []) for d in sht.get("data", [])
+                         for rd in d.get("rowData", []) for v in rd.get("values", []) if v.get("dataValidation")), {})
+            vals = [x.get("userEnteredValue", "") for x in cond.get("values", [])]
+            if cond.get("type") == "ONE_OF_RANGE" and vals:
+                got = sh.values_get(vals[0].lstrip("=")).get("values", [])
+                opts = [str(x).strip() for r in got for x in r if str(x).strip()]
+            else:
+                opts = [v.strip() for v in vals if v.strip()]
+            out[f] = list(dict.fromkeys(opts))
+    except Exception:
+        out = {}
+    _reason_opts_cache = (time(), out)
+    return out
+
+
+@app.get("/api/plan/reason-opts", include_in_schema=False)
+def plan_reason_opts():
+    return {"opts": _reason_opts(), "names": PLAN_REASON_COLS}
+
+
+class PlanReason(BaseModel):
+    row: int
+    key: str = ""
+    field: str            # ot | edit
+    value: str = ""
+    old: str = ""
+    by: str = ""
+
+
+@app.post("/api/plan/reason", include_in_schema=False)
+def plan_reason(p: PlanReason):
+    """เขียนสาเหตุ On Time / สาเหตุแก้ไขงาน ของ 1 แถว — เลือกได้เฉพาะรายการใน dropdown ของชีต"""
+    block = _write_block_reason("PLAN_EDIT_ENABLED")
+    if block:
+        raise HTTPException(403, block)
+    if p.field not in PLAN_REASON_COLS or p.row < 2:
+        raise HTTPException(400, "ข้อมูลไม่ครบ")
+    rc = _reason_cols(_fetch_sheet(PLAN_PAGE_ID, PLAN_PAGE_TAB))
+    if p.field not in rc:
+        raise HTTPException(409, f"ไม่พบคอลัมน์ “{PLAN_REASON_COLS[p.field]}” ในชีต")
+    col = rc[p.field]
+    new = p.value.strip()
+    opts = _reason_opts().get(p.field) or []
+    if new and opts and new not in opts:
+        raise HTTPException(400, f"“{new}” ไม่อยู่ในรายการ {PLAN_REASON_COLS[p.field]} ของชีต")
+    letter = _col_letter(col + 1)
+    try:
+        ws, sh = _plan_ws()
+        got = ws.batch_get([f"A{p.row}:N{p.row}", f"{letter}{p.row}"])
+        cur = list(got[0][0]) if got and got[0] else []
+        old = str(got[1][0][0]).strip() if len(got) > 1 and got[1] and got[1][0] else ""
+    except Exception as e:
+        _gs_forget()
+        raise HTTPException(502, f"อ่านชีตไม่ได้ — {type(e).__name__}")
+    cur += [""] * (14 - len(cur))
+    cur_key = f"{cur[1]}|{cur[13]}" if cur[1] else ""
+    if p.key != cur_key:
+        return JSONResponse(status_code=409, content={"detail": "แถวนี้ในชีตเปลี่ยนไปแล้ว (มีคนแก้หรือแทรกแถว) — กดรีเฟรชแล้วลองใหม่"})
+    if old == new:
+        return {"ok": True, "value": old}
+    if old != p.old.strip():
+        return JSONResponse(status_code=409, content={"detail": f"ช่องนี้ถูกแก้ไปแล้วเป็น “{old or 'ว่าง'}” — ยังไม่เขียนทับ", "value": old})
+    try:
+        ws.update(values=[[new]], range_name=f"{letter}{p.row}", value_input_option="RAW")
+    except Exception as e:
+        _gs_forget()
+        raise HTTPException(502, f"เขียนลงชีตไม่สำเร็จ — {type(e).__name__}")
+    hit = _sheet_cache.get(f"{PLAN_PAGE_ID}:{PLAN_PAGE_TAB}")       # แก้แคชแถวเดียว
+    if hit and p.row - 1 < len(hit[1]):
+        r = hit[1][p.row - 1]
+        r.extend([""] * (col + 1 - len(r)))
+        r[col] = new
+    try:
+        _editlog_ws(sh).append_row([_thai_now().strftime("%Y-%m-%d %H:%M:%S"), p.by[:60], p.row, letter, old, new, cur_key,
+                                    PLAN_REASON_COLS[p.field]], value_input_option="RAW")
+    except Exception:
+        _gs_cache.pop("log", None)
+    return {"ok": True, "value": new}
 
 
 # ─── นำเข้าใบจัดรถจาก Excel → ชีตแผนงาน (ทดลอง) ─────────────────────────────
@@ -6769,6 +6884,14 @@ PLAN_HTML = """<!doctype html>
   td.rn .cxb:hover{background:#fee2e2}
   td.rn .cxb.on{border-color:#dc2626;background:#fee2e2;color:#991b1b;font-weight:700}
   td.rn .cxb.st{border-color:#eab308;background:#fef9c3;color:#854d0e;font-weight:700}
+  td.rn .rsb{margin-top:3px;font:inherit;font-size:11px;padding:1px 6px;border-radius:6px;border:1px solid #93c5fd;background:none;color:#1d4ed8;cursor:pointer;white-space:nowrap}
+  td.rn .rsb:hover,td.rn .rsb.on{background:#eff6ff}
+  td.rn .rtag{cursor:help;font-size:12px}
+  #rsPop{position:fixed;z-index:90;width:300px;padding:10px;border-radius:12px;background:var(--card);color:var(--ink);border:1px solid var(--line);box-shadow:0 10px 30px rgba(0,0,0,.25);font-size:13px}
+  #rsPop .hd{display:flex;justify-content:space-between;gap:8px;font-weight:700;font-size:12.5px;color:var(--mut);margin-bottom:6px}
+  #rsPop .hd button{border:0;background:none;font-size:16px;cursor:pointer;color:var(--mut)}
+  #rsPop label{display:block;font-weight:700;margin:6px 0 2px}
+  #rsPop select{display:block;width:100%;margin-top:3px;font:inherit;font-size:13px;font-weight:400;padding:5px 6px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:inherit}
   #cxMenu{position:fixed;z-index:90;min-width:230px;padding:8px;border-radius:12px;background:var(--card);color:var(--ink);border:1px solid var(--line);box-shadow:0 10px 30px rgba(0,0,0,.25);display:flex;flex-direction:column;gap:4px;font-size:13px}
   #cxMenu .hd{font-weight:700;font-size:12.5px;color:var(--mut);padding:2px 4px 4px}
   #cxMenu button{font:inherit;text-align:left;padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:none;color:inherit;cursor:pointer}
@@ -7723,11 +7846,64 @@ function render(){
 }
 
 // ── ยกเลิกงาน / คืนงาน: เขียนช่อง AA สถานะจัดส่ง (ต้องอยู่โหมดแก้ไข) ──
+function reasonTags(x){                 // ⏱ = มีสาเหตุ On Time · ✏️ = มีสาเหตุแก้ไขงาน (ชี้ดูข้อความ)
+  const w = x.why || {}, n = (DATA && DATA.reason_fields) || {};
+  return (w.ot ? '<span class="rtag" title="' + esc((n.ot || 'สาเหตุ On Time') + ': ' + w.ot) + '">⏱</span>' : '') +
+    (w.edit ? '<span class="rtag" title="' + esc((n.edit || 'สาเหตุแก้ไขงาน') + ': ' + w.edit) + '">✏️</span>' : '');
+}
 function cancelBtn(x){
-  if(!EDITING) return '';
+  const tags = reasonTags(x);
+  if(!EDITING) return tags ? '<br>' + tags : '';
+  const rs = DATA && DATA.reason_fields && Object.keys(DATA.reason_fields).length
+    ? '<br><button type="button" class="rsb' + (tags ? ' on' : '') + '" data-rs="' + x.row + '" title="สาเหตุ On Time / สาเหตุแก้ไขงาน">📝 สาเหตุ' + (tags ? ' ' + tags : '') + '</button>' : '';
   const st = String(x.status || '').trim();
   return '<br><button type="button" class="cxb' + (st ? (x.stored ? ' st' : ' on') : '') + '" data-cx="' + x.row + '" title="สถานะจัดส่ง (ช่อง AA): ยกเลิก / โหลดเก็บ">' +
-    (st ? esc(st) + ' ▾' : '🚫 ยกเลิก ▾') + '</button>';
+    (st ? esc(st) + ' ▾' : '🚫 ยกเลิก ▾') + '</button>' + rs;
+}
+let RS_OPTS = null;
+async function rsOpts(){
+  if(RS_OPTS) return RS_OPTS;
+  try{ const r = await fetch('/api/plan/reason-opts'); const j = await r.json(); if(r.ok) RS_OPTS = j.opts || {}; }catch(e){}
+  return RS_OPTS || {};
+}
+function closeRs(){ const m = document.getElementById('rsPop'); if(m) m.remove(); }
+async function openRs(row, anchor){
+  closeRs(); closeCx();
+  const x = DATA && DATA.rows.find(r => r.row === row); if(!x) return;
+  const names = DATA.reason_fields || {}, opts = await rsOpts(), w = x.why || {};
+  const m = document.createElement('div'); m.id = 'rsPop'; m.dataset.row = row;
+  m.innerHTML = '<div class="hd">' + esc(x.cells[1] || ('แถว ' + row)) + (x.cells[12] ? ' · ' + esc(x.cells[12]) : '') + '<button type="button" data-x="1" title="ปิด">✕</button></div>' +
+    Object.keys(names).map(f => { const list = (opts[f] || []).slice(), cur = w[f] || '';
+      if(cur && list.indexOf(cur) < 0) list.unshift(cur);
+      return '<label>' + esc(names[f]) + '<select data-f="' + f + '"><option value="">— ไม่ระบุ —</option>' +
+        list.map(o => '<option' + (o === cur ? ' selected' : '') + '>' + esc(o) + '</option>').join('') + '</select></label>'; }).join('') +
+    '<p class="mut">เลือกแล้วบันทึกลงชีตทันที</p>';
+  document.body.appendChild(m);
+  const r = anchor.getBoundingClientRect();
+  m.style.left = Math.max(8, Math.min(r.left, innerWidth - m.offsetWidth - 8)) + 'px';
+  m.style.top = Math.max(8, Math.min(r.bottom + 4, innerHeight - m.offsetHeight - 8)) + 'px';
+  m.addEventListener('click', e => { e.stopPropagation(); if(e.target.closest('[data-x]')) closeRs(); });
+  m.addEventListener('change', async e => {
+    const sel = e.target.closest('select[data-f]'); if(!sel) return;
+    const f = sel.dataset.f, old = (x.why || {})[f] || '', val = sel.value;
+    const by = editorName(); if(!by){ sel.value = old; return; }
+    sel.disabled = true;
+    try{
+      const res = await fetch('/api/plan/reason', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({row: row, key: x.cells[1] ? x.cells[1] + '|' + x.cells[13] : '', field: f, value: val, old: old, by: by})});
+      const j = await res.json().catch(() => ({}));
+      if(!res.ok){
+        toast('บันทึก' + (names[f] || 'สาเหตุ') + 'ไม่สำเร็จ: ' + (j.detail || res.status), true);
+        if(res.status === 409 && 'value' in j){ x.why = x.why || {}; x.why[f] = j.value; }
+        sel.value = (x.why || {})[f] || '';
+      }else{
+        x.why = x.why || {}; x.why[f] = j.value;
+        toast('บันทึก' + (names[f] || 'สาเหตุ') + ' = ' + (j.value || '(ว่าง)') + ' ✓', false);
+      }
+    }catch(err){ toast('ไม่สำเร็จ: ' + err.message, true); sel.value = old; }
+    sel.disabled = false;
+    render();
+  });
 }
 let CX_OPTS = null;
 async function cxOpts(){
@@ -7774,9 +7950,12 @@ async function setRowStatus(row, status){
 document.addEventListener('click', e => {
   const b = e.target.closest && e.target.closest('button.cxb[data-cx]');
   if(b){ e.preventDefault(); e.stopPropagation(); const m = document.getElementById('cxMenu'); if(m && m.dataset.row === b.dataset.cx){ closeCx(); return; } openCx(+b.dataset.cx, b).then(() => { const mm = document.getElementById('cxMenu'); if(mm) mm.dataset.row = b.dataset.cx; }); return; }
+  const rb = e.target.closest && e.target.closest('button.rsb[data-rs]');
+  if(rb){ e.preventDefault(); e.stopPropagation(); const m = document.getElementById('rsPop'); if(m && m.dataset.row === rb.dataset.rs){ closeRs(); return; } openRs(+rb.dataset.rs, rb); return; }
   if(!(e.target.closest && e.target.closest('#cxMenu'))) closeCx();
+  if(!(e.target.closest && e.target.closest('#rsPop'))) closeRs();
 });
-document.addEventListener('keydown', e => { if(e.key === 'Escape') closeCx(); });
+document.addEventListener('keydown', e => { if(e.key === 'Escape'){ closeCx(); closeRs(); } });
 
 // ── เทียบกับที่เห็นครั้งก่อน (เก็บในเบราว์เซอร์ของแต่ละคน ไม่เขียนลงชีต) ──
 // ข้ามคอลัมน์ A (ลำดับ) เพราะเป็นสูตรรันเลข แทรกแถวทีเดียวเลขเลื่อนทั้งตาราง จะขึ้นว่าแก้ทุกแถว
