@@ -3790,15 +3790,41 @@ def _by_car(items: list) -> list:
     for car, ts in cars.items():
         loads = [t for t in ts if t["load"] is not None]
         top = max(loads, key=lambda t: t["load"]) if loads else None
+        waits = [t for t in ts if t["wait"] is not None]
+        wtop = max(waits, key=lambda t: t["wait"]) if waits else None
         out.append({"car": car, "trips": len(ts), "wait": _stat([t["wait"] for t in ts if t["wait"] is not None]),
                     "load": _stat([t["load"] for t in loads]),
-                    "top": {k: top[k] for k in ("date", "origin", "job", "load")} if top else None})
+                    "top": {k: top[k] for k in ("date", "origin", "job", "load")} if top else None,
+                    "wtop": {k: wtop[k] for k in ("date", "origin", "job", "wait")} if wtop else None})
     return sorted(out, key=lambda c: (-(c["load"]["max"] or -1), c["car"]))
+
+
+def _sheet_min_cols(rows: list) -> dict:
+    """คอลัมน์นาทีที่ชีตคำนวณไว้เอง (หาจากชื่อหัวตาราง): wait = "เวลารอโหลดสินค้า(m)" · load = "เวลาโหลดสินค้า(m)" """
+    want = {"wait": "เวลารอโหลดสินค้า", "load": "เวลาโหลดสินค้า"}
+    out = {}
+    for r in rows[:6]:
+        for i, v in enumerate(r):
+            n = re.sub(r"\s+", "", str(v))
+            for k, w in want.items():
+                if k not in out and n.startswith(w) and "(m)" in n:
+                    out[k] = i
+    return out
+
+
+def _sheet_min(v):
+    """ค่านาทีจากช่องสูตรในชีต → ตัวเลข (ว่าง / N/A / ติดลบ / เกิน 24 ชม. = None)"""
+    try:
+        m = float(str(v).replace(",", "").strip())
+    except ValueError:
+        return None
+    return round(m, 2) if 0 <= m <= REPORT_MAX_MIN else None
 
 
 def build_ontime_report(rows: list, d_from: str, d_to: str, f: dict) -> dict:
     """rows = แถวของชีตแผนงาน (รวมหัวตาราง) → สรุปรายงาน On Time ของวันที่ d_from..d_to ตามตัวกรอง f"""
     dist = _rep_distances()
+    mc = _sheet_min_cols(rows)            # มีคอลัมน์นาทีในชีต = ใช้ตัวเลขของชีต (ตรงกับที่คนเห็นในชีต) · ไม่มี = คำนวณจากเวลาเอง
     items = []
     av_seen: dict = {}                    # คำที่พบในช่อง On Time (AV) → จำนวน ไว้ตรวจว่าชีตใช้คำอะไร
     for i, r in enumerate(rows[1:], start=2):
@@ -3828,7 +3854,9 @@ def build_ontime_report(rows: list, d_from: str, d_to: str, f: dict) -> dict:
               "order": _cell(r, PLAN_INVOICE), "weight": _cell(r, PLAN_VOLUME), "sched": _cell(r, PLAN_SCHED), "status": status,
               "arrive": arr.strftime("%d/%m/%Y %H:%M:%S") if arr else "", "ontime": ontime,
               "late": _cell(r, PLAN_ONTIME_M),
-              "wait": _rep_gap(yard, lin), "load": _rep_gap(lin, lout), "travel": _rep_gap(dep, arr), "unload": _rep_gap(arr, leave),
+              "wait": _sheet_min(_cell(r, mc["wait"])) if "wait" in mc else _rep_gap(yard, lin),
+              "load": _sheet_min(_cell(r, mc["load"])) if "load" in mc else _rep_gap(lin, lout),
+              "travel": _rep_gap(dep, arr), "unload": _rep_gap(arr, leave),
               "km": km, "cls": _rep_class(km),
               "jtype": _cell(r, PLAN_JOBTYPE).strip() or _cell(r, PLAN_TYPE).strip(),
               "why": _cell(r, PLAN_WHY).strip(), "fix": _cell(r, PLAN_FIXWHY).strip()}
@@ -5796,6 +5824,13 @@ REPORT_HTML = """<!doctype html>
   .chip.f{font-size:13px}
   @media (max-width:820px){ .tile .v{font-size:26px} .hero .v{font-size:42px} .orow .oav b{font-size:20px} }
   [hidden]{display:none !important}
+  details.fold > summary{list-style:none;cursor:pointer}
+  details.fold > summary::-webkit-details-marker{display:none}
+  details.fold > summary .ph{margin-bottom:0}
+  details.fold .grow{flex:1}
+  details.fold .fbtn::after{content:'▸ แสดง';font-size:13px;font-weight:600;color:var(--acc,#2563eb);border:1px solid currentColor;border-radius:8px;padding:3px 10px}
+  details.fold[open] .fbtn::after{content:'▾ ซ่อน'}
+  details.fold[open] > summary .ph{margin-bottom:6px}
 </style>
 </head>
 <body>
@@ -5847,8 +5882,8 @@ REPORT_HTML = """<!doctype html>
     </div>
     <section class="panel w12"><div class="ph"><h3>สรุปตามต้นทาง</h3><span class="sub">นาที</span></div><p class="hint"><b>รอโหลด</b> = เข้าลาน → เริ่มโหลด · <b>โหลด</b> = เริ่มโหลด → โหลดเสร็จ · ต่ำสุด / สูงสุด / เฉลี่ย ของแต่ละต้นทาง · กดหัวคอลัมน์เพื่อเรียง</p>
       <div class="tw" style="max-height:none"><table><thead><tr class="grp"><th colspan="2"></th><th colspan="3" class="gw">⏳ เวลารอโหลดสินค้า (นาที)</th><th colspan="3" class="gl">⛽ เวลาโหลดสินค้า (นาที)</th></tr><tr id="oHead"></tr></thead><tbody id="tOrigin"></tbody></table></div></section>
-    <section class="panel w12"><div class="ph"><h3>สรุปตามรถ — คันไหนรอโหลด / โหลดนานสุด</h3><span class="sub">นาที</span></div><p class="hint">นับ 1 ครั้งต่อเที่ยว (หลาย drop ในเที่ยวเดียวไม่นับซ้ำ) · เรียงจาก <b>โหลดนานสุด</b> ลงมา · <b>เที่ยวที่โหลดนานสุด</b> = วันที่ / ต้นทาง ของครั้งนั้น · กดหัวคอลัมน์เพื่อเรียง · กดเบอร์รถเพื่อกรอง</p>
-      <div class="tw" style="max-height:480px"><table><thead><tr class="grp"><th colspan="2"></th><th colspan="2" class="gw">⏳ รอโหลด (นาที)</th><th colspan="3" class="gl">⛽ โหลด (นาที)</th><th></th></tr><tr id="cHead"></tr></thead><tbody id="tCar"></tbody></table></div></section>
+    <section class="panel w12"><details class="fold"><summary><div class="ph"><h3>สรุปตามรถ — คันไหนรอโหลด / โหลดนานสุด</h3><span class="sub">นาที</span><span class="grow"></span><span class="fbtn"></span></div></summary><p class="hint">นับ 1 ครั้งต่อเที่ยว (หลาย drop ในเที่ยวเดียวไม่นับซ้ำ) · เรียงจาก <b>โหลดนานสุด</b> ลงมา · ตัวเลขจากคอลัมน์ <b>เวลารอโหลดสินค้า(m)</b> และ <b>เวลาโหลดสินค้า(m)</b> ในชีต · คอลัมน์ขวาสุดบอกว่าค่าสูงสุดมาจากเที่ยวไหน · กดหัวคอลัมน์เพื่อเรียง · กดเบอร์รถเพื่อกรอง</p>
+      <div class="tw" style="max-height:480px"><table><thead><tr class="grp"><th colspan="2"></th><th colspan="2" class="gw">⏳ รอโหลด (นาที)</th><th colspan="3" class="gl">⛽ โหลด (นาที)</th><th></th></tr><tr id="cHead"></tr></thead><tbody id="tCar"></tbody></table></div></details></section>
     <section class="panel w6"><div class="ph"><h3>สาเหตุ On Time / ล่าช้า</h3><span class="sub" id="whySub"></span></div><p class="hint">จากคอลัมน์ <b>สาเหตุ On Time</b> ในชีต · นับเป็นจำนวนงาน · กดชื่อสาเหตุเพื่อดูงานนั้น</p><div id="cWhy"></div></section>
     <section class="panel w6"><div class="ph"><h3>สาเหตุแก้ไขงาน</h3><span class="sub" id="fixSub"></span></div><p class="hint">จากคอลัมน์ <b>สาเหตุแก้ไขงาน</b> ในชีต · เช่น ลูกค้ายกเลิก, ปลายทางใหม่ · กดชื่อสาเหตุเพื่อดูงานนั้น</p><div id="cFix"></div></section>
     <section class="panel w12"><div class="ph"><h3>เวลาที่อยู่ในสถานี (เฉลี่ย)</h3><span class="sub">นาที</span></div><p class="hint">รถจอดอยู่ที่ปลายทางนานเท่าไร (<b>ถึงปลายทาง → ออกจากปลายทาง</b>) แยกตามประเภทงาน · <b>ตัวเลขมาก = ลงของนาน</b> · เรียงจากนานสุดลงมา · กดหัวการ์ดหรือชื่อปลายทางเพื่อกรอง</p><div id="cDest"></div></section>
@@ -6029,14 +6064,17 @@ const CCOLS = [
   {k: 'car', t: 'เบอร์รถ', v: c => c.car}, {k: 'trips', t: 'เที่ยว', n: 1, v: c => c.trips},
   {k: 'wavg', t: 'เฉลี่ย', n: 1, g: 'w', v: c => c.wait.avg}, {k: 'wmax', t: 'สูงสุด', n: 1, g: 'w', v: c => c.wait.max},
   {k: 'lmin', t: 'ต่ำสุด', n: 1, g: 'l', v: c => c.load.min}, {k: 'lavg', t: 'เฉลี่ย', n: 1, g: 'l', v: c => c.load.avg}, {k: 'lmax', t: 'สูงสุด', n: 1, g: 'l', v: c => c.load.max},
-  {k: 'top', t: 'เที่ยวที่โหลดนานสุด', v: c => c.top ? c.top.date : ''}];
+  {k: 'top', t: 'เที่ยวที่รอนานสุด / โหลดนานสุด', v: c => c.top ? c.top.date : ''}];
+function carTrip(icon, label, t, n){
+  return '<div>' + icon + ' ' + label + ' <b>' + num(n) + '</b> นาที · ' + dmy(t.date) + ' · ' + esc(t.origin) + ' <span style="font-size:12px;color:var(--mut)">' + esc(t.job) + '</span></div>';
+}
 function drawCarTable(){
   const el = document.getElementById('tCar'); if(!el) return;
   document.getElementById('cHead').innerHTML = headHtml(CCOLS, 'c');
   el.innerHTML = sortList(REP.by_car || [], CCOLS, SORTS.c).map(c => '<tr><td class="k" data-k="car" data-v="' + esc(c.car) + '">' + esc(c.car) + '</td><td class="n">' + c.trips + '</td>' +
-    '<td class="n cw">' + num(c.wait.avg) + '</td><td class="n cw">' + num(c.wait.max) + '</td>' +
+    '<td class="n cw">' + num(c.wait.avg) + '</td><td class="n cw"' + (c.wtop ? ' title="' + esc('รอนานสุด ' + dmy(c.wtop.date) + ' · ' + c.wtop.origin + ' · ' + c.wtop.job) + '"' : '') + '>' + num(c.wait.max) + '</td>' +
     '<td class="n cl">' + num(c.load.min) + '</td><td class="n cl">' + num(c.load.avg) + '</td><td class="n cl"><b>' + num(c.load.max) + '</b></td>' +
-    '<td>' + (c.top ? dmy(c.top.date) + ' · ' + esc(c.top.origin) + ' <span class="sub" style="font-size:12px;color:var(--mut)">' + esc(c.top.job) + '</span>' : '–') + '</td></tr>').join('') ||
+    '<td style="font-size:13px">' + ((c.wtop ? carTrip('⏳', 'รอ', c.wtop, c.wtop.wait) : '') + (c.top ? carTrip('⛽', 'โหลด', c.top, c.top.load) : '') || '–') + '</td></tr>').join('') ||
     '<tr><td colspan="8" class="empty">ไม่มีข้อมูล</td></tr>';
 }
 const RCOLS = [
