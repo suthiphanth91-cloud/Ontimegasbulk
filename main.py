@@ -7375,11 +7375,13 @@ function carUse(cellRows){                     // → {เบอร์รถ: {t
   return m;
 }
 function useText(u){ return u ? 'มีงานแล้ว · ' + (u.trips.length ? u.trips.join(', ') + ' · ' : '') + u.drops + ' drop' : 'ว่าง'; }
+const HIDE_CARS = ['NO.518', 'NO.626'];       // รถที่ไม่ขึ้นในแผงรถ/รายการเลือก (ถ้ามีงานในแผนยังขึ้นในกลุ่มจัดแล้ว)
+const NOCAR = {test: k => HIDE_CARS.indexOf(String(k).toUpperCase()) >= 0 || (k !== String(k).toUpperCase() && /^no/i.test(k))};   // + ชื่อซ้ำตัวเล็ก เช่น No.418 (ใช้ NO.418)
 function allCars(){
   const set = {};
   Object.keys(CARS || {}).forEach(k => { set[k] = 1; });
   ((OPTS && OPTS.suggest && OPTS.suggest['15']) || []).forEach(k => { set[k] = 1; });
-  return Object.keys(set).sort((a, b) => a.localeCompare(b, 'th', {numeric: true}));
+  return Object.keys(set).filter(k => !NOCAR.test(k)).sort((a, b) => a.localeCompare(b, 'th', {numeric: true}));
 }
 function refreshCarList(cellRows){             // รายการเบอร์รถในช่องเลือก: รถว่างขึ้นก่อน + ป้ายสถานะ
   const dl = document.getElementById('dl15');
@@ -7530,7 +7532,7 @@ function drawAhead(){
   if(AH_WARN !== warn.length){ AH_WARN = warn.length; updateCarBar(); }
   const bad = (lg, codes) => codes.some(c => c === '👤✕' || (c && kd(lg, c) !== 'ok'));
   const q = AH_Q.toLowerCase(), hit = t => !q || t.toLowerCase().indexOf(q) >= 0;
-  const cars = Object.keys(carRows).filter(k => (AH_ALL || bad(j.car_legend, carRows[k])) && hit(k)).sort((a, b) => a.localeCompare(b, 'th', {numeric: true}));
+  const cars = Object.keys(carRows).filter(k => !NOCAR.test(k) && (AH_ALL || bad(j.car_legend, carRows[k])) && hit(k)).sort((a, b) => a.localeCompare(b, 'th', {numeric: true}));
   const ppl = j.drivers.filter(x => (AH_ALL || bad(j.driver_legend, x.codes)) && hit(x.key + ' ' + carsOf(x.key).join(' '))).sort((a, b) => a.key.localeCompare(b.key, 'th'));
   const head = '<tr><th class="nm">รถ / ชื่อ</th>' + j.days.map(d => { const w = new Date(d + 'T00:00:00').getDay();
     return '<th class="' + (w === 0 || w === 6 ? 'we ' : '') + (d === todayISO() ? 'cur' : '') + '">' + TH_DOW[w] + '<br>' + d.slice(8, 10) + '/' + d.slice(5, 7) + '</th>'; }).join('') + '</tr>';
