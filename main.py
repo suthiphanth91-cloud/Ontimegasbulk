@@ -3770,6 +3770,32 @@ def _group(items: list, key: str) -> dict:
     return out
 
 
+def _by_car(items: list) -> list:
+    """สรุปรายคัน: เวลารอโหลด/โหลด ต่ำสุด-สูงสุด-เฉลี่ย นับ 1 ครั้งต่อเที่ยว (หลาย drop ในเที่ยวเดียวใช้เวลาโหลดเดียวกัน)
+    + เที่ยวที่โหลดนานสุดของคันนั้น (วันที่ / ต้นทาง / เลข JOB) · เรียงจากโหลดนานสุดลงมา"""
+    trips: dict = {}
+    for x in items:
+        if not x["car"]:
+            continue
+        k = (x["car"], x["job"] or f'{x["date"]}|{x["row"]}')
+        t = trips.setdefault(k, {"car": x["car"], "date": x["date"], "origin": x["origin"], "job": x["job"], "wait": None, "load": None})
+        if t["wait"] is None and x["wait"] is not None:
+            t["wait"] = x["wait"]
+        if t["load"] is None and x["load"] is not None:
+            t["load"] = x["load"]
+    cars: dict = {}
+    for t in trips.values():
+        cars.setdefault(t["car"], []).append(t)
+    out = []
+    for car, ts in cars.items():
+        loads = [t for t in ts if t["load"] is not None]
+        top = max(loads, key=lambda t: t["load"]) if loads else None
+        out.append({"car": car, "trips": len(ts), "wait": _stat([t["wait"] for t in ts if t["wait"] is not None]),
+                    "load": _stat([t["load"] for t in loads]),
+                    "top": {k: top[k] for k in ("date", "origin", "job", "load")} if top else None})
+    return sorted(out, key=lambda c: (-(c["load"]["max"] or -1), c["car"]))
+
+
 def build_ontime_report(rows: list, d_from: str, d_to: str, f: dict) -> dict:
     """rows = แถวของชีตแผนงาน (รวมหัวตาราง) → สรุปรายงาน On Time ของวันที่ d_from..d_to ตามตัวกรอง f"""
     dist = _rep_distances()
@@ -3858,6 +3884,7 @@ def build_ontime_report(rows: list, d_from: str, d_to: str, f: dict) -> dict:
                 "wait": avg(col("wait")), "load": avg(col("load")), "travel": avg(col("travel")), "unload": avg(col("unload"))},
         "by_origin": [{"origin": k, "trips": len({y["job"] or y["row"] for y in v}),
                        "wait": _stat(col("wait", v)), "load": _stat(col("load", v))} for k, v in sorted(by_origin.items())],
+        "by_car": _by_car(items),
         "by_vtype": [{"vtype": k, "trips": len(v)} for k, v in sorted(by_vtype.items())],
         "by_dest": sorted([{"jtype": k[0], "dest": k[1], "drops": len(v), "n": len(col("unload", v)), "travel": avg(col("travel", v)),
                             "unload": avg(col("unload", v))} for k, v in by_dest.items() if col("unload", v)],
@@ -5820,6 +5847,8 @@ REPORT_HTML = """<!doctype html>
     </div>
     <section class="panel w12"><div class="ph"><h3>สรุปตามต้นทาง</h3><span class="sub">นาที</span></div><p class="hint"><b>รอโหลด</b> = เข้าลาน → เริ่มโหลด · <b>โหลด</b> = เริ่มโหลด → โหลดเสร็จ · ต่ำสุด / สูงสุด / เฉลี่ย ของแต่ละต้นทาง · กดหัวคอลัมน์เพื่อเรียง</p>
       <div class="tw" style="max-height:none"><table><thead><tr class="grp"><th colspan="2"></th><th colspan="3" class="gw">⏳ เวลารอโหลดสินค้า (นาที)</th><th colspan="3" class="gl">⛽ เวลาโหลดสินค้า (นาที)</th></tr><tr id="oHead"></tr></thead><tbody id="tOrigin"></tbody></table></div></section>
+    <section class="panel w12"><div class="ph"><h3>สรุปตามรถ — คันไหนรอโหลด / โหลดนานสุด</h3><span class="sub">นาที</span></div><p class="hint">นับ 1 ครั้งต่อเที่ยว (หลาย drop ในเที่ยวเดียวไม่นับซ้ำ) · เรียงจาก <b>โหลดนานสุด</b> ลงมา · <b>เที่ยวที่โหลดนานสุด</b> = วันที่ / ต้นทาง ของครั้งนั้น · กดหัวคอลัมน์เพื่อเรียง · กดเบอร์รถเพื่อกรอง</p>
+      <div class="tw" style="max-height:480px"><table><thead><tr class="grp"><th colspan="2"></th><th colspan="2" class="gw">⏳ รอโหลด (นาที)</th><th colspan="3" class="gl">⛽ โหลด (นาที)</th><th></th></tr><tr id="cHead"></tr></thead><tbody id="tCar"></tbody></table></div></section>
     <section class="panel w6"><div class="ph"><h3>สาเหตุ On Time / ล่าช้า</h3><span class="sub" id="whySub"></span></div><p class="hint">จากคอลัมน์ <b>สาเหตุ On Time</b> ในชีต · นับเป็นจำนวนงาน · กดชื่อสาเหตุเพื่อดูงานนั้น</p><div id="cWhy"></div></section>
     <section class="panel w6"><div class="ph"><h3>สาเหตุแก้ไขงาน</h3><span class="sub" id="fixSub"></span></div><p class="hint">จากคอลัมน์ <b>สาเหตุแก้ไขงาน</b> ในชีต · เช่น ลูกค้ายกเลิก, ปลายทางใหม่ · กดชื่อสาเหตุเพื่อดูงานนั้น</p><div id="cFix"></div></section>
     <section class="panel w12"><div class="ph"><h3>เวลาที่อยู่ในสถานี (เฉลี่ย)</h3><span class="sub">นาที</span></div><p class="hint">รถจอดอยู่ที่ปลายทางนานเท่าไร (<b>ถึงปลายทาง → ออกจากปลายทาง</b>) แยกตามประเภทงาน · <b>ตัวเลขมาก = ลงของนาน</b> · เรียงจากนานสุดลงมา · กดหัวการ์ดหรือชื่อปลายทางเพื่อกรอง</p><div id="cDest"></div></section>
@@ -5971,13 +6000,13 @@ function render(){
   drawOrigin(); drawClass();
   bars('cVtype', REP.by_vtype, x => x.vtype, x => x.trips, ' เที่ยว', 'vtype', x => x.vtype + ': ' + x.trips + ' เที่ยว', x => vcol(x.vtype));
   drawDest(); drawWhy(); drawTrend();
-  drawOriginTable();
+  drawOriginTable(); drawCarTable();
   drawRows();
 }
 // ── เรียงตาราง: กดหัวคอลัมน์ ครั้งแรก น้อย→มาก · อีกครั้ง มาก→น้อย (ค่าว่างอยู่ท้ายเสมอ) ──
 function toNum(v){ if(v == null || v === '') return null; const n = Number(String(v).replace(/,/g, '')); return isNaN(n) ? null : n; }
 function hhmm(v){ const m = String(v || '').split(':'); return m.length > 1 ? String(m[0]).trim().padStart(2, '0') + ':' + m[1].slice(0, 2) : String(v || ''); }
-const SORTS = {o: null, r: null};
+const SORTS = {o: null, r: null, c: null};
 function sortList(list, cols, st){
   if(!st) return list;
   const c = cols.find(x => x.k === st.k);
@@ -5996,6 +6025,20 @@ const OCOLS = [
   {k: 'origin', t: 'ต้นทาง', v: o => o.origin}, {k: 'trips', t: 'เที่ยว', n: 1, v: o => o.trips},
   {k: 'wmin', t: 'ต่ำสุด', n: 1, g: 'w', v: o => o.wait.min}, {k: 'wmax', t: 'สูงสุด', n: 1, g: 'w', v: o => o.wait.max}, {k: 'wavg', t: 'เฉลี่ย', n: 1, g: 'w', v: o => o.wait.avg},
   {k: 'lmin', t: 'ต่ำสุด', n: 1, g: 'l', v: o => o.load.min}, {k: 'lmax', t: 'สูงสุด', n: 1, g: 'l', v: o => o.load.max}, {k: 'lavg', t: 'เฉลี่ย', n: 1, g: 'l', v: o => o.load.avg}];
+const CCOLS = [
+  {k: 'car', t: 'เบอร์รถ', v: c => c.car}, {k: 'trips', t: 'เที่ยว', n: 1, v: c => c.trips},
+  {k: 'wavg', t: 'เฉลี่ย', n: 1, g: 'w', v: c => c.wait.avg}, {k: 'wmax', t: 'สูงสุด', n: 1, g: 'w', v: c => c.wait.max},
+  {k: 'lmin', t: 'ต่ำสุด', n: 1, g: 'l', v: c => c.load.min}, {k: 'lavg', t: 'เฉลี่ย', n: 1, g: 'l', v: c => c.load.avg}, {k: 'lmax', t: 'สูงสุด', n: 1, g: 'l', v: c => c.load.max},
+  {k: 'top', t: 'เที่ยวที่โหลดนานสุด', v: c => c.top ? c.top.date : ''}];
+function drawCarTable(){
+  const el = document.getElementById('tCar'); if(!el) return;
+  document.getElementById('cHead').innerHTML = headHtml(CCOLS, 'c');
+  el.innerHTML = sortList(REP.by_car || [], CCOLS, SORTS.c).map(c => '<tr><td class="k" data-k="car" data-v="' + esc(c.car) + '">' + esc(c.car) + '</td><td class="n">' + c.trips + '</td>' +
+    '<td class="n cw">' + num(c.wait.avg) + '</td><td class="n cw">' + num(c.wait.max) + '</td>' +
+    '<td class="n cl">' + num(c.load.min) + '</td><td class="n cl">' + num(c.load.avg) + '</td><td class="n cl"><b>' + num(c.load.max) + '</b></td>' +
+    '<td>' + (c.top ? dmy(c.top.date) + ' · ' + esc(c.top.origin) + ' <span class="sub" style="font-size:12px;color:var(--mut)">' + esc(c.top.job) + '</span>' : '–') + '</td></tr>').join('') ||
+    '<tr><td colspan="8" class="empty">ไม่มีข้อมูล</td></tr>';
+}
 const RCOLS = [
   {k: 'car', t: 'เบอร์รถ', v: x => x.car}, {k: 'date', t: 'วันที่', v: x => x.date}, {k: 'order', t: 'เลขออเดอร์', v: x => x.order},
   {k: 'origin', t: 'ต้นทาง', v: x => x.origin}, {k: 'jtype', t: 'ประเภทงาน', v: x => x.jtype}, {k: 'dest', t: 'ปลายทาง', v: x => x.dest}, {k: 'vtype', t: 'ประเภท', v: x => x.vtype},
@@ -6010,7 +6053,7 @@ document.addEventListener('click', e => {
   if(!th || !REP) return;
   const t = th.dataset.tbl, k = th.dataset.col, st = SORTS[t];
   SORTS[t] = {k: k, dir: st && st.k === k && st.dir > 0 ? -1 : 1};
-  if(t === 'o') drawOriginTable(); else drawRows();
+  if(t === 'o') drawOriginTable(); else if(t === 'c') drawCarTable(); else drawRows();
 });
 function drawOriginTable(){
   document.getElementById('oHead').innerHTML = headHtml(OCOLS, 'o');
