@@ -3927,7 +3927,7 @@ def build_ontime_report(rows: list, d_from: str, d_to: str, f: dict) -> dict:
         "by_jtype": sorted([{"jtype": jt, "drops": len(v), "n": len(col("unload", v)), "unload": avg(col("unload", v))}
                             for jt, v in _group(items, "jtype").items()], key=lambda d: -d["drops"]),
         "by_class": [{"cls": k, "n": v} for k, v in sorted(by_class.items())],
-        "rows": sorted(items, key=lambda x: (x["date"], x["origin"], x["car"], x["row"]))[:600],
+        "rows": sorted(items, key=lambda x: (x["date"], x["origin"], x["car"], x["row"]))[:6000],   # ส่งครบ (3 เดือนไม่ถึง) ให้เรียง/ค้นได้ทั้งช่วง
         "av_values": sorted(([k or "(ว่าง)", v] for k, v in av_seen.items()), key=lambda kv: -kv[1])[:12],
         "filters": {"origins": sorted({x["origin"] for x in items if x["origin"]}),
                     "vtypes": sorted({x["vtype"] for x in items if x["vtype"]}),
@@ -6186,8 +6186,9 @@ function bars(el, list, label, val, unit, key, tip, color){
 function drawRows(){
   const q = document.getElementById('q').value.trim().toLowerCase();
   document.getElementById('rowsHead').innerHTML = headHtml(RCOLS, 'r');
-  const rows = sortList(REP.rows.filter(x => !q || [x.car, x.dest, x.order, x.origin, x.job].join(' ').toLowerCase().indexOf(q) >= 0), RCOLS, SORTS.r);
-  document.getElementById('rowCount').textContent = 'แสดง ' + num(rows.length, 0) + ' จาก ' + num(REP.n_rows, 0) + ' แถว' + (REP.n_rows > REP.rows.length ? ' (สูงสุด ' + REP.rows.length + ' แถวแรก)' : '');
+  const all = sortList(REP.rows.filter(x => !q || [x.car, x.dest, x.order, x.origin, x.job].join(' ').toLowerCase().indexOf(q) >= 0), RCOLS, SORTS.r);
+  const rows = all.slice(0, 800);                     // เรียง/ค้นจากทุกแถว แล้วแสดง 800 แถวบนสุด (ตารางไม่หนืด)
+  document.getElementById('rowCount').textContent = 'พบ ' + num(all.length, 0) + ' จาก ' + num(REP.n_rows, 0) + ' แถว' + (all.length > rows.length ? ' · แสดง ' + rows.length + ' แถวบนสุด (เรียงหรือค้นหาเพื่อดูแถวอื่น)' : '');
   document.getElementById('rows').innerHTML = rows.map(x => '<tr><td class="k" data-k="car" data-v="' + esc(x.car) + '">' + esc(x.car) + '</td><td>' + dmy(x.date) + '</td><td>' + esc(x.order) +
     '</td><td>' + esc(x.origin) + '</td><td><span style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:' + jcol(x.jtype) + '"></span>' + esc(jname(x.jtype)) + '</td><td title="' + esc(x.dest) + '">' + esc(x.dest.length > 30 ? x.dest.slice(0, 29) + '…' : x.dest) + '</td><td>' + esc(x.vtype) + '</td><td class="n">' + esc(x.drop) +
     '</td><td class="n">' + esc(x.weight) + '</td><td>' + esc(x.sched) + '</td><td>' + esc(x.arrive) + '</td><td>' +
