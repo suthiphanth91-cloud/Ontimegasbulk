@@ -6656,7 +6656,8 @@ function render(){
   const segs = ORDER.map(k => [k, c[k]]);
   const goalLine = t.goal ? Math.min(100, t.goal / Math.max(t.goal, t.total) * 100) : 0;
   const fill = t.goal ? t.total / Math.max(t.goal, t.total) * 100 : 100;
-  const top = c.down_by[0], avg = MULTI ? ' · เฉลี่ยต่อวัน' : '', cu = MULTI ? 'คัน·วัน' : 'คัน';
+  const perDay = list => MULTI ? list.map(i => ({name: i.name, n: Math.round(i.n / (r.days || 1) * 10) / 10})) : list;   // หลายวัน = เฉลี่ยต่อวัน
+  const top = perDay(c.down_by)[0], avg = MULTI ? ' · เฉลี่ยต่อวัน' : '', cu = MULTI ? 'คัน/วัน' : 'คัน';
   const ps = [['run', p.run], ['free', p.free], ['down', p.down]];
   document.getElementById('kpis').innerHTML =
     '<div class="card k4"><div class="lab">รถพร้อมใช้งาน · ' + esc(rangeText()) + avg + '</div>' +
@@ -6692,10 +6693,10 @@ function render(){
 
   document.getElementById('cArea').innerHTML = rowsChart(r.by_area, 'area');
   document.getElementById('cType').innerHTML = rowsChart(r.by_type, 'vtype');
-  document.getElementById('cDown').innerHTML = bars(c.down_by, c.total * (r.days || 1), cu, {t: 'c'});
+  document.getElementById('cDown').innerHTML = bars(perDay(c.down_by), c.total, cu, {t: 'c'});
   document.getElementById('downSub').textContent = c.down ? (MULTI ? 'เฉลี่ย ' + n(c.down) + ' คัน/วัน' : 'รวม ' + c.down + ' คัน') + ' จาก ' + c.total : '';
   document.getElementById('cPpl').innerHTML = (p.total ? stack(ps, PK, p.total, 'พขร. ทั้งหมด ' + p.total + ' คน', true, {t: 'p'}) + legend(ps, PK, p.total, {t: 'p'}) : '<div class="empty">ไม่มีข้อมูล พขร.</div>') +
-    (p.down_by.length ? '<div class="divider"></div>' + bars(MULTI ? p.down_by.map(i => ({name: i.name, n: Math.round(i.n / (r.days || 1) * 10) / 10})) : p.down_by, p.total, MULTI ? 'คน/วัน' : 'คน', {t: 'p'}) : '');
+    (p.down_by.length ? '<div class="divider"></div>' + bars(perDay(p.down_by), p.total, MULTI ? 'คน/วัน' : 'คน', {t: 'p'}) : '');
   document.getElementById('pplSub').textContent = p.total ? 'ทั้งหมด ' + p.total + ' คน · พร้อมทำงาน ' + n(p.run + p.free) + (MULTI ? ' (เฉลี่ย/วัน)' : '') : '';
   drawRows();
   drawPeople();
@@ -9973,6 +9974,14 @@ async function loadChased(){
     try{ CHASED = JSON.parse(localStorage.getItem('gb_chased_'+curDate()) || '{}'); }
     catch(e2){ CHASED = {}; }
   }
+  overlayPending();
+}
+function overlayPending(){            // ที่เลือกไว้แต่ยังไม่ถึงรอบบันทึก = ยังเห็นบนจอเสมอ (ชีตยังไม่มี)
+  Object.keys(pendingSaves).forEach(k => {
+    const p = pendingSaves[k];
+    if(p.date && p.date !== curDate()) return;
+    if(p.status) CHASED[k] = {at: p.at || (CHASED[k] || {}).at || '', status: p.status}; else delete CHASED[k];
+  });
 }
 
 function getMyName(){                 // ถามชื่อครั้งแรกแล้วจำไว้ในเครื่องนี้ ไม่ต้องพิมพ์อีก
@@ -9995,8 +10004,8 @@ function tripLoc(t){                  // ข้อความ "วันที�
   return stamp + ' / ' + place;
 }
 
-async function saveStatus(k, status, t, loc, by){
-  const body = new URLSearchParams({ key:k, date:curDate(), status:status,
+async function saveStatus(k, status, t, loc, by, date){
+  const body = new URLSearchParams({ key:k, date:date || curDate(), status:status,
                                      car_no:t.car_no||'', customer:t.customer||'',
                                      location: loc||'', by: by||'' });
   if(!status) body.set('clear','1');
@@ -10008,7 +10017,9 @@ async function saveStatus(k, status, t, loc, by){
 // ไม่ยิงบันทึกลง Sheet ทันทีทุกครั้งที่เลือก — พักไว้ในเครื่องก่อน แล้วค่อยส่งรวม
 // (กันยิง API ถี่เกินไป) หน้าจอผู้ใช้เองยังอัปเดตทันทีเสมอ ปรับรอบได้ที่หน้า ⚙️ ตั้งค่า
 const PENDING_SAVE_MS = parseInt(localStorage.getItem('gb_save_interval') || '20', 10) * 60 * 1000;
-let pendingSaves = {};   // {k: {status, t}}
+let pendingSaves = {};   // {k: {status, t, by, loc, at, date}} — เก็บใน localStorage ด้วย ปิดหน้า/รีเฟรชแล้วไม่หาย
+try{ pendingSaves = JSON.parse(localStorage.getItem('gb_pending_saves') || '{}') || {}; }catch(e){ pendingSaves = {}; }
+function keepPending(){ try{ localStorage.setItem('gb_pending_saves', JSON.stringify(pendingSaves)); }catch(e){} }
 
 document.addEventListener('click', e => {          // ปุ่ม "จบงาน" ลัด — ไม่ต้องเปิดดรอปดาวน์เอง
   const btn = e.target.closest('.donebtn');
@@ -10034,7 +10045,8 @@ document.addEventListener('change', e => {
   // ถามชื่อ/อ่านพิกัด ณ ตอนกด (ไม่ใช่ตอน flush เพราะอาจรันตอนไม่มีใครอยู่หน้าจอ)
   const by  = b.value ? getMyName() : '';
   const loc = tripLoc(t);
-  pendingSaves[k] = {status: b.value, t: t, by: by, loc: loc};   // ทับของเดิมถ้าเลือกซ้ำก่อนถึงรอบบันทึก
+  pendingSaves[k] = {status: b.value, t: {car_no: t.car_no || '', customer: t.customer || ''}, by: by, loc: loc, at: now, date: curDate()};   // ทับของเดิมถ้าเลือกซ้ำก่อนถึงรอบบันทึก
+  keepPending();
   updateSaveNowBtn();
 });
 
@@ -10052,15 +10064,17 @@ async function flushPendingSaves(){
   if(!keys.length) return;
   const batch = pendingSaves;
   pendingSaves = {};
+  keepPending();
   updateSaveNowBtn();
   for(const k of keys){
-    const {status, t, loc, by} = batch[k];
+    const {status, t, loc, by, date} = batch[k];
     try{
-      const at = await saveStatus(k, status, t, loc, by);
+      const at = await saveStatus(k, status, t || {}, loc, by, date);
       if(status && at){ CHASED[k] = {at: at, status: status}; }
       localStorage.setItem('gb_chased_'+curDate(), JSON.stringify(CHASED));
     }catch(err){
-      pendingSaves[k] = batch[k];   // ล้มเหลว เก็บไว้ลองรอบหน้าใหม่
+      if(!pendingSaves[k]) pendingSaves[k] = batch[k];   // ล้มเหลว เก็บไว้ลองรอบหน้าใหม่ (ถ้าระหว่างนั้นเลือกใหม่ ใช้ค่าใหม่)
+      keepPending();
       const w = document.getElementById('nopass');
       w.hidden = false;
       const isQuota = /429|quota/i.test(err.message || '');
@@ -10076,7 +10090,18 @@ async function flushPendingSaves(){
   render();
 }
 setInterval(flushPendingSaves, PENDING_SAVE_MS);
-window.addEventListener('beforeunload', () => { if(Object.keys(pendingSaves).length) flushPendingSaves(); });
+function beaconPending(){
+  if(!navigator.sendBeacon) return;
+  Object.keys(pendingSaves).forEach(k => {
+    const p = pendingSaves[k], t = p.t || {};
+    const body = new URLSearchParams({key: k, date: p.date || curDate(), status: p.status || '', car_no: t.car_no || '', customer: t.customer || '', location: p.loc || '', by: p.by || ''});
+    if(!p.status) body.set('clear', '1');
+    navigator.sendBeacon('/api/chase', body);
+  });
+}
+window.addEventListener('pagehide', () => { if(Object.keys(pendingSaves).length) beaconPending(); });
+document.addEventListener('visibilitychange', () => { if(document.visibilityState === 'hidden' && Object.keys(pendingSaves).length) flushPendingSaves(); });
+setTimeout(() => { updateSaveNowBtn(); if(Object.keys(pendingSaves).length) flushPendingSaves(); }, 4000);   // เปิดหน้าใหม่ = ส่งที่ค้างจากครั้งก่อน
 
 function mins(hhmm){                  // "14:30" → 870
   const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm||''));
