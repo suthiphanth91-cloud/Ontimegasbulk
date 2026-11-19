@@ -4228,6 +4228,33 @@ def _plan_busy(r: list, today: str):
     return start, min(end, cap)
 
 
+def _status_notes(kind: str, tab: str, rows: list, cols: list, span: list) -> dict:
+    """โน้ต (คอมเมนต์) ในช่องสถานะของเดือนที่ดู → {"car|PTL.457|2026-11-19": "ข้อความ"} · อ่านไม่ได้ = ว่าง"""
+    have = [c for c in cols if c is not None]
+    if not have or not rows:
+        return {}
+    r1, r2 = min(r["row"] for r in rows), max(r["row"] for r in rows)
+    c1, c2 = min(have), max(have)
+    rng = f"{_qtab(tab)}!{_col_letter(c1 + 1)}{r1}:{_col_letter(c2 + 1)}{r2}"
+    try:
+        meta = _status_file().fetch_sheet_metadata(params={"ranges": rng, "fields": "sheets.data(startRow,startColumn,rowData.values.note)"})
+    except Exception:
+        return {}
+    by_row = {r["row"]: r["key"] for r in rows}
+    by_col = {c: d for c, d in zip(cols, span) if c is not None}
+    out = {}
+    for sht in meta.get("sheets", []):
+        for d in sht.get("data", []):
+            sr, sc = d.get("startRow", 0), d.get("startColumn", 0)
+            for i, rd in enumerate(d.get("rowData", [])):
+                for j, v in enumerate(rd.get("values", [])):
+                    nt = (v or {}).get("note")
+                    key, day = by_row.get(sr + i + 1), by_col.get(sc + j)
+                    if nt and key and day:
+                        out[f"{kind}|{key}|{day}"] = nt
+    return out
+
+
 def _ahead_data(day: str, n: int, fresh: bool = False) -> dict:
     d0 = datetime.strptime(day, "%Y-%m-%d")
     span = [(d0 + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(n)]
@@ -4295,10 +4322,13 @@ def _ahead_data(day: str, n: int, fresh: bool = False) -> dict:
     real_codes(READY_DRIVER_TAB, ["ชื่อ-สกุล"], READY_DRIVER_FIRST_ROW, drivers, "driver")
     legends = {"car": {k.upper(): k for k in cs["legend"]}, "driver": {k.upper(): k for k in ds["legend"]}}
     miss = sorted({d for d, c in zip(span, c_cols) if c is None} | {d for d, c in zip(span, d_cols) if c is None})
+    notes = {}
+    for kind, tab, rows, cols in (("car", READY_CAR_TAB, cars, c_cols), ("driver", READY_DRIVER_TAB, drivers, d_cols)):
+        notes.update(_status_notes(kind, tab, rows, cols, span))
     return {"from": day, "days": span, "cars": cars, "drivers": drivers, "today": _thai_now().strftime("%Y-%m-%d"),
             "car_legend": _status_legend(cs["legend"]), "driver_legend": _status_legend(ds["legend"]),
             "auto": {"car": list(c_auto) if c_auto else None, "driver": list(d_auto) if d_auto else None}, "_lg": legends,
-            "has_plan": prow is not None, "missing": miss, "_cols": {"car": c_cols, "driver": d_cols},
+            "has_plan": prow is not None, "missing": miss, "_cols": {"car": c_cols, "driver": d_cols}, "notes_map": notes,
             "notes": [x for x in (cs["note"], ds["note"]) if x and "ยังไม่มีคอลัมน์" not in x]
                      + ([] if prow is not None else ["อ่านชีตแผนงานไม่ได้ — ยังเติมสถานะจากแผนงานไม่ได้"])}
 
@@ -4401,6 +4431,7 @@ class StatusEdit(BaseModel):
     old: str = ""        # รหัสที่หน้าเว็บเห็นก่อนแก้ (กันเขียนทับคนอื่น) — เช็กเฉพาะวันแรก
     by: str = ""
     to: str = ""         # ลงถึงวันที่ (ว่าง = วันเดียว) — ลาหลายวัน / ซ่อมหลายวัน / ลงล่วงหน้า
+    note: str = ""       # หมายเหตุ → ใส่เป็นโน้ต (คอมเมนต์) ในทุกช่องที่ลง · ว่าง = ไม่แตะโน้ตเดิม
 
 
 @app.post("/api/plan/status", include_in_schema=False)
@@ -4462,8 +4493,16 @@ def plan_status_edit(p: StatusEdit):
     except Exception as e:
         raise HTTPException(502, f"เขียนไม่ได้ — {type(e).__name__}")
     _drop_sheet_cache(STATUS_SHEET_ID, tab)
+    note = p.note.strip()[:500]
+    note_ok = None
+    if note:
+        try:                                                      # โน้ตในช่อง: เขียนไม่ได้ไม่ถือว่าการลงรหัสล้มเหลว
+            sh.worksheet(tab).update_notes({c: note for c in cells})
+            note_ok = True
+        except Exception:
+            note_ok = False
     log_row = [_thai_now().strftime("%Y-%m-%d %H:%M:%S"), p.by.strip()[:40], tab, p.key.strip(),
-               day if last == day else f"{day} ถึง {last}", a1, hit["code"], code]
+               day if last == day else f"{day} ถึง {last}", a1, hit["code"], code + (f" · หมายเหตุ: {note}" if note else "")]
     try:                                                          # ประวัติ: เขียนไม่ได้ไม่ถือว่าการแก้ล้มเหลว
         try:
             sh.values_append(f"'{STATUS_LOG_TAB}'!A1", {"valueInputOption": "RAW"}, {"values": [log_row]})
@@ -4472,7 +4511,7 @@ def plan_status_edit(p: StatusEdit):
             lg.append_rows([["เวลา", "ผู้แก้", "แท็บ", "รถ/ชื่อ", "วันที่", "ช่อง", "เดิม", "ใหม่"], log_row], value_input_option="RAW")
     except Exception:
         pass
-    return {"ok": True, "code": code, "cell": a1, "days": len(cells)}
+    return {"ok": True, "code": code, "cell": a1, "days": len(cells), "note": note if note_ok else "", "note_ok": note_ok}
 
 
 def _ready_plan(rows: list, date_iso: str) -> tuple:
@@ -7082,6 +7121,8 @@ PLAN_HTML = """<!doctype html>
   #ahPop .wn li[data-wk]{cursor:pointer;text-decoration:underline dotted}
   #ahPop #ahAuto{display:block;margin:0 0 6px}
   #ahPop td.c.pl{box-shadow:inset 0 -3px 0 #2563eb}
+  #ahPop td.c.nt{background-image:linear-gradient(225deg,#f59e0b 7px,transparent 7px)}
+  #stPop .stnote{display:block;width:100%;box-sizing:border-box;margin:4px 0 8px;font:inherit;font-size:13px;padding:6px 8px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:inherit}
   #ahPop td.c.warn{outline:2px solid #dc2626;outline-offset:-2px}
   #ahPop td.c.warn::after{content:'⚠';font-size:10px;margin-left:1px}
   .carbar .ahb.wn{border-color:#dc2626;background:#fef2f2;color:#991b1b}
@@ -7537,9 +7578,9 @@ function drawAhead(){
   const head = '<tr><th class="nm">รถ / ชื่อ</th>' + j.days.map(d => { const w = new Date(d + 'T00:00:00').getDay();
     return '<th class="' + (w === 0 || w === 6 ? 'we ' : '') + (d === todayISO() ? 'cur' : '') + '">' + TH_DOW[w] + '<br>' + d.slice(8, 10) + '/' + d.slice(5, 7) + '</th>'; }).join('') + '</tr>';
   const cell = (lg, c, d, k, kind, raw, pl) => { const w = wk[kind + '|' + k + '|' + d];
-    const kc = c === '👤✕' ? 'nd' : kd(lg, c), run = kc === 'ok' && c && (stKind(lg, c) === 'run' || pl);
-    return '<td class="c ' + (run ? 'run' : kc) + (pl ? ' pl' : '') + (w ? ' warn' : '') + '" data-d="' + d + '" data-kind="' + kind + '" data-key="' + esc(k) + '" data-code="' + esc(raw) + '" title="' +
-    esc(k + ' · ' + dmy(d) + (c ? ' · ' + c + ' ' + (c === '👤✕' ? 'พขร. ประจำรถไม่มา' : stDesc(lg, c)) : ' · ยังไม่ได้ลง') + (pl ? ' · มีงานในแผนงาน' : '') + (w ? ' · ⚠ ' + w : '')) + '">' + esc(c) + '</td>'; };
+    const kc = c === '👤✕' ? 'nd' : kd(lg, c), run = kc === 'ok' && c && (stKind(lg, c) === 'run' || pl), nt = ahNote(kind, k, d);
+    return '<td class="c ' + (run ? 'run' : kc) + (pl ? ' pl' : '') + (nt ? ' nt' : '') + (w ? ' warn' : '') + '" data-d="' + d + '" data-kind="' + kind + '" data-key="' + esc(k) + '" data-code="' + esc(raw) + '" title="' +
+    esc(k + ' · ' + dmy(d) + (c ? ' · ' + c + ' ' + (c === '👤✕' ? 'พขร. ประจำรถไม่มา' : stDesc(lg, c)) : ' · ยังไม่ได้ลง') + (pl ? ' · มีงานในแผนงาน' : '') + (nt ? ' · 📝 ' + nt : '') + (w ? ' · ⚠ ' + w : '')) + '">' + esc(c) + '</td>'; };
   const planOf = {};
   j.cars.forEach(x => { planOf['car|' + x.key] = x.plan || []; }); j.drivers.forEach(x => { planOf['driver|' + x.key] = x.plan || []; });
   const span = j.days.length + 1;
@@ -7601,6 +7642,7 @@ function multiAhead(rows, lo, hi, anchor){
   p.innerHTML = '<div class="hd"><span>' + (kind === 'car' ? '🚛 ' : '👤 ') + rows.length + (kind === 'car' ? ' คัน' : ' คน') + ' × ' + nd + ' วัน</span><button type="button" data-x="1" title="ปิด">✕</button></div>' +
     '<p style="margin:2px 0;font-weight:700;color:#1d4ed8">' + dmy(lo) + (hi > lo ? ' ถึง ' + dmy(hi) : '') + ' — กดรหัสได้เลย</p>' +
     '<p class="mut" style="margin:0">' + rows.map(r => esc(r.key)).join(', ') + '</p>' +
+    '<input id="stNote" class="stnote" placeholder="📝 หมายเหตุ (ใส่เป็นคอมเมนต์ในชีต) — พิมพ์ก่อนกดรหัส" maxlength="500">' +
     '<div class="codes" style="margin-top:8px">' + lg.map(c => '<button type="button" data-code="' + esc(c.code) + '" class="' + cls(c.kind) + '" title="' + esc(c.desc) + '"><b>' + esc(c.code) + '</b>' + esc(c.desc) + '</button>').join('') +
     '<button type="button" data-code="">✕ ล้าง</button></div>';
   document.body.appendChild(p);
@@ -7612,8 +7654,9 @@ function multiAhead(rows, lo, hi, anchor){
     if(e.target.closest('[data-x]')){ closeStatus(); return; }
     const b = e.target.closest('button[data-code]'); if(!b) return;
     const by = editorName(); if(!by) return;
+    const note = ((p.querySelector('#stNote') || {}).value || '').trim();
     closeStatus();
-    rows.forEach(x => ahCommit(x.kind, x.key, lo, hi, b.dataset.code, x.old, by));
+    rows.forEach(x => ahCommit(x.kind, x.key, lo, hi, b.dataset.code, x.old, by, note));
   });
 }
 // กดช่องในตารางล่วงหน้า → ป๊อปอัปเลือกรหัส ลงชีต DEMO ทันที (ลงหลายวันได้) แล้ววาดตารางใหม่
@@ -7628,7 +7671,9 @@ function editAhead(td, toPre){
     '<div class="rng">📅 ลงตั้งแต่ <b>' + dmy(d) + '</b> ถึง <input type="date" id="stTo" value="' + (toPre || d) + '" min="' + d + '"></div>' +
     (toPre && toPre > d ? '<p style="margin:2px 0;font-weight:700;color:#1d4ed8">ลากเลือกไว้ ' + (Math.round((new Date(toPre) - new Date(d)) / 86400000) + 1) + ' วัน — กดรหัสได้เลย</p>' : '') +
     '<p class="mut" style="margin:0">ลาหลายวัน / ซ่อมหลายวัน เลือกวันสุดท้ายก่อน แล้วค่อยกดรหัส</p>' +
-    '<h5>' + (cur ? 'ตอนนี้ <b>' + esc(cur) + '</b> ' + esc(stDesc(lg, cur)) : 'ยังไม่ได้ลง') + '</h5>' + stCodes(kind, key, cur, lg) +
+    '<h5>' + (cur ? 'ตอนนี้ <b>' + esc(cur) + '</b> ' + esc(stDesc(lg, cur)) : 'ยังไม่ได้ลง') + '</h5>' +
+    (ahNote(kind, key, d) ? '<p class="mut" style="margin:0 0 4px">📝 หมายเหตุเดิม: ' + esc(ahNote(kind, key, d)) + '</p>' : '') +
+    '<input id="stNote" class="stnote" placeholder="📝 หมายเหตุ (ใส่เป็นคอมเมนต์ในชีต) — พิมพ์ก่อนกดรหัส" maxlength="500">' + stCodes(kind, key, cur, lg) +
     '<p class="mut" style="margin-top:10px"><a href="#" data-go="1">📋 ไปวันนี้ในแผนงาน</a> · บันทึกลงไฟล์ DEMO ข้อมูลรถ+พขร ทันที</p>';
   document.body.appendChild(p);
   const r = td.getBoundingClientRect(), w = p.offsetWidth, h = p.offsetHeight;
@@ -7641,14 +7686,16 @@ function editAhead(td, toPre){
     if(e.target.closest('[data-go]')){ e.preventDefault(); closeStatus(); closeAhead(); dateEl.value = d; load(); return; }
     const b = e.target.closest('button[data-kind]'); if(!b) return;
     const to = toEl.value && toEl.value > d ? toEl.value : '';
-    if(!to && b.dataset.code.toUpperCase() === cur.toUpperCase()) return;
+    if(!to && b.dataset.code.toUpperCase() === cur.toUpperCase() && !((p.querySelector('#stNote') || {}).value || '').trim()) return;
     if(to && to !== toPre){                                  // ลากเลือกช่วงมาแล้ว ไม่ต้องถามซ้ำ
       const n = Math.round((new Date(to) - new Date(d)) / 86400000) + 1;
       if(!confirm('ลง ' + (b.dataset.code || '(ล้าง)') + ' ให้ ' + key + ' ตั้งแต่ ' + dmy(d) + ' ถึง ' + dmy(to) + ' (' + n + ' วัน) — ถ้าวันไหนลงไว้แล้วจะถูกเขียนทับ ?')) return;
     }
     const by = editorName(); if(!by) return;
+    const note = (p.querySelector('#stNote') || {}).value || '';
+    if(!to && b.dataset.code.toUpperCase() === cur.toUpperCase() && !note.trim()) return;
     closeStatus();
-    ahCommit(kind, key, d, to || d, b.dataset.code, cur, by);
+    ahCommit(kind, key, d, to || d, b.dataset.code, cur, by, note.trim());
   });
 }
 // ── ระบายสี: เลือกรหัสครั้งเดียว แล้วกด/ลากผ่านช่องวันในแถวเดียวกัน = ลงรหัสช่วงนั้นทันที ──
@@ -7685,7 +7732,8 @@ function ahSaving(){
 }
 window.addEventListener('beforeunload', e => { if(AH_SAVING){ e.preventDefault(); e.returnValue = ''; } });
 // ลงรหัสช่วง lo..hi ให้ key: เปลี่ยนบนจอก่อน แล้วค่อยส่งเข้าคิว
-function ahCommit(kind, key, lo, hi, code, old, by){
+function ahNote(kind, key, d){ return ((AH && AH.notes_map) || {})[kind + '|' + key + '|' + d] || ''; }
+function ahCommit(kind, key, lo, hi, code, old, by, note){
   const row = ahRow(kind, key), prev = row.codes.slice();
   const stPrev = STATUS ? (kind === 'car' ? STATUS.cars : STATUS.drivers)[key] : undefined;
   AH.days.forEach((x, i) => { if(x >= lo && x <= hi) row.codes[i] = code; });
@@ -7693,7 +7741,7 @@ function ahCommit(kind, key, lo, hi, code, old, by){
   if(onDay){ (kind === 'car' ? STATUS.cars : STATUS.drivers)[key] = code; updateCarBar(); }
   drawAhead();
   AH_SAVING++; ahSaving();
-  const body = JSON.stringify({date: lo, to: hi > lo ? hi : '', kind: kind, key: key, code: code, old: old, by: by});
+  const body = JSON.stringify({date: lo, to: hi > lo ? hi : '', kind: kind, key: key, code: code, old: old, by: by, note: note || ''});
   AH_CHAIN = AH_CHAIN.then(async () => {
     let msg = '', cur = null;
     for(let t = 0; t < 6; t++){
@@ -7702,6 +7750,10 @@ function ahCommit(kind, key, lo, hi, code, old, by){
         const res = await fetch('/api/plan/status', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: body});
         const j = await res.json().catch(() => ({}));
         if(!res.ok){ msg = j.detail || ('HTTP ' + res.status); busy = res.status === 429; if(res.status === 409 && 'current' in j) cur = j.current; }
+        else if(note){
+          if(j.note_ok){ AH.notes_map = AH.notes_map || {}; AH.days.forEach(x => { if(x >= lo && x <= hi) AH.notes_map[kind + '|' + key + '|' + x] = note; }); drawAhead(); }
+          else toast('ลงรหัส ' + key + ' แล้ว แต่ใส่หมายเหตุในชีตไม่สำเร็จ', true);
+        }
       }catch(err){ msg = err.message; }
       if(!busy) break;
       const el = document.getElementById('ahSave');
