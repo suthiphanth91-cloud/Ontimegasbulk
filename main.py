@@ -4150,7 +4150,7 @@ def _status_block() -> str:
 
 
 def _status_tabs(date_iso: str) -> tuple:
-    cs = _ready_sheet(READY_CAR_TAB, ["เบอร์รถ", "ทะเบียนรถ"], date_iso, READY_CAR_FIRST_ROW, sid=STATUS_SHEET_ID)
+    cs = _ready_sheet(READY_CAR_TAB, ["เบอร์รถ", "ทะเบียนรถ"], date_iso, 0, sid=STATUS_SHEET_ID)   # ไฟล์ DEMO: อ่านทุกแถวใต้หัวตาราง (มีรถแถว 17–19) · กรองเฉพาะเบอร์รถอีกชั้น
     ds = _ready_sheet(READY_DRIVER_TAB, ["ชื่อ-สกุล"], date_iso, READY_DRIVER_FIRST_ROW, sid=STATUS_SHEET_ID)
     ds["legend"] = dict(_DRIVER_CODE_EXTRA, **ds["legend"])
     return cs, ds
